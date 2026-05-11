@@ -157,7 +157,7 @@ jobs:
       - name: Install Rust (MSRV)
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.92.0
+          toolchain: 1.95.0
 
       - name: Cache Cargo
         uses: actions/cache@v5
@@ -243,6 +243,7 @@ jobs:
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
         with:
+          toolchain: nightly
           components: rust-src
 
       - name: Install cargo-fuzz
@@ -262,6 +263,8 @@ jobs:
           restore-keys: ${{ runner.os }}-fuzz-
 
       - name: Run fuzz targets briefly
+        env:
+          RUSTUP_TOOLCHAIN: nightly
         run: |
           cargo fuzz run load_state --target x86_64-unknown-linux-gnu -- -max_total_time=60
           cargo fuzz run resolve_token --target x86_64-unknown-linux-gnu -- -max_total_time=60
@@ -293,6 +296,9 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - name: Add cross-compilation target
+        run: rustup target add ${{ matrix.target }}
 
       - name: Cache Cargo
         uses: actions/cache@v5
