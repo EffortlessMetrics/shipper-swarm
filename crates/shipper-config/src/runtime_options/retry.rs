@@ -152,6 +152,24 @@ mod tests {
     }
 
     #[test]
+    fn resolve_partial_cli_overrides_keep_preset_policy_defaults_for_unset_fields() {
+        let config = make_config(RetryPolicy::Conservative);
+        let cli = CliOverrides {
+            max_attempts: Some(7),
+            ..Default::default()
+        };
+        let policy_defaults = config.policy.to_config();
+
+        let resolved = resolve(&config, &cli);
+
+        assert_eq!(resolved.max_attempts, 7);
+        assert_eq!(resolved.base_delay, policy_defaults.base_delay);
+        assert_eq!(resolved.max_delay, policy_defaults.max_delay);
+        assert_eq!(resolved.strategy, policy_defaults.strategy);
+        assert!((resolved.jitter - policy_defaults.jitter).abs() < f64::EPSILON);
+    }
+
+    #[test]
     fn resolve_cli_overrides_take_priority_over_custom_policy() {
         let config = RetryConfig {
             policy: RetryPolicy::Custom,
