@@ -232,51 +232,222 @@ mod strip_ansi_tests {
 }
 
 fn redact_line(line: &str) -> String {
-    let mut out = line.to_string();
+    let out = redact_authorization_bearer(line);
+    let out = redact_token_assignments(&out);
+    redact_cargo_token_env(&out)
+}
 
-    if let Some(pos) = out.to_ascii_lowercase().find("authorization:") {
-        let after = &out[pos..];
-        if let Some(bearer_pos) = after.to_ascii_lowercase().find("bearer ") {
-            let redact_start = pos + bearer_pos + "bearer ".len();
-            out = format!("{}[REDACTED]", &out[..redact_start]);
-        }
-    }
-
-    if let Some(pos) = out.to_ascii_lowercase().find("token") {
-        let after_key = &out[pos + "token".len()..];
-        let trimmed = after_key.trim_start();
-        if trimmed.starts_with("= ") || trimmed.starts_with("=") {
-            let eq_offset = pos + "token".len() + (after_key.len() - trimmed.len());
-            let after_eq = trimmed.trim_start_matches('=').trim_start();
-            if after_eq.starts_with('"') || after_eq.starts_with('\'') {
-                out = format!("{}= \"[REDACTED]\"", &out[..eq_offset]);
-            } else if !after_eq.is_empty() {
-                out = format!("{}= [REDACTED]", &out[..eq_offset]);
+fn redact_authorization_bearer(line: &str) -> String {
+    if let Some(pos) = find_ascii_case_insensitive(line, "authorization:", 0) {
+        let after_authorization = pos + "authorization:".len();
+        if let Some(bearer_pos) = find_ascii_case_insensitive(line, "bearer", after_authorization) {
+            let after_bearer = bearer_pos + "bearer".len();
+            if !line
+                .as_bytes()
+                .get(after_bearer)
+                .is_some_and(|b| matches!(b, b' ' | b'\t'))
+            {
+                return line.to_string();
             }
+
+            let whitespace_after_bearer = leading_whitespace_len(&line[after_bearer..]);
+            let token_start = after_bearer + whitespace_after_bearer;
+            if token_start >= line.len() {
+                return line.to_string();
+            }
+
+            let token_end = env_value_end(line, token_start);
+            let redact_start = after_bearer + 1;
+            let mut out = line.to_string();
+            out.replace_range(redact_start..token_end, "[REDACTED]");
+            return out;
         }
     }
 
-    if let Some(pos) = find_cargo_token_env(&out)
-        && let Some(eq_pos) = out[pos..].find('=')
-    {
-        let abs_eq = pos + eq_pos;
-        out = format!("{}=[REDACTED]", &out[..abs_eq]);
+    line.to_string()
+}
+
+fn redact_token_assignments(line: &str) -> String {
+    let mut out = line.to_string();
+    let mut search_from = 0;
+
+    while let Some(token_pos) = find_ascii_case_insensitive(&out, "token", search_from) {
+        let after_token = token_pos + "token".len();
+
+        if !is_token_key_boundary(out.as_bytes(), token_pos) {
+            search_from = after_token;
+            continue;
+        }
+
+        let after_key = &out[after_token..];
+        let whitespace_after_key = leading_whitespace_len(after_key);
+        let eq_pos = after_token + whitespace_after_key;
+        if out.as_bytes().get(eq_pos) != Some(&b'=') {
+            search_from = after_token;
+            continue;
+        }
+
+        let after_eq = eq_pos + 1;
+        let whitespace_after_eq = leading_whitespace_len(&out[after_eq..]);
+        let value_start = after_eq + whitespace_after_eq;
+        if value_start >= out.len() {
+            search_from = after_eq;
+            continue;
+        }
+
+        let value_range = token_value_range(&out, value_start);
+        let redacted_end = value_range.start + "[REDACTED]".len();
+        out.replace_range(value_range, "[REDACTED]");
+        search_from = redacted_end;
     }
 
     out
 }
 
-fn find_cargo_token_env(s: &str) -> Option<usize> {
-    if let Some(pos) = s.find("CARGO_REGISTRY_TOKEN") {
-        return Some(pos);
+fn is_token_key_boundary(bytes: &[u8], token_pos: usize) -> bool {
+    token_pos == 0
+        || !matches!(
+            bytes[token_pos - 1],
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
+        )
+}
+
+fn leading_whitespace_len(s: &str) -> usize {
+    s.bytes().take_while(|b| matches!(b, b' ' | b'\t')).count()
+}
+
+fn find_ascii_case_insensitive(s: &str, needle: &str, search_from: usize) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let needle = needle.as_bytes();
+    if needle.is_empty() || search_from > bytes.len() {
+        return None;
     }
-    if let Some(pos) = s.find("CARGO_REGISTRIES_") {
-        let after = &s[pos + "CARGO_REGISTRIES_".len()..];
-        if after.contains("_TOKEN") {
-            return Some(pos);
+
+    bytes[search_from..]
+        .windows(needle.len())
+        .position(|window| {
+            window
+                .iter()
+                .zip(needle)
+                .all(|(actual, expected)| actual.eq_ignore_ascii_case(expected))
+        })
+        .map(|relative_pos| search_from + relative_pos)
+}
+
+fn token_value_range(s: &str, value_start: usize) -> std::ops::Range<usize> {
+    let bytes = s.as_bytes();
+    match bytes[value_start] {
+        quote @ (b'"' | b'\'') => {
+            let redaction_start = value_start + 1;
+            let mut pos = redaction_start;
+            while pos < bytes.len() {
+                if bytes[pos] == quote {
+                    return redaction_start..pos;
+                }
+                pos += 1;
+            }
+            redaction_start..bytes.len()
+        }
+        _ => {
+            let mut pos = value_start;
+            while pos < bytes.len() {
+                match bytes[pos] {
+                    b'&' | b'#' => break,
+                    b if b.is_ascii_whitespace() => break,
+                    _ => pos += 1,
+                }
+            }
+            value_start..pos
         }
     }
+}
+
+fn redact_cargo_token_env(line: &str) -> String {
+    let mut out = line.to_string();
+    let mut search_from = 0;
+
+    while let Some((_var_start, eq_pos)) = find_cargo_token_env_assignment(&out, search_from) {
+        let value_start = eq_pos + 1;
+        let value_end = env_value_end(&out, value_start);
+        out.replace_range(value_start..value_end, "[REDACTED]");
+        search_from = value_start + "[REDACTED]".len();
+    }
+
+    out
+}
+
+fn find_cargo_token_env_assignment(s: &str, search_from: usize) -> Option<(usize, usize)> {
+    let exact = find_exact_env_assignment(s, search_from, "CARGO_REGISTRY_TOKEN");
+    let named = find_named_registry_token_env_assignment(s, search_from);
+
+    match (exact, named) {
+        (Some(exact), Some(named)) => Some(if exact.0 <= named.0 { exact } else { named }),
+        (Some(exact), None) => Some(exact),
+        (None, Some(named)) => Some(named),
+        (None, None) => None,
+    }
+}
+
+fn find_exact_env_assignment(s: &str, search_from: usize, name: &str) -> Option<(usize, usize)> {
+    let mut cursor = search_from;
+    while let Some(relative_pos) = s[cursor..].find(name) {
+        let pos = cursor + relative_pos;
+        let after_name = pos + name.len();
+        if env_name_has_boundary(s.as_bytes(), pos, after_name)
+            && s.as_bytes().get(after_name) == Some(&b'=')
+        {
+            return Some((pos, after_name));
+        }
+        cursor = after_name;
+    }
     None
+}
+
+fn find_named_registry_token_env_assignment(s: &str, search_from: usize) -> Option<(usize, usize)> {
+    const PREFIX: &str = "CARGO_REGISTRIES_";
+    let mut cursor = search_from;
+
+    while let Some(relative_pos) = s[cursor..].find(PREFIX) {
+        let pos = cursor + relative_pos;
+        let eq_relative_pos = s[pos..].find('=')?;
+        let eq_pos = pos + eq_relative_pos;
+        let name = &s[pos..eq_pos];
+
+        if env_name_has_boundary(s.as_bytes(), pos, eq_pos)
+            && name
+                .strip_prefix(PREFIX)
+                .is_some_and(is_named_registry_token_name)
+        {
+            return Some((pos, eq_pos));
+        }
+
+        cursor = eq_pos + 1;
+    }
+
+    None
+}
+
+fn env_name_has_boundary(bytes: &[u8], start: usize, end: usize) -> bool {
+    let has_start_boundary = start == 0 || !is_env_name_byte(bytes[start - 1]);
+    let has_end_boundary = end < bytes.len() && bytes[end] == b'=';
+    has_start_boundary && has_end_boundary
+}
+
+fn is_named_registry_token_name(name_after_prefix: &str) -> bool {
+    let Some(registry_name) = name_after_prefix.strip_suffix("_TOKEN") else {
+        return false;
+    };
+    registry_name.bytes().all(is_env_name_byte)
+}
+
+fn is_env_name_byte(b: u8) -> bool {
+    matches!(b, b'A'..=b'Z' | b'0'..=b'9' | b'_')
+}
+
+fn env_value_end(s: &str, value_start: usize) -> usize {
+    s[value_start..]
+        .find(|ch: char| ch.is_ascii_whitespace())
+        .map_or(s.len(), |relative_pos| value_start + relative_pos)
 }
 
 #[cfg(test)]
@@ -352,7 +523,7 @@ mod tests {
     fn redact_unicode_surrounding_text() {
         let input = "日本語 Authorization: Bearer secret_tok 中文";
         let out = redact_sensitive(input);
-        assert_eq!(out, "日本語 Authorization: Bearer [REDACTED]");
+        assert_eq!(out, "日本語 Authorization: Bearer [REDACTED] 中文");
     }
 
     #[test]
@@ -529,11 +700,60 @@ mod tests {
     }
 
     #[test]
+    fn redact_mixed_cargo_env_tokens_in_original_order() {
+        let input = "CARGO_REGISTRIES_PRIVATE_TOKEN=private CARGO_REGISTRY_TOKEN=default";
+        let out = redact_sensitive(input);
+        assert_eq!(
+            out,
+            "CARGO_REGISTRIES_PRIVATE_TOKEN=[REDACTED] CARGO_REGISTRY_TOKEN=[REDACTED]"
+        );
+    }
+
+    #[test]
     fn redact_token_in_url_query_param() {
         let input = "https://crates.io/api?token=secret_api_key";
         let out = redact_sensitive(input);
         assert!(out.contains("[REDACTED]"));
         assert!(!out.contains("secret_api_key"));
+    }
+
+    #[test]
+    fn redact_token_query_param_preserves_other_params_and_fragment() {
+        let input = "GET https://crates.io/api/v1?crate=demo&token=secret_api_key&feature=a#frag";
+        let out = redact_sensitive(input);
+        assert_eq!(
+            out,
+            "GET https://crates.io/api/v1?crate=demo&token=[REDACTED]&feature=a#frag"
+        );
+        assert!(!out.contains("secret_api_key"));
+    }
+
+    #[test]
+    fn redact_token_assignment_preserves_trailing_context() {
+        let input = "token = secret_api_key # generated by cargo login";
+        let out = redact_sensitive(input);
+        assert_eq!(out, "token = [REDACTED] # generated by cargo login");
+        assert!(!out.contains("secret_api_key"));
+    }
+
+    #[test]
+    fn redact_token_assignment_stops_at_ascii_whitespace_for_idempotence() {
+        let input = "TOY_TOKEN=secret\u{c}metadata";
+        let out = redact_sensitive(input);
+        assert_eq!(out, "TOY_TOKEN=[REDACTED]\u{c}metadata");
+        assert_eq!(redact_sensitive(&out), out);
+        assert!(!out.contains("secret"));
+    }
+
+    #[test]
+    fn cargo_registry_token_names_require_exact_token_segment() {
+        for input in [
+            "CARGO_REGISTRIES_PRIVATE_TOKENIZER=not_secret",
+            "CARGO_REGISTRIES_PRIVATE_TOKEN_BACKUP=not_secret",
+            "CARGO_REGISTRIES_PRIVATE_AUTH_TOKENIZER=not_secret",
+        ] {
+            assert_eq!(redact_sensitive(input), input);
+        }
     }
 
     #[test]
@@ -688,26 +908,30 @@ mod tests {
         );
     }
 
-    // When two redactable patterns share one line, the CARGO_REGISTRY_TOKEN env
-    // handler truncates the rest of the line — including the Bearer secret that
-    // would otherwise be redacted by the Authorization handler. Both secrets
-    // disappear, but via truncation rather than independent redaction.
+    // When two redactable patterns share one line, both secrets disappear while
+    // preserving the surrounding context for evidence readability.
     #[test]
-    fn redact_cargo_token_env_truncates_trailing_bearer_secret() {
+    fn redact_cargo_token_env_preserves_trailing_redacted_bearer_secret() {
         let input = "CARGO_REGISTRY_TOKEN=secret1 Authorization: Bearer secret2";
         let out = redact_sensitive(input);
-        assert_eq!(out, "CARGO_REGISTRY_TOKEN=[REDACTED]");
+        assert_eq!(
+            out,
+            "CARGO_REGISTRY_TOKEN=[REDACTED] Authorization: Bearer [REDACTED]"
+        );
         assert!(!out.contains("secret1"));
         assert!(!out.contains("secret2"));
     }
 
-    // Reversed order: the Authorization handler runs first and rewrites the
-    // line, dropping the trailing CARGO_REGISTRY_TOKEN entirely.
+    // Reversed order: the Authorization handler runs first, but it preserves
+    // trailing context so the later CARGO_REGISTRY_TOKEN pass can redact it.
     #[test]
-    fn redact_bearer_truncates_trailing_cargo_token_env() {
+    fn redact_bearer_preserves_trailing_redacted_cargo_token_env() {
         let input = "Authorization: Bearer secret2 CARGO_REGISTRY_TOKEN=secret1";
         let out = redact_sensitive(input);
-        assert_eq!(out, "Authorization: Bearer [REDACTED]");
+        assert_eq!(
+            out,
+            "Authorization: Bearer [REDACTED] CARGO_REGISTRY_TOKEN=[REDACTED]"
+        );
         assert!(!out.contains("secret1"));
         assert!(!out.contains("secret2"));
     }
@@ -747,15 +971,15 @@ mod tests {
     }
 
     // The env-name matcher is case-sensitive. A lowercase `cargo_registry_token`
-    // is not recognised as the env var; however the line still triggers the
-    // generic `token`-assignment handler, which is a separate code path.
+    // is not recognised as the env var, but the generic `token` assignment path
+    // must still fail closed and redact its value.
     #[test]
     fn lowercase_cargo_registry_token_not_matched_as_env_name() {
         let input = "cargo_registry_token=plain";
         let out = redact_sensitive(input);
         assert!(!out.contains("plain"));
         assert!(out.contains("[REDACTED]"));
-        assert!(!out.starts_with("cargo_registry_token=[REDACTED]"));
+        assert_eq!(out, "cargo_registry_token=[REDACTED]");
     }
 }
 
