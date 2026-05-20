@@ -15,6 +15,7 @@ use crate::types::{
 };
 use crate::webhook::{self, WebhookEvent};
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_ambiguous_resume_state(
     ws: &PlannedWorkspace,
     opts: &RuntimeOptions,
