@@ -32,6 +32,7 @@ use crate::webhook::{self, WebhookEvent};
 
 mod preflight;
 mod publish;
+mod support;
 
 pub use preflight::PreflightRunOptions;
 
@@ -77,25 +78,26 @@ pub(crate) fn policy_effects(opts: &RuntimeOptions) -> crate::runtime::policy::P
     crate::runtime::policy::policy_effects(opts)
 }
 
+pub(crate) fn init_registry_client(registry: Registry, state_dir: &Path) -> Result<RegistryClient> {
+    support::init_registry_client(registry, state_dir)
+}
+
 fn write_reconciliation_report_best_effort(
     state_dir: &Path,
     ws: &PlannedWorkspace,
     events_path: &Path,
     reporter: &mut dyn Reporter,
 ) {
-    if let Err(err) = crate::state::reconciliation::write_report_from_events(
-        state_dir,
-        &ws.plan.plan_id,
-        &ws.plan.registry,
-        events_path,
-    ) {
-        reporter.warn(&format!("failed to write reconciliation report: {err}"));
-    }
+    support::write_reconciliation_report_best_effort(state_dir, ws, events_path, reporter)
 }
 
-fn init_registry_client(registry: Registry, state_dir: &Path) -> Result<RegistryClient> {
-    let cache_dir = state_dir.join("cache");
-    RegistryClient::new(registry).map(|c| c.with_cache_dir(cache_dir))
+fn enforce_rehearsal_gate(
+    ws: &PlannedWorkspace,
+    opts: &RuntimeOptions,
+    state_dir: &Path,
+    reporter: &mut dyn Reporter,
+) -> Result<()> {
+    support::enforce_rehearsal_gate(ws, opts, state_dir, reporter)
 }
 
 /// Run preflight verification checks before publishing.
@@ -213,65 +215,6 @@ pub fn run_preflight_in_place_with_options(
 /// 5. **Failing receipt** (`passed: false`) → refuse.
 ///
 /// 6. **Fresh passing receipt for current plan** → publish proceeds.
-fn enforce_rehearsal_gate(
-    ws: &PlannedWorkspace,
-    opts: &RuntimeOptions,
-    state_dir: &Path,
-    reporter: &mut dyn Reporter,
-) -> Result<()> {
-    let Some(rehearsal_name) = opts.rehearsal_registry.as_deref() else {
-        return Ok(());
-    };
-
-    if opts.rehearsal_skip {
-        reporter.warn(&format!(
-            "--skip-rehearsal was set; publish is proceeding without a rehearsal against '{rehearsal_name}'. \
-             This is an operator-authorized bypass; auditors reading events.jsonl will see no RehearsalComplete event for this plan_id."
-        ));
-        return Ok(());
-    }
-
-    let receipt = crate::state::rehearsal::load_rehearsal(state_dir)
-        .context("failed to read rehearsal receipt while enforcing hard gate")?;
-
-    let rehearsal_path = crate::state::rehearsal::rehearsal_path(state_dir);
-
-    let receipt = match receipt {
-        Some(r) => r,
-        None => bail!(
-            "rehearsal is required (rehearsal registry '{rehearsal_name}' is configured) but no rehearsal receipt was found at {}. \
-             Run `shipper rehearse --rehearsal-registry {rehearsal_name}` first, \
-             or pass --skip-rehearsal to override (not recommended).",
-            rehearsal_path.display()
-        ),
-    };
-
-    if receipt.plan_id != ws.plan.plan_id {
-        bail!(
-            "rehearsal receipt is stale: rehearsal ran for plan_id {} but the current plan_id is {}. \
-             The workspace changed between rehearse and publish; re-run `shipper rehearse` against the current plan.",
-            receipt.plan_id,
-            ws.plan.plan_id
-        );
-    }
-
-    if !receipt.passed {
-        bail!(
-            "rehearsal against '{}' did NOT pass for plan_id {}: {}. \
-             Fix the cause and re-run `shipper rehearse` before publishing.",
-            receipt.registry,
-            receipt.plan_id,
-            receipt.summary
-        );
-    }
-
-    reporter.info(&format!(
-        "rehearsal gate: passing receipt found ({} packages against '{}', plan_id {})",
-        receipt.packages_published, receipt.registry, receipt.plan_id
-    ));
-    Ok(())
-}
-
 /// Execute the publish operation for all packages in the workspace.
 ///
 /// This is the main publishing function that:
@@ -453,7 +396,12 @@ pub fn run_publish(
                 });
                 event_log.write_to_file(&events_path)?;
                 event_log.clear();
-                write_reconciliation_report_best_effort(&state_dir, ws, &events_path, reporter);
+                support::write_reconciliation_report_best_effort(
+                    &state_dir,
+                    ws,
+                    &events_path,
+                    reporter,
+                );
                 let reconciliation_report_path = state::reconciliation_path(&state_dir);
 
                 match outcome {
