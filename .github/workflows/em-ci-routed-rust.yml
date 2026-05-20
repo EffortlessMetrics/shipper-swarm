@@ -25,6 +25,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
+  INSTA_UPDATE: "no"
+  PROPTEST_CASES: "16"
+  PROPTEST_MAX_SHRINK_ITERS: "1000"
 
 permissions:
   contents: read
@@ -33,6 +36,7 @@ jobs:
   route:
     name: Route Shipper Rust Small
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       target: ${{ steps.pick.outputs.target }}
       reason: ${{ steps.pick.outputs.reason }}
@@ -142,6 +146,7 @@ jobs:
     needs: [route]
     if: needs.route.outputs.target == 'cx43'
     runs-on: [self-hosted, Linux, X64, em-ci, rust-small, trusted-pr, cx43]
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6.0.2
 
@@ -178,6 +183,7 @@ jobs:
     needs: [route]
     if: needs.route.outputs.target == 'cx33'
     runs-on: [self-hosted, Linux, X64, em-ci, rust-small, trusted-pr, cx33]
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6.0.2
 
@@ -214,6 +220,7 @@ jobs:
     needs: [route]
     if: needs.route.outputs.target == 'cx53'
     runs-on: [self-hosted, Linux, X64, em-ci, rust-small, trusted-pr, cx53]
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6.0.2
 
@@ -250,6 +257,7 @@ jobs:
     needs: [route]
     if: needs.route.outputs.target == 'github'
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6.0.2
 
@@ -291,6 +299,7 @@ jobs:
       - rust_small_github
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Normalize routed result
         env:
