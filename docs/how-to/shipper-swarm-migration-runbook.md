@@ -284,18 +284,18 @@ After 3–5 clean PRs:
 
 ## Immediate checklist
 
-- [ ] Create `EffortlessMetrics/shipper-swarm` as public.
-- [ ] Enable squash merge + auto-merge + delete branch on merge.
-- [ ] Add repo to `em-ci-small` selected repositories.
-- [ ] Add repo to `EM_RUNNER_READ_TOKEN` selected repositories.
-- [ ] Do **not** add crates.io/release/signing secrets.
-- [ ] Seed `shipper-swarm/main` from `shipper/main`.
-- [ ] Add `.github/workflows/em-ci-routed-rust.yml`.
-- [ ] Route small lane CX43 → CX33 → CX53 → GitHub.
-- [ ] Guard self-hosted jobs to trusted same-repo work only.
-- [ ] Include GitHub-hosted fallback.
-- [ ] Add normalized `Shipper Rust Small Result` job.
-- [ ] Run `workflow_dispatch` on `main`.
+- [x] Create `EffortlessMetrics/shipper-swarm` as public.
+- [x] Enable squash merge + auto-merge + delete branch on merge.
+- [x] Add repo to `em-ci-small` selected repositories.
+- [x] Add repo to `EM_RUNNER_READ_TOKEN` selected repositories.
+- [x] Do **not** add crates.io/release/signing secrets.
+- [x] Seed `shipper-swarm/main` from `shipper/main`.
+- [x] Add `.github/workflows/em-ci-routed-rust.yml`.
+- [x] Route small lane CX43 → CX33 → CX53 → GitHub.
+- [x] Guard self-hosted jobs to trusted same-repo work only.
+- [x] Include GitHub-hosted fallback.
+- [x] Add normalized `Shipper Rust Small Result` job.
+- [x] Run `workflow_dispatch` on `main`.
 - [ ] Open tiny same-repo PR.
 - [ ] Force fallback-path proof cases.
 - [ ] Enable branch protection requiring only normalized result.
