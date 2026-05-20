@@ -22,11 +22,20 @@ We follow the [Rust Code of Conduct](https://www.rust-lang.org/policies/code-of-
 
 ## Getting Started
 
-1. Fork the repository
+Active development happens in
+[`EffortlessMetrics/shipper-swarm`](https://github.com/EffortlessMetrics/shipper-swarm).
+The original [`EffortlessMetrics/shipper`](https://github.com/EffortlessMetrics/shipper)
+repository remains the release authority for crates.io publishing and release
+evidence until that authority is explicitly moved.
+
+Do not add crates.io publish tokens, release signing secrets, or release
+workflow credentials to `shipper-swarm`.
+
+1. Fork the development repository
 2. Clone your fork:
    ```bash
-   git clone https://github.com/YOUR_USERNAME/shipper.git
-   cd shipper
+   git clone https://github.com/YOUR_USERNAME/shipper-swarm.git
+   cd shipper-swarm
    ```
 3. Create a branch for your changes:
    ```bash
@@ -57,10 +66,10 @@ cargo build --workspace --release
 
 ```bash
 # Run the CLI locally
-cargo run --package shipper-cli -- <command>
+cargo run --package shipper -- <command>
 
 # Example
-cargo run --package shipper-cli -- plan --help
+cargo run --package shipper -- plan --help
 ```
 
 ---
@@ -77,8 +86,9 @@ cargo run --package shipper-cli -- plan --help
 
 | Directory | Purpose |
 |-----------|---------|
-| `crates/shipper/` | Library crate with core logic |
-| `crates/shipper-cli/` | CLI binary |
+| `crates/shipper/` | Install facade and curated library re-export |
+| `crates/shipper-cli/` | CLI adapter: clap, subcommands, help, human/JSON output |
+| `crates/shipper-core/` | Engine/library implementation |
 | `docs/` | User documentation |
 | `templates/` | CI/CD templates |
 | `fuzz/` | Fuzzing targets |
@@ -87,14 +97,13 @@ cargo run --package shipper-cli -- plan --help
 
 | Module | Responsibility |
 |--------|----------------|
-| `plan.rs` | Publish planning and ordering |
-| `engine.rs` | Main publish execution engine |
-| `engine_parallel.rs` | Parallel publishing implementation |
-| `registry.rs` | Registry API interactions |
-| `cargo.rs` | Cargo command wrappers |
-| `state.rs` | State persistence |
-| `events.rs` | Event logging |
-| `config.rs` | Configuration handling |
+| `crates/shipper-core/src/plan/` | Publish planning and ordering |
+| `crates/shipper-core/src/engine/` | Publish/preflight/resume execution engine |
+| `crates/shipper-core/src/registry/` | Registry API interactions |
+| `crates/shipper-core/src/cargo.rs` | Cargo command wrappers |
+| `crates/shipper-core/src/state/` | State persistence |
+| `crates/shipper-core/src/events.rs` | Event logging |
+| `crates/shipper-config/` | Configuration handling |
 
 ---
 
@@ -168,6 +177,9 @@ cargo test --package shipper
 - **Description**: Explain what and why, not how
 - **Link issues**: Reference any related issues
 - **Small PRs**: Keep changes focused and reviewable
+- **Required gate**: `shipper-swarm/main` requires `Shipper Rust Small Result`;
+  do not require route-specific implementation jobs directly because only one
+  route runs per attempt.
 
 ### Review Process
 

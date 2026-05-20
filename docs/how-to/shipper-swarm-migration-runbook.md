@@ -1,5 +1,12 @@
 # Migrate `shipper` to `shipper-swarm` (runbook)
 
+Status: active-development cutover complete.
+
+`EffortlessMetrics/shipper-swarm` is now the active development repository.
+`EffortlessMetrics/shipper` remains the release authority for crates.io
+publishing, release evidence, and signing credentials until that authority is
+explicitly moved.
+
 This runbook defines the recommended migration path from `EffortlessMetrics/shipper` to `EffortlessMetrics/shipper-swarm`.
 
 ## Scope and operating constraints
@@ -296,8 +303,18 @@ After 3–5 clean PRs:
 - [x] Include GitHub-hosted fallback.
 - [x] Add normalized `Shipper Rust Small Result` job.
 - [x] Run `workflow_dispatch` on `main`.
-- [ ] Open tiny same-repo PR.
-- [ ] Force fallback-path proof cases.
-- [ ] Enable branch protection requiring only normalized result.
-- [ ] Cut runner access over to `shipper-swarm` and verify routed job pickup.
-- [ ] Move active development to side-by-side `shipper-swarm` clones.
+- [x] Open tiny same-repo PR.
+- [x] Force fallback-path proof cases.
+- [x] Enable branch protection requiring only normalized result.
+- [x] Cut runner access over to `shipper-swarm` and verify routed job pickup.
+- [x] Move active development to side-by-side `shipper-swarm` clones.
+
+Proof notes:
+
+- PR #2 added the routed Rust small lane.
+- PR #3 proved same-repo PR flow through the normalized result check.
+- Forced `workflow_dispatch` proof runs covered `cx43`, `cx33`, `cx53`, and
+  GitHub-hosted fallback.
+- Saturation proof occupied all self-hosted routes and verified auto-routing to
+  GitHub-hosted with `router_reason=no_idle_runner`.
+- Branch protection for `main` requires only `Shipper Rust Small Result`.
