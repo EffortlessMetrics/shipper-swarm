@@ -1,0 +1,1477 @@
+use std::env;
+use std::fs;
+use std::path::Path;
+use std::thread;
+
+use assert_cmd::Command;
+use insta::assert_snapshot;
+use predicates::str::contains;
+use tempfile::tempdir;
+use tiny_http::{Header, Response, Server, StatusCode};
+
+fn write_file(path: &Path, content: &str) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("mkdir");
+    }
+    fs::write(path, content).expect("write");
+}
+
+fn create_workspace(root: &Path) {
+    write_file(
+        &root.join("Cargo.toml"),
+        r#"
+[workspace]
+members = ["demo"]
+resolver = "2"
+"#,
+    );
+
+    write_file(
+        &root.join("demo/Cargo.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write_file(&root.join("demo/src/lib.rs"), "pub fn demo() {}\n");
+}
+
+fn normalize_output(raw: &str) -> String {
+    raw.lines()
+        .map(|line| {
+            if line.starts_with("plan_id: ") {
+                "plan_id: <PLAN_ID>".to_string()
+            } else if line.starts_with("Plan ID: ") {
+                "Plan ID: <PLAN_ID>".to_string()
+            } else if line.starts_with("workspace_root: ") {
+                "workspace_root: <WORKSPACE_ROOT>".to_string()
+            } else if line.starts_with("state_dir: ") {
+                "state_dir: <STATE_DIR>".to_string()
+            } else if line.starts_with("state:   ") {
+                "state:   <STATE_FILE>".to_string()
+            } else if line.starts_with("receipt: ") {
+                "receipt: <RECEIPT_FILE>".to_string()
+            } else if line.starts_with("cargo: ") {
+                "cargo: <CARGO_VERSION>".to_string()
+            } else if line.starts_with("git: ") {
+                "git: <GIT_VERSION>".to_string()
+            } else if line.starts_with("Timestamp: ") {
+                "Timestamp: <TIMESTAMP>".to_string()
+            } else if line.starts_with("Started: ") {
+                "Started: <TIMESTAMP>".to_string()
+            } else if line.starts_with("Finished: ") {
+                "Finished: <TIMESTAMP>".to_string()
+            } else if line.starts_with("Duration: ") {
+                "Duration: <DURATION>ms".to_string()
+            } else if line.starts_with("  Shipper: ") {
+                "  Shipper: <SHIPPER_VERSION>".to_string()
+            } else if line.starts_with("  Cargo: ") {
+                "  Cargo: <CARGO_VERSION>".to_string()
+            } else if line.starts_with("  Rust: ") {
+                "  Rust: <RUST_VERSION>".to_string()
+            } else if line.starts_with("  Commit: ") {
+                "  Commit: <COMMIT>".to_string()
+            } else if line.starts_with("  Branch: ") {
+                "  Branch: <BRANCH>".to_string()
+            } else if line.starts_with("  Tag: ") {
+                "  Tag: <TAG>".to_string()
+            } else if line.starts_with("git_commit: ") {
+                "git_commit: <GIT_COMMIT>".to_string()
+            } else if line.starts_with("git_branch: ") {
+                "git_branch: <GIT_BRANCH>".to_string()
+            } else if line.starts_with("git_dirty: ") {
+                "git_dirty: <GIT_DIRTY>".to_string()
+            } else {
+                line.replace('\\', "/")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn path_sep() -> &'static str {
+    if cfg!(windows) { ";" } else { ":" }
+}
+
+fn create_fake_cargo_proxy(bin_dir: &Path) {
+    #[cfg(windows)]
+    {
+        fs::write(
+            bin_dir.join("cargo.cmd"),
+            "@echo off\r\nif \"%1\"==\"publish\" (\r\n  if \"%SHIPPER_FAKE_PUBLISH_EXIT%\"==\"\" (exit /b 0) else (exit /b %SHIPPER_FAKE_PUBLISH_EXIT%)\r\n)\r\n\"%REAL_CARGO%\" %*\r\nexit /b %ERRORLEVEL%\r\n",
+        )
+        .expect("write fake cargo");
+    }
+
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = bin_dir.join("cargo");
+        fs::write(
+            &path,
+            "#!/usr/bin/env sh\nif [ \"$1\" = \"publish\" ]; then\n  exit \"${SHIPPER_FAKE_PUBLISH_EXIT:-0}\"\nfi\n\"$REAL_CARGO\" \"$@\"\n",
+        )
+        .expect("write fake cargo");
+        let mut perms = fs::metadata(&path).expect("meta").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).expect("chmod");
+    }
+}
+
+struct TestRegistry {
+    base_url: String,
+    handle: thread::JoinHandle<()>,
+}
+
+impl TestRegistry {
+    fn join(self) {
+        self.handle.join().expect("join server");
+    }
+}
+
+fn spawn_registry(statuses: Vec<u16>, expected_requests: usize) -> TestRegistry {
+    let server = Server::http("127.0.0.1:0").expect("server");
+    let base_url = format!("http://{}", server.server_addr());
+    let handle = thread::spawn(move || {
+        for idx in 0..expected_requests {
+            let req = match server.recv_timeout(std::time::Duration::from_secs(30)) {
+                Ok(Some(r)) => r,
+                _ => break,
+            };
+            let status = statuses
+                .get(idx)
+                .copied()
+                .or_else(|| statuses.last().copied())
+                .unwrap_or(404);
+            let resp = Response::from_string("{}")
+                .with_status_code(StatusCode(status))
+                .with_header(
+                    Header::from_bytes("Content-Type", "application/json").expect("header"),
+                );
+            req.respond(resp).expect("respond");
+        }
+    });
+    TestRegistry { base_url, handle }
+}
+
+fn shipper_cmd() -> Command {
+    Command::new(assert_cmd::cargo::cargo_bin!("shipper-cli"))
+}
+
+#[test]
+fn plan_command_snapshot() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+
+    let mut cmd = shipper_cmd();
+    let out = cmd
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("plan")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(out).expect("utf8");
+    assert_snapshot!(
+        normalize_output(&stdout),
+        @"
+    plan_id: <PLAN_ID>
+    registry: crates-io (https://crates.io)
+    workspace_root: <WORKSPACE_ROOT>
+
+    Total packages to publish: 1
+    Plan summary:
+      Publishable packages: 1
+      Skipped packages: 0
+      Internal dependency edges: 0
+      Publish levels: 1
+      Plan artifact: .shipper/plan.txt (`shipper plan --format json` capture)
+
+      1. demo@0.1.0 (no workspace dependencies)
+    "
+    );
+}
+
+#[test]
+fn plan_command_with_package_flag() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+
+    let mut cmd = shipper_cmd();
+    let out = cmd
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--package")
+        .arg("demo")
+        .arg("plan")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(out).expect("utf8");
+    assert!(stdout.contains("demo@0.1.0"));
+}
+
+#[test]
+fn doctor_command_snapshot() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+    fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
+
+    let mut cmd = shipper_cmd();
+    let out = cmd
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--state-dir")
+        .arg(".shipper")
+        .arg("doctor")
+        .env("CARGO_HOME", td.path().join("cargo-home"))
+        .env_remove("CARGO_REGISTRY_TOKEN")
+        .env_remove("CARGO_REGISTRIES_CRATES_IO_TOKEN")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(out).expect("utf8");
+    assert_snapshot!(
+        normalize_output(&stdout),
+        @"
+    Shipper Doctor - Diagnostics Report
+    ----------------------------------
+    workspace_root: <WORKSPACE_ROOT>
+    registry: crates-io (https://crates.io)
+    auth_type: NONE FOUND (set CARGO_REGISTRY_TOKEN)
+    state_dir: <STATE_DIR>
+    state_dir_exists: false (will be created)
+
+    cargo: <CARGO_VERSION>
+    git: <GIT_VERSION>
+
+    registry_reachable: true
+    index_base: https://index.crates.io
+
+    git_context: not a git repository
+
+    Findings:
+    ---------
+      [blocked] crates.io auth is missing (registry-auth-missing)
+        status: blocked
+        severity: blocked
+        why: ownership checks and live publish require registry credentials before Shipper can prove or execute a release
+        evidence: auth_type: NONE FOUND (set CARGO_REGISTRY_TOKEN)
+        try next:
+          - run `cargo login <token>` for local token auth
+          - configure Trusted Publishing with `permissions: id-token: write` and `rust-lang/crates-io-auth-action@v1`
+          - rerun `shipper doctor` and `shipper preflight`
+        docs: docs/how-to/run-in-github-actions.md
+
+    Diagnostics complete.
+    "
+    );
+}
+
+#[test]
+fn doctor_command_detects_trusted_publishing_auth() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+    fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
+
+    let mut cmd = shipper_cmd();
+    let out = cmd
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--state-dir")
+        .arg(".shipper")
+        .arg("doctor")
+        .env("CARGO_HOME", td.path().join("cargo-home"))
+        .env_remove("CARGO_REGISTRY_TOKEN")
+        .env_remove("CARGO_REGISTRIES_CRATES_IO_TOKEN")
+        .env(
+            "ACTIONS_ID_TOKEN_REQUEST_URL",
+            "https://example.invalid/oidc",
+        )
+        .env("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "oidc-token")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(out).expect("utf8");
+    assert_snapshot!(
+        normalize_output(&stdout),
+        @"
+    Shipper Doctor - Diagnostics Report
+    ----------------------------------
+    workspace_root: <WORKSPACE_ROOT>
+    registry: crates-io (https://crates.io)
+    auth_type: trusted (detected)
+    state_dir: <STATE_DIR>
+    state_dir_exists: false (will be created)
+
+    cargo: <CARGO_VERSION>
+    git: <GIT_VERSION>
+
+    registry_reachable: true
+    index_base: https://index.crates.io
+
+    git_context: not a git repository
+
+    Findings:
+    ---------
+      [blocked] Trusted Publishing token exchange is incomplete (trusted-publishing-token-not-minted)
+        status: blocked
+        severity: blocked
+        why: GitHub OIDC request variables are present, but Cargo still needs a short-lived registry token before Shipper can prove ownership or publish
+        evidence: auth_type: trusted (detected); registry_token: missing; oidc_request_url: set; oidc_request_token: set
+        try next:
+          - run `rust-lang/crates-io-auth-action@v1` before invoking Shipper
+          - pass `steps.auth.outputs.token` to Shipper as `CARGO_REGISTRY_TOKEN`
+          - rerun `shipper doctor` and `shipper preflight`
+        docs: docs/how-to/run-in-github-actions.md
+
+    Diagnostics complete.
+    "
+    );
+}
+
+#[test]
+fn doctor_command_reports_partial_trusted_publishing_env() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+    fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
+
+    let mut cmd = shipper_cmd();
+    let out = cmd
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--state-dir")
+        .arg(".shipper")
+        .arg("doctor")
+        .env("CARGO_HOME", td.path().join("cargo-home"))
+        .env_remove("CARGO_REGISTRY_TOKEN")
+        .env_remove("CARGO_REGISTRIES_CRATES_IO_TOKEN")
+        .env(
+            "ACTIONS_ID_TOKEN_REQUEST_URL",
+            "https://example.invalid/oidc",
+        )
+        .env_remove("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(out).expect("utf8");
+    assert_snapshot!(
+        normalize_output(&stdout),
+        @"
+    Shipper Doctor - Diagnostics Report
+    ----------------------------------
+    workspace_root: <WORKSPACE_ROOT>
+    registry: crates-io (https://crates.io)
+    auth_type: unknown
+    state_dir: <STATE_DIR>
+    state_dir_exists: false (will be created)
+
+    cargo: <CARGO_VERSION>
+    git: <GIT_VERSION>
+
+    registry_reachable: true
+    index_base: https://index.crates.io
+
+    git_context: not a git repository
+
+    Findings:
+    ---------
+      [blocked] Trusted Publishing OIDC environment is incomplete (trusted-publishing-oidc-incomplete)
+        status: blocked
+        severity: blocked
+        why: Trusted Publishing requires both GitHub OIDC request variables; a partial environment cannot mint a crates.io token
+        evidence: auth_type: unknown; registry_token: missing; oidc_request_url: set; oidc_request_token: missing
+        try next:
+          - set `permissions: id-token: write` on the release job
+          - run Shipper after the GitHub OIDC request URL and token are both available
+          - or configure an explicit Cargo token fallback before rerunning preflight
+        docs: docs/how-to/run-in-github-actions.md
+
+    Diagnostics complete.
+    "
+    );
+}
+
+#[test]
+fn doctor_command_warns_on_incomplete_trusted_publishing_workflow() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+    fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
+    write_file(
+        &td.path().join(".github/workflows/release.yml"),
+        r#"
+name: Release
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: rust-lang/crates-io-auth-action@v1
+      - run: shipper publish
+"#,
+    );
+
+    let mut cmd = shipper_cmd();
+    let out = cmd
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--state-dir")
+        .arg(".shipper")
+        .arg("doctor")
+        .env("CARGO_HOME", td.path().join("cargo-home"))
+        .env("CARGO_REGISTRY_TOKEN", "secret-token")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(out).expect("utf8");
+    assert!(stdout.contains("auth_type: token (detected)"));
+    assert!(stdout.contains(
+        "Trusted Publishing workflow prerequisites need review (trusted-publishing-workflow-prerequisites)"
+    ));
+    assert!(stdout.contains("id_token_write: missing"));
+    assert!(stdout.contains("release_environment: missing"));
+    assert!(stdout.contains("token_fallback: missing"));
+    assert!(!stdout.contains("secret-token"));
+}
+
+#[test]
+fn doctor_command_warns_when_token_fallback_is_configured() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+    fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
+    write_file(
+        &td.path().join(".github/workflows/release.yml"),
+        r#"
+name: Release
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - run: shipper publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token || secrets.CARGO_REGISTRY_TOKEN }}
+"#,
+    );
+
+    let mut cmd = shipper_cmd();
+    let out = cmd
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--state-dir")
+        .arg(".shipper")
+        .arg("doctor")
+        .env("CARGO_HOME", td.path().join("cargo-home"))
+        .env("CARGO_REGISTRY_TOKEN", "secret-token")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(out).expect("utf8");
+    assert!(stdout.contains("auth_type: token (detected)"));
+    assert!(stdout.contains(
+        "Long-lived Cargo token fallback is configured (trusted-publishing-token-fallback-configured)"
+    ));
+    assert!(stdout.contains("token_value: redacted"));
+    assert!(!stdout.contains("secret-token"));
+}
+
+#[test]
+fn status_command_snapshot() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+    let registry = spawn_registry(vec![404], 1);
+
+    let mut cmd = shipper_cmd();
+    let out = cmd
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--api-base")
+        .arg(&registry.base_url)
+        .arg("status")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(out).expect("utf8");
+    assert_snapshot!(
+        normalize_output(&stdout),
+        @r#"
+plan_id: <PLAN_ID>
+
+demo@0.1.0: missing
+"#
+    );
+    registry.join();
+}
+
+#[test]
+fn preflight_command_snapshot() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+    fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
+    let registry = spawn_registry(vec![404], 2);
+
+    let mut cmd = shipper_cmd();
+    let out = cmd
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--api-base")
+        .arg(&registry.base_url)
+        .arg("--allow-dirty")
+        .arg("--skip-ownership-check")
+        .arg("preflight")
+        .env("CARGO_HOME", td.path().join("cargo-home"))
+        .env_remove("CARGO_REGISTRY_TOKEN")
+        .env_remove("CARGO_REGISTRIES_CRATES_IO_TOKEN")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(out).expect("utf8");
+    let normalized = normalize_output(&stdout);
+    // Strip ANSI escape codes for snapshot comparison
+    let stripped: String = normalized
+        .chars()
+        .fold((String::new(), false), |(mut s, in_esc), c| {
+            if c == '\x1b' {
+                (s, true)
+            } else if in_esc {
+                (s, c != 'm')
+            } else {
+                s.push(c);
+                (s, false)
+            }
+        })
+        .0;
+    assert_snapshot!(
+        stripped,
+        @r#"
+Preflight Report
+===============
+
+Plan ID: <PLAN_ID>
+Timestamp: <TIMESTAMP>
+
+Token Detected: ✗
+
+Finishability: NOT PROVEN
+
+Packages:
+┌─────────────────────┬─────────┬──────────┬──────────┬───────────────┬─────────────┬─────────────┐
+│ Package             │ Version │ Published│ New Crate │ Auth Type     │ Ownership   │ Dry-run     │
+├─────────────────────┼─────────┼──────────┼──────────┼───────────────┼─────────────┼─────────────┤
+│ demo                │ 0.1.0   │ No       │ Yes      │ -             │ ✗           │ ✓           │
+└─────────────────────┴─────────┴──────────┴──────────┴───────────────┴─────────────┴─────────────┘
+
+Summary:
+  Total packages: 1
+  Already published: 0
+  New crates: 1
+  Ownership verified: 0
+  Dry-run passed: 1
+  Estimated registry pacing: at least 0s
+    profile=crates-io first_publish=1 updates=0
+
+Proof explanation:
+  Proven now:
+    - local package dry-run passed for 1 of 1 package.
+    - registry version/new-crate checks completed for 1 package.
+    - registry pacing estimate generated from the crates-io profile.
+  Proof gaps:
+    - ownership was not verified for 1 of 1 package: demo@0.1.0.
+    - no registry token or Trusted Publishing context was detected.
+  Failed checks:
+    - none.
+  Live-release evidence:
+    - registry acceptance and post-publish visibility are recorded during publish/resume.
+
+What to do next:
+-----------------
+⚠ Preflight did not prove every release prerequisite.
+  - configure registry auth or Trusted Publishing if ownership is unverified
+  - rerun `shipper preflight`
+  - if you accept the uncertainty, run `shipper publish` with an explicit policy choice
+"#
+    );
+    registry.join();
+}
+
+#[test]
+fn preflight_command_writes_preflight_events() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+    fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
+    let registry = spawn_registry(vec![404], 2);
+
+    shipper_cmd()
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--api-base")
+        .arg(&registry.base_url)
+        .arg("--state-dir")
+        .arg(".shipper")
+        .arg("--allow-dirty")
+        .arg("--skip-ownership-check")
+        .arg("preflight")
+        .env("CARGO_HOME", td.path().join("cargo-home"))
+        .env_remove("CARGO_REGISTRY_TOKEN")
+        .env_remove("CARGO_REGISTRIES_CRATES_IO_TOKEN")
+        .assert()
+        .success();
+
+    let events_path = td.path().join(".shipper").join("events.jsonl");
+    assert!(events_path.exists(), "expected {}", events_path.display());
+    let events = fs::read_to_string(&events_path).expect("read events");
+    assert!(events.contains(r#""type":"preflight_started""#));
+    assert!(events.contains(r#""type":"preflight_workspace_verify""#));
+    assert!(events.contains(r#""type":"preflight_new_crate_detected""#));
+    assert!(events.contains(r#""type":"preflight_ownership_check""#));
+    assert!(events.contains(r#""type":"preflight_complete""#));
+
+    let mut inspect = shipper_cmd();
+    let out = inspect
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--state-dir")
+        .arg(".shipper")
+        .arg("inspect-events")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(out).expect("utf8");
+    assert!(stdout.contains(r#""type":"preflight_complete""#));
+
+    registry.join();
+}
+
+#[test]
+fn preflight_command_with_json_flag() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+    fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
+    let registry = spawn_registry(vec![404], 2);
+
+    let mut cmd = shipper_cmd();
+    let out = cmd
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--api-base")
+        .arg(&registry.base_url)
+        .arg("--allow-dirty")
+        .arg("--skip-ownership-check")
+        .arg("preflight")
+        .arg("--format")
+        .arg("json")
+        .env("CARGO_HOME", td.path().join("cargo-home"))
+        .env_remove("CARGO_REGISTRY_TOKEN")
+        .env_remove("CARGO_REGISTRIES_CRATES_IO_TOKEN")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(out).expect("utf8");
+    // Verify it's valid JSON
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert_eq!(json["schema_version"], "shipper.preflight.v1");
+    assert!(json["plan_id"].is_string());
+    assert_eq!(json["token_detected"], false);
+    assert!(json["finishability"].is_string());
+    assert!(json["packages"].is_array());
+    assert!(json["proofs"].is_array());
+    assert!(json["gaps"].is_array());
+    assert!(json["failed_checks"].is_array());
+    registry.join();
+}
+
+#[test]
+fn preflight_command_with_policy_flags() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+    fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
+    let registry = spawn_registry(vec![404], 4);
+
+    // Test with --policy fast
+    let mut cmd = shipper_cmd();
+    cmd.arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--api-base")
+        .arg(&registry.base_url)
+        .arg("--allow-dirty")
+        .arg("--policy")
+        .arg("fast")
+        .arg("preflight")
+        .env("CARGO_HOME", td.path().join("cargo-home"))
+        .env_remove("CARGO_REGISTRY_TOKEN")
+        .env_remove("CARGO_REGISTRIES_CRATES_IO_TOKEN")
+        .assert()
+        .success();
+
+    // Test with --verify-mode package
+    let mut cmd = shipper_cmd();
+    cmd.arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--api-base")
+        .arg(&registry.base_url)
+        .arg("--allow-dirty")
+        .arg("--verify-mode")
+        .arg("package")
+        .arg("preflight")
+        .env("CARGO_HOME", td.path().join("cargo-home"))
+        .env_remove("CARGO_REGISTRY_TOKEN")
+        .env_remove("CARGO_REGISTRIES_CRATES_IO_TOKEN")
+        .assert()
+        .success();
+
+    registry.join();
+}
+
+#[test]
+fn preflight_command_reports_already_published() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+    fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
+    let registry = spawn_registry(vec![200], 2);
+
+    let mut cmd = shipper_cmd();
+    let out = cmd
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--api-base")
+        .arg(&registry.base_url)
+        .arg("--allow-dirty")
+        .arg("--skip-ownership-check")
+        .arg("preflight")
+        .env("CARGO_HOME", td.path().join("cargo-home"))
+        .env_remove("CARGO_REGISTRY_TOKEN")
+        .env_remove("CARGO_REGISTRIES_CRATES_IO_TOKEN")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(out).expect("utf8");
+    assert!(stdout.contains("Already published: 1"));
+    registry.join();
+}
+
+#[test]
+fn publish_command_e2e_with_fake_cargo() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+
+    let bin_dir = td.path().join("fake-bin");
+    fs::create_dir_all(&bin_dir).expect("mkdir");
+    create_fake_cargo_proxy(&bin_dir);
+
+    let old_path = env::var("PATH").unwrap_or_default();
+    let mut new_path = bin_dir.display().to_string();
+    if !old_path.is_empty() {
+        new_path.push_str(path_sep());
+        new_path.push_str(&old_path);
+    }
+    let real_cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+
+    let registry = spawn_registry(vec![404, 200], 2);
+
+    let mut cmd = shipper_cmd();
+    let out = cmd
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--api-base")
+        .arg(&registry.base_url)
+        .arg("--allow-dirty")
+        .arg("--verify-timeout")
+        .arg("0ms")
+        .arg("--verify-poll")
+        .arg("0ms")
+        .arg("--max-attempts")
+        .arg("1")
+        .arg("--state-dir")
+        .arg(".shipper")
+        .arg("publish")
+        .env("PATH", new_path)
+        .env("REAL_CARGO", real_cargo)
+        .env("SHIPPER_FAKE_PUBLISH_EXIT", "0")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(out).expect("utf8");
+    assert!(stdout.contains("demo@0.1.0: Published"));
+    assert!(td.path().join(".shipper").join("state.json").exists());
+    assert!(td.path().join(".shipper").join("receipt.json").exists());
+    registry.join();
+}
+
+#[test]
+fn publish_then_resume_e2e_with_absolute_state_dir() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+
+    let bin_dir = td.path().join("fake-bin");
+    fs::create_dir_all(&bin_dir).expect("mkdir");
+    create_fake_cargo_proxy(&bin_dir);
+
+    let old_path = env::var("PATH").unwrap_or_default();
+    let mut new_path = bin_dir.display().to_string();
+    if !old_path.is_empty() {
+        new_path.push_str(path_sep());
+        new_path.push_str(&old_path);
+    }
+    let real_cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let abs_state = td.path().join("shipper-state-abs");
+
+    let registry = spawn_registry(vec![404, 200], 2);
+
+    let mut publish = shipper_cmd();
+    publish
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--api-base")
+        .arg(&registry.base_url)
+        .arg("--allow-dirty")
+        .arg("--verify-timeout")
+        .arg("0ms")
+        .arg("--verify-poll")
+        .arg("0ms")
+        .arg("--max-attempts")
+        .arg("1")
+        .arg("--state-dir")
+        .arg(&abs_state)
+        .arg("publish")
+        .env("PATH", &new_path)
+        .env("REAL_CARGO", &real_cargo)
+        .env("SHIPPER_FAKE_PUBLISH_EXIT", "0")
+        .assert()
+        .success();
+    registry.join();
+
+    let mut resume = shipper_cmd();
+    let out = resume
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--api-base")
+        .arg("http://127.0.0.1:9")
+        .arg("--allow-dirty")
+        .arg("--force-resume")
+        .arg("--state-dir")
+        .arg(&abs_state)
+        .arg("resume")
+        .env("PATH", &new_path)
+        .env("REAL_CARGO", &real_cargo)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(out).expect("utf8");
+    assert!(stdout.contains("plan_id:"));
+    assert!(stdout.contains("state:"));
+    assert!(stdout.contains("receipt:"));
+}
+
+#[test]
+fn invalid_duration_flag_fails() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+
+    shipper_cmd()
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--base-delay")
+        .arg("not-a-duration")
+        .arg("plan")
+        .assert()
+        .failure()
+        .stderr(contains("invalid duration"));
+}
+
+#[test]
+fn inspect_receipt_command_displays_new_fields() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+
+    let bin_dir = td.path().join("fake-bin");
+    fs::create_dir_all(&bin_dir).expect("mkdir");
+    create_fake_cargo_proxy(&bin_dir);
+
+    let old_path = env::var("PATH").unwrap_or_default();
+    let mut new_path = bin_dir.display().to_string();
+    if !old_path.is_empty() {
+        new_path.push_str(path_sep());
+        new_path.push_str(&old_path);
+    }
+    let real_cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+
+    let registry = spawn_registry(vec![404, 200], 2);
+
+    // First publish to create a receipt
+    let mut publish = shipper_cmd();
+    publish
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--api-base")
+        .arg(&registry.base_url)
+        .arg("--allow-dirty")
+        .arg("--verify-timeout")
+        .arg("0ms")
+        .arg("--verify-poll")
+        .arg("0ms")
+        .arg("--max-attempts")
+        .arg("1")
+        .arg("--state-dir")
+        .arg(".shipper")
+        .arg("publish")
+        .env("PATH", &new_path)
+        .env("REAL_CARGO", &real_cargo)
+        .env("SHIPPER_FAKE_PUBLISH_EXIT", "0")
+        .assert()
+        .success();
+    registry.join();
+
+    // Now inspect the receipt
+    let mut inspect = shipper_cmd();
+    let out = inspect
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--state-dir")
+        .arg(".shipper")
+        .arg("inspect-receipt")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(out).expect("utf8");
+    // Check that new fields are displayed
+    assert!(stdout.contains("Receipt"));
+    assert!(stdout.contains("Git Context") || stdout.contains("Environment"));
+    assert!(stdout.contains("Shipper:") || stdout.contains("Cargo:") || stdout.contains("Rust:"));
+}
+
+#[test]
+fn ci_github_actions_includes_cache() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+
+    let mut cmd = shipper_cmd();
+    let out = cmd
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("ci")
+        .arg("github-actions")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(out).expect("utf8");
+    // Check that cache configuration is included
+    assert!(stdout.contains("actions/cache@v3"));
+    assert!(stdout.contains("shipper-${{"));
+    assert!(stdout.contains("restore-keys"));
+}
+
+#[test]
+fn ci_gitlab_includes_cache() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+
+    let mut cmd = shipper_cmd();
+    let out = cmd
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("ci")
+        .arg("gitlab")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(out).expect("utf8");
+    // Check that cache configuration is included
+    assert!(stdout.contains("cache:"));
+    assert!(stdout.contains("key:"));
+    assert!(stdout.contains("paths:"));
+}
+
+#[test]
+fn preflight_command_finishability_proven() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+    fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
+    let registry = spawn_registry(vec![404], 2);
+
+    let mut cmd = shipper_cmd();
+    let out = cmd
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--api-base")
+        .arg(&registry.base_url)
+        .arg("--allow-dirty")
+        .arg("--skip-ownership-check")
+        .arg("preflight")
+        .env("CARGO_HOME", td.path().join("cargo-home"))
+        .env("CARGO_REGISTRY_TOKEN", "fake-token")
+        .env_remove("CARGO_REGISTRIES_CRATES_IO_TOKEN")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(out).expect("utf8");
+    assert!(stdout.contains("PROVEN"));
+    registry.join();
+}
+
+#[test]
+fn preflight_command_finishability_failed() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+    fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
+    let registry = spawn_registry(vec![404], 2);
+
+    // Set up fake cargo to fail dry-run
+    let bin = td.path().join("bin");
+    fs::create_dir_all(&bin).expect("mkdir");
+    #[cfg(windows)]
+    {
+        // cargo_publish_dry_run_workspace sends: cargo publish --workspace --dry-run [--allow-dirty]
+        // Check %3 for --dry-run (after publish and --workspace)
+        fs::write(
+            bin.join("cargo.cmd"),
+            "@echo off\r\nif \"%1\"==\"publish\" if \"%3\"==\"--dry-run\" exit /b 1\r\n\"%REAL_CARGO%\" %*\r\n",
+        )
+        .expect("write fake cargo");
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = bin.join("cargo");
+        fs::write(
+            &path,
+            "#!/usr/bin/env sh\nif [ \"$1\" = \"publish\" ]; then\n  for arg in \"$@\"; do\n    [ \"$arg\" = \"--dry-run\" ] && exit 1\n  done\nfi\n\"$REAL_CARGO\" \"$@\"\n",
+        )
+        .expect("write fake cargo");
+        let mut perms = fs::metadata(&path).expect("meta").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).expect("chmod");
+    }
+
+    let old_path = env::var("PATH").unwrap_or_default();
+    let mut new_path = bin.display().to_string();
+    if !old_path.is_empty() {
+        new_path.push_str(path_sep());
+        new_path.push_str(&old_path);
+    }
+    let real_cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+
+    // Use SHIPPER_CARGO_BIN to point directly at the fake script, bypassing PATH resolution
+    #[cfg(windows)]
+    let fake_cargo_path = bin.join("cargo.cmd");
+    #[cfg(not(windows))]
+    let fake_cargo_path = bin.join("cargo");
+
+    let mut cmd = shipper_cmd();
+    let out = cmd
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--api-base")
+        .arg(&registry.base_url)
+        .arg("--allow-dirty")
+        .arg("--skip-ownership-check")
+        .arg("preflight")
+        .env("PATH", new_path)
+        .env("REAL_CARGO", real_cargo)
+        .env("SHIPPER_CARGO_BIN", &fake_cargo_path)
+        .env("CARGO_HOME", td.path().join("cargo-home"))
+        .env_remove("CARGO_REGISTRY_TOKEN")
+        .env_remove("CARGO_REGISTRIES_CRATES_IO_TOKEN")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(out).expect("utf8");
+    assert!(stdout.contains("FAILED"));
+    registry.join();
+}
+
+#[test]
+fn preflight_command_with_new_crates() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+    fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
+    // Mock registry: crate doesn't exist
+    let registry = spawn_registry(
+        vec![
+            (404), // crate check
+            (404), // version check
+        ],
+        2,
+    );
+
+    let mut cmd = shipper_cmd();
+    let out = cmd
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--api-base")
+        .arg(&registry.base_url)
+        .arg("--allow-dirty")
+        .arg("--skip-ownership-check")
+        .arg("preflight")
+        .env("CARGO_HOME", td.path().join("cargo-home"))
+        .env_remove("CARGO_REGISTRY_TOKEN")
+        .env_remove("CARGO_REGISTRIES_CRATES_IO_TOKEN")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(out).expect("utf8");
+    assert!(stdout.contains("New crates: 1"));
+    registry.join();
+}
+
+#[test]
+fn inspect_receipt_command_with_git_context() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+
+    let bin_dir = td.path().join("fake-bin");
+    fs::create_dir_all(&bin_dir).expect("mkdir");
+    create_fake_cargo_proxy(&bin_dir);
+
+    let old_path = env::var("PATH").unwrap_or_default();
+    let mut new_path = bin_dir.display().to_string();
+    if !old_path.is_empty() {
+        new_path.push_str(path_sep());
+        new_path.push_str(&old_path);
+    }
+    let real_cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+
+    let registry = spawn_registry(vec![404, 200], 2);
+
+    // First publish to create a receipt
+    let mut publish = shipper_cmd();
+    publish
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--api-base")
+        .arg(&registry.base_url)
+        .arg("--allow-dirty")
+        .arg("--verify-timeout")
+        .arg("0ms")
+        .arg("--verify-poll")
+        .arg("0ms")
+        .arg("--max-attempts")
+        .arg("1")
+        .arg("--state-dir")
+        .arg(".shipper")
+        .arg("publish")
+        .env("PATH", new_path.clone())
+        .env("REAL_CARGO", real_cargo.clone())
+        .env("SHIPPER_FAKE_PUBLISH_EXIT", "0")
+        .assert()
+        .success();
+    registry.join();
+
+    // Now inspect receipt
+    let mut inspect = shipper_cmd();
+    let out = inspect
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--state-dir")
+        .arg(".shipper")
+        .arg("inspect-receipt")
+        .arg("--format")
+        .arg("json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(out).expect("utf8");
+    // Check that new fields are in JSON output
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert!(json.get("git_context").is_some());
+    assert!(json.get("environment").is_some());
+    let env = json.get("environment").unwrap();
+    assert!(env.get("shipper_version").is_some());
+    assert!(env.get("cargo_version").is_some());
+    assert!(env.get("rust_version").is_some());
+    assert!(env.get("os").is_some());
+    assert!(env.get("arch").is_some());
+}
+
+#[test]
+fn inspect_receipt_command_with_environment_fingerprint() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+
+    let bin_dir = td.path().join("fake-bin");
+    fs::create_dir_all(&bin_dir).expect("mkdir");
+    create_fake_cargo_proxy(&bin_dir);
+
+    let old_path = env::var("PATH").unwrap_or_default();
+    let mut new_path = bin_dir.display().to_string();
+    if !old_path.is_empty() {
+        new_path.push_str(path_sep());
+        new_path.push_str(&old_path);
+    }
+    let real_cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+
+    let registry = spawn_registry(vec![404, 200], 2);
+
+    // First publish to create a receipt
+    let mut publish = shipper_cmd();
+    publish
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--api-base")
+        .arg(&registry.base_url)
+        .arg("--allow-dirty")
+        .arg("--verify-timeout")
+        .arg("0ms")
+        .arg("--verify-poll")
+        .arg("0ms")
+        .arg("--max-attempts")
+        .arg("1")
+        .arg("--state-dir")
+        .arg(".shipper")
+        .arg("publish")
+        .env("PATH", new_path.clone())
+        .env("REAL_CARGO", real_cargo.clone())
+        .env("SHIPPER_FAKE_PUBLISH_EXIT", "0")
+        .assert()
+        .success();
+    registry.join();
+
+    // Now inspect receipt
+    let mut inspect = shipper_cmd();
+    let out = inspect
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--state-dir")
+        .arg(".shipper")
+        .arg("inspect-receipt")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(out).expect("utf8");
+    // Check that environment fingerprint fields are displayed
+    assert!(stdout.contains("Environment"));
+    assert!(stdout.contains("Shipper:") || stdout.contains("Shipper Version"));
+    assert!(stdout.contains("Cargo:") || stdout.contains("Cargo Version"));
+    assert!(stdout.contains("Rust:") || stdout.contains("Rust Version"));
+    assert!(stdout.contains("OS:") || stdout.contains("OS"));
+    assert!(stdout.contains("Arch:") || stdout.contains("Architecture"));
+}
+
+#[test]
+fn preflight_command_json_output_structure() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+    fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
+    let registry = spawn_registry(vec![404], 2);
+
+    let mut cmd = shipper_cmd();
+    let out = cmd
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--api-base")
+        .arg(&registry.base_url)
+        .arg("--allow-dirty")
+        .arg("--skip-ownership-check")
+        .arg("preflight")
+        .arg("--format")
+        .arg("json")
+        .env("CARGO_HOME", td.path().join("cargo-home"))
+        .env_remove("CARGO_REGISTRY_TOKEN")
+        .env_remove("CARGO_REGISTRIES_CRATES_IO_TOKEN")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(out).expect("utf8");
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+
+    // Verify JSON structure
+    assert!(json.get("plan_id").is_some());
+    assert!(json.get("token_detected").is_some());
+    assert!(json.get("finishability").is_some());
+    assert!(json.get("packages").is_some());
+    assert!(json.get("timestamp").is_some());
+    assert_eq!(
+        json.pointer("/schema_version")
+            .and_then(serde_json::Value::as_str),
+        Some("shipper.preflight.v1")
+    );
+    assert_eq!(
+        json.pointer("/estimated_publish_duration/registry_profile"),
+        Some(&serde_json::Value::String("crates-io".to_string()))
+    );
+    assert_eq!(
+        json.pointer("/estimated_publish_duration/first_publish_count")
+            .and_then(serde_json::Value::as_u64),
+        Some(1)
+    );
+    assert!(
+        json.pointer("/estimated_publish_duration/minimum_registry_pacing")
+            .is_some()
+    );
+    assert_eq!(
+        json.pointer("/registry_profile/name")
+            .and_then(serde_json::Value::as_str),
+        Some("crates-io")
+    );
+    assert_eq!(
+        json.pointer("/registry_profile/first_publish_count")
+            .and_then(serde_json::Value::as_u64),
+        Some(1)
+    );
+
+    let proofs = json["proofs"].as_array().expect("proofs array");
+    assert!(proofs.iter().any(|item| {
+        item["id"].as_str() == Some("local_dry_run") && item["status"].as_str() == Some("passed")
+    }));
+    assert!(proofs.iter().any(|item| {
+        item["id"].as_str() == Some("registry_version_checks")
+            && item["status"].as_str() == Some("completed")
+    }));
+
+    let gaps = json["gaps"].as_array().expect("gaps array");
+    assert!(gaps.iter().any(|item| {
+        item["id"].as_str() == Some("ownership_unverified")
+            && item["status"].as_str() == Some("not_proven")
+    }));
+    assert!(gaps.iter().any(|item| {
+        item["id"].as_str() == Some("registry_auth_missing")
+            && item["status"].as_str() == Some("not_proven")
+    }));
+
+    assert_eq!(
+        json.pointer("/artifacts/0/kind")
+            .and_then(serde_json::Value::as_str),
+        Some("preflight_json_stdout")
+    );
+
+    // Verify packages array structure
+    let packages = json.get("packages").unwrap().as_array().unwrap();
+    assert_eq!(packages.len(), 1);
+    let pkg = &packages[0];
+    assert!(pkg.get("name").is_some());
+    assert!(pkg.get("version").is_some());
+    assert!(pkg.get("already_published").is_some());
+    assert!(pkg.get("is_new_crate").is_some());
+    assert!(pkg.get("auth_type").is_some());
+    assert!(pkg.get("ownership_verified").is_some());
+    assert!(pkg.get("dry_run_passed").is_some());
+
+    registry.join();
+}
+
+#[test]
+fn preflight_json_reports_trusted_publishing_without_minted_token() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+    fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
+    let registry = spawn_registry(vec![404], 2);
+
+    let mut cmd = shipper_cmd();
+    let out = cmd
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--api-base")
+        .arg(&registry.base_url)
+        .arg("--allow-dirty")
+        .arg("--skip-ownership-check")
+        .arg("preflight")
+        .arg("--format")
+        .arg("json")
+        .env("CARGO_HOME", td.path().join("cargo-home"))
+        .env_remove("CARGO_REGISTRY_TOKEN")
+        .env_remove("CARGO_REGISTRIES_CRATES_IO_TOKEN")
+        .env(
+            "ACTIONS_ID_TOKEN_REQUEST_URL",
+            "https://example.invalid/oidc",
+        )
+        .env("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "oidc-token")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(out).expect("utf8");
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert_eq!(json["token_detected"], false);
+    assert_eq!(
+        json.pointer("/packages/0/auth_type")
+            .and_then(serde_json::Value::as_str),
+        Some("trusted_publishing")
+    );
+
+    let gaps = json["gaps"].as_array().expect("gaps array");
+    assert!(gaps.iter().any(|item| {
+        item["id"].as_str() == Some("trusted_publishing_token_not_minted")
+            && item["status"].as_str() == Some("not_proven")
+    }));
+
+    registry.join();
+}

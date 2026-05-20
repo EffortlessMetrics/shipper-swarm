@@ -1,0 +1,5 @@
+---
+source: crates/shipper-cli/tests/e2e_expanded.rs
+expression: normalize_output(&stdout)
+---
+No event logs found under <STATE_DIR>

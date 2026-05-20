@@ -1,0 +1,29 @@
+[package]
+name = "shipper-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Configuration file handling for shipper"
+repository = "https://github.com/EffortlessMetrics/shipper"
+documentation = "https://docs.rs/shipper-config"
+keywords = ["config", "toml", "publish"]
+categories = ["development-tools"]
+
+[dependencies]
+serde.workspace = true
+anyhow = "1.0"
+toml = "1.0"
+serde_with = "3.20.0"
+shipper-types.workspace = true
+shipper-encrypt.workspace = true
+shipper-webhook.workspace = true
+shipper-retry.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+proptest = { workspace = true }
+insta = { version = "1", features = ["yaml"] }
+
+[lints]
+workspace = true

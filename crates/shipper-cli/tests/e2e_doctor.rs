@@ -1,0 +1,460 @@
+//! End-to-end tests for the `shipper doctor` command.
+
+use std::fs;
+use std::path::Path;
+use std::process::Command as StdCommand;
+use std::thread;
+
+use assert_cmd::Command;
+use predicates::str::contains;
+use tempfile::tempdir;
+use tiny_http::{Header, Response, Server, StatusCode};
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn write_file(path: &Path, content: &str) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("mkdir");
+    }
+    fs::write(path, content).expect("write");
+}
+
+fn create_workspace(root: &Path) {
+    write_file(
+        &root.join("Cargo.toml"),
+        r#"
+[workspace]
+members = ["demo"]
+resolver = "2"
+"#,
+    );
+    write_file(
+        &root.join("demo/Cargo.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write_file(&root.join("demo/src/lib.rs"), "pub fn demo() {}\n");
+}
+
+fn shipper_cmd() -> Command {
+    Command::new(assert_cmd::cargo::cargo_bin!("shipper-cli"))
+}
+
+fn init_git_repo(root: &Path) {
+    let output = StdCommand::new("git")
+        .arg("init")
+        .current_dir(root)
+        .output()
+        .expect("git init");
+    assert!(
+        output.status.success(),
+        "git init failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+struct TestRegistry {
+    base_url: String,
+    handle: thread::JoinHandle<()>,
+}
+
+impl TestRegistry {
+    fn join(self) {
+        self.handle.join().expect("join server");
+    }
+}
+
+fn spawn_registry(expected_requests: usize) -> TestRegistry {
+    let server = Server::http("127.0.0.1:0").expect("server");
+    let base_url = format!("http://{}", server.server_addr());
+    let handle = thread::spawn(move || {
+        for _ in 0..expected_requests {
+            let req = match server.recv_timeout(std::time::Duration::from_secs(30)) {
+                Ok(Some(r)) => r,
+                _ => break,
+            };
+            let resp = Response::from_string(r#"{"crate":{"id":"serde"}}"#)
+                .with_status_code(StatusCode(200))
+                .with_header(
+                    Header::from_bytes("Content-Type", "application/json").expect("header"),
+                );
+            req.respond(resp).expect("respond");
+        }
+    });
+    TestRegistry { base_url, handle }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+/// 1. Doctor shows cargo version
+#[test]
+fn doctor_shows_cargo_version() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+    fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
+
+    let registry = spawn_registry(1);
+
+    shipper_cmd()
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--api-base")
+        .arg(&registry.base_url)
+        .arg("doctor")
+        .env("CARGO_HOME", td.path().join("cargo-home"))
+        .env_remove("CARGO_REGISTRY_TOKEN")
+        .env_remove("CARGO_REGISTRIES_CRATES_IO_TOKEN")
+        .assert()
+        .success()
+        .stdout(contains("cargo: cargo"));
+
+    registry.join();
+}
+
+/// 2. Doctor shows rust version (via cargo version output which includes toolchain info)
+#[test]
+fn doctor_shows_rust_version() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+    fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
+
+    let registry = spawn_registry(1);
+
+    let output = shipper_cmd()
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--api-base")
+        .arg(&registry.base_url)
+        .arg("doctor")
+        .env("CARGO_HOME", td.path().join("cargo-home"))
+        .env_remove("CARGO_REGISTRY_TOKEN")
+        .env_remove("CARGO_REGISTRIES_CRATES_IO_TOKEN")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(output).expect("utf8");
+    // cargo version line embeds the toolchain version (e.g. "cargo 1.92.0 ...")
+    let cargo_line = stdout
+        .lines()
+        .find(|l| l.starts_with("cargo: "))
+        .expect("expected a cargo: line");
+    assert!(
+        cargo_line.contains('.'),
+        "cargo version should contain a dot-separated version number, got: {cargo_line}"
+    );
+
+    registry.join();
+}
+
+/// 3. Doctor detects CARGO_REGISTRY_TOKEN when set
+#[test]
+fn doctor_detects_token_when_set() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+    fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
+
+    let registry = spawn_registry(1);
+
+    temp_env::with_vars(
+        [("CARGO_REGISTRY_TOKEN", Some("secret-test-token"))],
+        || {
+            shipper_cmd()
+                .arg("--manifest-path")
+                .arg(td.path().join("Cargo.toml"))
+                .arg("--api-base")
+                .arg(&registry.base_url)
+                .arg("doctor")
+                .env("CARGO_HOME", td.path().join("cargo-home"))
+                .env_remove("CARGO_REGISTRIES_CRATES_IO_TOKEN")
+                .assert()
+                .success()
+                .stdout(contains("auth_type: token (detected)"));
+        },
+    );
+
+    registry.join();
+}
+
+#[test]
+fn doctor_json_format_reports_diagnostics_without_token_value() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+    fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
+
+    let registry = spawn_registry(1);
+
+    let output = shipper_cmd()
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--api-base")
+        .arg(&registry.base_url)
+        .arg("--format")
+        .arg("json")
+        .arg("doctor")
+        .env("CARGO_HOME", td.path().join("cargo-home"))
+        .env("CARGO_REGISTRY_TOKEN", "secret-test-token")
+        .env_remove("CARGO_REGISTRIES_CRATES_IO_TOKEN")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(output).expect("utf8");
+    assert!(
+        !stdout.contains("secret-test-token"),
+        "doctor JSON must not expose token values: {stdout}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert_eq!(
+        json.pointer("/schema_version")
+            .and_then(serde_json::Value::as_str),
+        Some("shipper.doctor.v1")
+    );
+    assert_eq!(
+        json.pointer("/reports/0/registry/name")
+            .and_then(serde_json::Value::as_str),
+        Some("crates-io")
+    );
+    assert_eq!(
+        json.pointer("/reports/0/auth/auth_type")
+            .and_then(serde_json::Value::as_str),
+        Some("token (detected)")
+    );
+    assert_eq!(
+        json.pointer("/reports/0/connectivity/registry_reachable")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert!(
+        json.pointer("/reports/0/tools/0/version")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+    );
+
+    registry.join();
+}
+
+#[test]
+fn doctor_json_format_redacts_registry_url_secrets() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+    fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    let dead_port = listener.local_addr().expect("local_addr").port();
+    drop(listener);
+    let api_base = format!(
+        "http://user:url-user-secret@127.0.0.1:{dead_port}/api?token=url-token-secret&api_key=url-key-secret&scope=all"
+    );
+
+    let output = shipper_cmd()
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--api-base")
+        .arg(&api_base)
+        .arg("--format")
+        .arg("json")
+        .arg("doctor")
+        .env("CARGO_HOME", td.path().join("cargo-home"))
+        .env_remove("CARGO_REGISTRY_TOKEN")
+        .env_remove("CARGO_REGISTRIES_CRATES_IO_TOKEN")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(output).expect("utf8");
+    assert!(!stdout.contains("url-user-secret"), "{stdout}");
+    assert!(!stdout.contains("url-token-secret"), "{stdout}");
+    assert!(!stdout.contains("url-key-secret"), "{stdout}");
+    assert!(stdout.contains("[REDACTED]"), "{stdout}");
+
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let api_base = json
+        .pointer("/reports/0/registry/api_base")
+        .and_then(serde_json::Value::as_str)
+        .expect("api_base");
+    assert!(!api_base.contains("url-token-secret"));
+    assert!(!api_base.contains("url-key-secret"));
+
+    let error = json
+        .pointer("/reports/0/connectivity/registry_error")
+        .and_then(serde_json::Value::as_str)
+        .expect("registry error");
+    assert!(!error.contains("url-token-secret"));
+    assert!(!error.contains("url-key-secret"));
+}
+
+/// 4. Doctor reports missing token when not set
+#[test]
+fn doctor_reports_missing_token() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+    fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
+
+    let registry = spawn_registry(1);
+
+    temp_env::with_vars(
+        [
+            ("CARGO_REGISTRY_TOKEN", None::<&str>),
+            ("CARGO_REGISTRIES_CRATES_IO_TOKEN", None::<&str>),
+        ],
+        || {
+            shipper_cmd()
+                .arg("--manifest-path")
+                .arg(td.path().join("Cargo.toml"))
+                .arg("--api-base")
+                .arg(&registry.base_url)
+                .arg("doctor")
+                .env("CARGO_HOME", td.path().join("cargo-home"))
+                .env_remove("CARGO_REGISTRY_TOKEN")
+                .env_remove("CARGO_REGISTRIES_CRATES_IO_TOKEN")
+                .assert()
+                .success()
+                .stdout(contains("NONE FOUND"));
+        },
+    );
+
+    registry.join();
+}
+
+/// 5. Doctor shows workspace info when run in a workspace
+#[test]
+fn doctor_shows_workspace_info() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+    fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
+
+    let registry = spawn_registry(1);
+
+    shipper_cmd()
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--api-base")
+        .arg(&registry.base_url)
+        .arg("doctor")
+        .env("CARGO_HOME", td.path().join("cargo-home"))
+        .env_remove("CARGO_REGISTRY_TOKEN")
+        .env_remove("CARGO_REGISTRIES_CRATES_IO_TOKEN")
+        .assert()
+        .success()
+        .stdout(contains("workspace_root:"))
+        .stdout(contains("registry:"))
+        .stdout(contains("state_dir:"));
+
+    registry.join();
+}
+
+/// 6. Doctor reports .shipper directory status (not yet created)
+#[test]
+fn doctor_reports_shipper_directory_status() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+    fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
+    // Do NOT create .shipper dir so doctor reports it as missing
+    assert!(!td.path().join(".shipper").exists());
+
+    let registry = spawn_registry(1);
+
+    shipper_cmd()
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--api-base")
+        .arg(&registry.base_url)
+        .arg("doctor")
+        .env("CARGO_HOME", td.path().join("cargo-home"))
+        .env_remove("CARGO_REGISTRY_TOKEN")
+        .env_remove("CARGO_REGISTRIES_CRATES_IO_TOKEN")
+        .assert()
+        .success()
+        .stdout(contains("state_dir_exists: false (will be created)"));
+
+    registry.join();
+}
+
+/// 7. Doctor reports state file if present (.shipper dir exists with state.json)
+#[test]
+fn doctor_reports_state_file_if_present() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+    fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
+
+    // Create .shipper directory with a state.json file
+    let shipper_dir = td.path().join(".shipper");
+    fs::create_dir_all(&shipper_dir).expect("mkdir .shipper");
+    fs::write(
+        shipper_dir.join("state.json"),
+        r#"{"state_version":"shipper.state.v1"}"#,
+    )
+    .expect("write state.json");
+
+    let registry = spawn_registry(1);
+
+    shipper_cmd()
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--api-base")
+        .arg(&registry.base_url)
+        .arg("doctor")
+        .env("CARGO_HOME", td.path().join("cargo-home"))
+        .env_remove("CARGO_REGISTRY_TOKEN")
+        .env_remove("CARGO_REGISTRIES_CRATES_IO_TOKEN")
+        .assert()
+        .success()
+        .stdout(contains("state_dir:"))
+        .stdout(contains("state_dir_writable: true"));
+
+    registry.join();
+}
+
+/// 8. Doctor turns dirty git state into an actionable finding.
+#[test]
+fn doctor_reports_dirty_git_remediation() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+    init_git_repo(td.path());
+    fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
+
+    let registry = spawn_registry(1);
+
+    shipper_cmd()
+        .current_dir(td.path())
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--api-base")
+        .arg(&registry.base_url)
+        .arg("doctor")
+        .env("CARGO_HOME", td.path().join("cargo-home"))
+        .env_remove("CARGO_REGISTRY_TOKEN")
+        .env_remove("CARGO_REGISTRIES_CRATES_IO_TOKEN")
+        .assert()
+        .success()
+        .stdout(contains("git_dirty: true"))
+        .stdout(contains(
+            "[blocked] git working tree is dirty (git-working-tree-dirty)",
+        ))
+        .stdout(contains(
+            "why: release evidence must describe the exact source tree being planned, proven, published, and resumed",
+        ))
+        .stdout(contains(
+            "- commit, stash, or revert unrelated changes before release",
+        ))
+        .stdout(contains(
+            "- use `--allow-dirty` only for intentional local rehearsal",
+        ));
+
+    registry.join();
+}

@@ -1,0 +1,473 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Nightly quick fuzz and elevated property tests
+    - cron: '0 3 * * *'
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+
+# Least privilege - default to read-only
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint (fmt + clippy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  policy:
+    # File-policy enforcement.
+    #
+    # As of rollout PR 12 (#211): all seven file-policy checks run in
+    # --mode blocking-allowlist. CI fails on unreceipted files, missing
+    # required fields, or expired entries in any of:
+    #
+    #   - non-Rust file allowlist (policy/non-rust-allowlist.toml)
+    #   - generated allowlist
+    #   - executable allowlist
+    #   - dependency-surface allowlist
+    #   - workflow allowlist
+    #   - process policy (per-workflow command set)
+    #   - network policy (per-workflow endpoint set)
+    #
+    # The check-process-policy detector was refined in PR 12 to only
+    # consider the first word of each shell command inside `run:` blocks
+    # (see xtask/src/workflow_checks.rs::detect_commands_in_runs), so
+    # build-target names like `shipper` no longer false-positive.
+    #
+    # `blocking-strict` mode (fails on unused entries + stale review
+    # dates) remains out of scope until a dedicated cleanup pass.
+    #
+    # Source-of-truth document contracts run in advisory mode first. They
+    # produce target/policy/doc-contracts-report.* but do not gate merges yet.
+    #
+    # The unified policy-report runs at the end and uploads
+    # target/policy/ as a `policy-reports` artifact regardless of
+    # pass/fail (`if: always()`). See docs/policy/NON_RUST_ROLLOUT.md.
+    name: Policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-policy-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-policy-
+
+      - name: check-file-policy (blocking-allowlist)
+        run: cargo xtask check-file-policy --mode blocking-allowlist
+
+      - name: check-generated (blocking-allowlist)
+        run: cargo xtask check-generated --mode blocking-allowlist
+
+      - name: check-executable-files (blocking-allowlist)
+        run: cargo xtask check-executable-files --mode blocking-allowlist
+
+      - name: check-dependency-surfaces (blocking-allowlist)
+        run: cargo xtask check-dependency-surfaces --mode blocking-allowlist
+
+      - name: check-workflow-surfaces (blocking-allowlist)
+        run: cargo xtask check-workflow-surfaces --mode blocking-allowlist
+
+      - name: check-process-policy (blocking-allowlist)
+        run: cargo xtask check-process-policy --mode blocking-allowlist
+
+      - name: check-network-policy (blocking-allowlist)
+        run: cargo xtask check-network-policy --mode blocking-allowlist
+
+      - name: check-doc-contracts (advisory)
+        run: cargo xtask check-doc-contracts --mode advisory
+
+      - name: Unified policy report
+        if: always()
+        run: cargo xtask policy-report
+
+      - name: Upload policy reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: policy-reports
+          path: target/policy/
+          if-no-files-found: error
+          retention-days: 30
+
+  test:
+    name: Tests (nextest)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Cache Cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Run tests
+        run: cargo nextest run --workspace --all-features --profile ci
+        env:
+          # Keep snapshots from updating in CI
+          INSTA_UPDATE: "no"
+          # Matrix lane runs reduced proptest intensity on every trigger.
+          # Full-strength crypto proving lives in the `crypto-proptests-heavy`
+          # job below (Ubuntu-only, schedule + push-main + dispatch).
+          PROPTEST_CASES: "16"
+          PROPTEST_MAX_SHRINK_ITERS: "1000"
+
+      - name: Run doc tests
+        run: cargo test --workspace --doc
+
+      - name: Upload JUnit
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-${{ matrix.os }}
+          path: target/nextest/ci/junit.xml
+          retention-days: 14
+
+  install-smoke:
+    name: Install Smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-install-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-install-
+
+      - name: Install shipper facade crate
+        run: |
+          cargo install --path crates/shipper --locked --root "$RUNNER_TEMP/shipper-install"
+          echo "$RUNNER_TEMP/shipper-install/bin" >> "$GITHUB_PATH"
+
+      - name: Verify installed shipper
+        run: |
+          shipper --version
+          shipper --help
+          shipper doctor --help
+          shipper plan --help
+          shipper preflight --help
+
+  crypto-proptests-heavy:
+    name: Crypto Proptests (full strength, ubuntu)
+    # Deep crypto proving lane. The PR matrix above runs proptests with
+    # reduced intensity (PROPTEST_CASES=16) so that `shipper-encrypt`'s
+    # Argon2-bound property tests don't dominate wall clock on every PR.
+    # This job restores full-strength coverage on:
+    #   - nightly schedule (0 3 * * *)
+    #   - direct pushes to main
+    #   - manual workflow_dispatch
+    # It intentionally does NOT run on pull_request to keep developer
+    # feedback fast; if you want a specific PR to exercise it, use the
+    # workflow_dispatch trigger on the PR's branch.
+    if: github.event_name == 'schedule' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Cache Cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-crypto-heavy-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-crypto-heavy-
+
+      - name: Run shipper-encrypt proptests at full strength
+        run: cargo nextest run -p shipper-encrypt --all-features --profile ci
+        env:
+          INSTA_UPDATE: "no"
+          PROPTEST_CASES: "256"
+
+      - name: Upload JUnit
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-crypto-heavy
+          path: target/nextest/ci/junit.xml
+          retention-days: 14
+
+  msrv:
+    name: MSRV Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Install Rust (MSRV)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+
+      - name: Cache Cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-msrv-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-msrv-
+
+      - name: Check with MSRV
+        run: cargo check --workspace
+
+  security:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+
+      - name: Run security audit
+        run: cargo audit
+
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-docs-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-docs-
+
+      - name: Build documentation
+        run: cargo doc --workspace --no-deps --document-private-items
+        env:
+          RUSTDOCFLAGS: -Dwarnings
+
+  bdd:
+    name: BDD Tests
+    runs-on: ubuntu-latest
+    needs: [lint]
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Run publish BDD tests
+        run: cargo test -p shipper-cli --test bdd_publish -- --nocapture
+
+      - name: Run resume BDD tests
+        run: cargo test -p shipper-cli --test bdd_resume -- --nocapture
+
+      - name: Run synthetic interruption resume rehearsal
+        run: cargo test -p shipper-cli --test e2e_rehearse -- --nocapture
+
+  fuzz-smoke:
+    name: Fuzz Smoke (PR)
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    needs: [lint]
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly
+          components: rust-src
+
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - name: Cache Cargo + fuzz
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            fuzz/target
+          key: ${{ runner.os }}-fuzz-${{ hashFiles('**/Cargo.lock', 'fuzz/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-fuzz-
+
+      - name: Run fuzz targets briefly
+        env:
+          RUSTUP_TOOLCHAIN: nightly
+        run: |
+          cargo fuzz run load_state --target x86_64-unknown-linux-gnu -- -max_total_time=60
+          cargo fuzz run resolve_token --target x86_64-unknown-linux-gnu -- -max_total_time=60
+          cargo fuzz run schema_version --target x86_64-unknown-linux-gnu -- -max_total_time=60
+          cargo fuzz run release_levels --target x86_64-unknown-linux-gnu -- -max_total_time=60
+          cargo fuzz run redact_output --target x86_64-unknown-linux-gnu -- -max_total_time=60
+
+  cross-platform:
+    name: Build (${{ matrix.os }}, ${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Add cross-compilation target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Cache Cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.target }}-cargo-
+
+      - name: Install cross-compilation tools
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build for target
+        run: cargo build --workspace --target ${{ matrix.target }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+
+  release-build:
+    name: Release Build
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-release-
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Upload release binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: shipper-linux-x86_64
+          path: target/release/shipper
+          retention-days: 7

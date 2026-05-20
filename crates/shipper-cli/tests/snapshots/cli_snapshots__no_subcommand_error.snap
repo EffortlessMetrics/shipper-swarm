@@ -1,0 +1,9 @@
+---
+source: crates/shipper-cli/tests/cli_snapshots.rs
+expression: normalize_output(&stderr)
+---
+error: 'shipper' requires a subcommand but one was not provided
+
+Usage: shipper [OPTIONS] <COMMAND>
+
+For more information, try '--help'.

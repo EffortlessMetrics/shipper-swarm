@@ -1,0 +1,762 @@
+//! Duration parsing and serde codecs for shipper.
+//!
+//! This crate centralizes duration handling so CLI parsing and config/state
+//! serde use one implementation.
+
+use std::time::Duration;
+
+use serde::{Deserialize, Deserializer, Serializer};
+
+/// Parse a human-readable duration string (for example `2s`, `500ms`, `1m`).
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+/// use shipper_duration::parse_duration;
+///
+/// assert_eq!(parse_duration("2s").unwrap(), Duration::from_secs(2));
+/// assert_eq!(parse_duration("500ms").unwrap(), Duration::from_millis(500));
+/// assert_eq!(parse_duration("1m").unwrap(), Duration::from_secs(60));
+/// ```
+pub fn parse_duration(input: &str) -> Result<Duration, humantime::DurationError> {
+    humantime::parse_duration(input)
+}
+
+/// Deserialize a [`Duration`] from either a human-readable string or a millisecond integer.
+pub fn deserialize_duration<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum DurationHelper {
+        String(String),
+        U64(u64),
+    }
+
+    match DurationHelper::deserialize(deserializer)? {
+        DurationHelper::String(s) => parse_duration(&s)
+            .map_err(|e| serde::de::Error::custom(format!("invalid duration: {e}"))),
+        DurationHelper::U64(ms) => Ok(Duration::from_millis(ms)),
+    }
+}
+
+/// Serialize a [`Duration`] as milliseconds (`u64`) for stable round-tripping.
+pub fn serialize_duration<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_u64(duration.as_millis() as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    struct DurationHolder {
+        #[serde(
+            deserialize_with = "deserialize_duration",
+            serialize_with = "serialize_duration"
+        )]
+        value: Duration,
+    }
+
+    #[test]
+    fn parse_duration_accepts_human_readable_values() {
+        assert_eq!(
+            parse_duration("250ms").expect("parse"),
+            Duration::from_millis(250)
+        );
+        assert_eq!(parse_duration("2s").expect("parse"), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn deserialize_accepts_number_and_string() {
+        let from_num: DurationHolder = serde_json::from_str(r#"{"value":1500}"#).expect("json");
+        assert_eq!(from_num.value, Duration::from_millis(1500));
+
+        let from_str: DurationHolder = serde_json::from_str(r#"{"value":"1500ms"}"#).expect("json");
+        assert_eq!(from_str.value, Duration::from_millis(1500));
+    }
+
+    #[test]
+    fn serialize_writes_milliseconds() {
+        let value = DurationHolder {
+            value: Duration::from_millis(4321),
+        };
+        let json = serde_json::to_value(&value).expect("json");
+        assert_eq!(json["value"], 4321);
+    }
+
+    #[test]
+    fn deserialize_rejects_invalid_duration_string() {
+        let err = serde_json::from_str::<DurationHolder>(r#"{"value":"not-a-duration"}"#)
+            .expect_err("must fail");
+        assert!(err.to_string().contains("invalid duration"));
+    }
+
+    proptest! {
+        #[test]
+        fn duration_roundtrips_as_milliseconds(ms in 0_u64..10_000_000_000) {
+            let holder = DurationHolder {
+                value: Duration::from_millis(ms),
+            };
+
+            let json = serde_json::to_string(&holder).expect("serialize");
+            let reparsed: DurationHolder = serde_json::from_str(&json).expect("deserialize");
+
+            prop_assert_eq!(reparsed, holder);
+        }
+    }
+
+    #[test]
+    fn serde_json_full_roundtrip() {
+        let holder = DurationHolder {
+            value: Duration::from_secs(3661),
+        };
+        let json = serde_json::to_string(&holder).unwrap();
+        let reparsed: DurationHolder = serde_json::from_str(&json).unwrap();
+        assert_eq!(reparsed, holder);
+    }
+
+    #[test]
+    fn serde_toml_string_deserialization() {
+        let toml_str = r#"value = "2m 30s""#;
+        let holder: DurationHolder = toml::from_str(toml_str).unwrap();
+        assert_eq!(holder.value, Duration::from_secs(150));
+    }
+
+    #[test]
+    fn deserialize_rejects_boolean() {
+        let err =
+            serde_json::from_str::<DurationHolder>(r#"{"value":true}"#).expect_err("must fail");
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn deserialize_rejects_float() {
+        let err =
+            serde_json::from_str::<DurationHolder>(r#"{"value":1.5}"#).expect_err("must fail");
+        assert!(!err.to_string().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    struct DurationHolder {
+        #[serde(
+            deserialize_with = "deserialize_duration",
+            serialize_with = "serialize_duration"
+        )]
+        value: Duration,
+    }
+
+    proptest! {
+        /// Human-readable formatting always produces a non-empty string.
+        #[test]
+        fn format_is_never_empty(ms in 0u64..10_000_000_000u64) {
+            let d = Duration::from_millis(ms);
+            let formatted = humantime::format_duration(d).to_string();
+            prop_assert!(!formatted.is_empty(), "formatted duration was empty for {ms}ms");
+        }
+
+        /// Formatting the same duration twice always yields the same string.
+        #[test]
+        fn format_consistency(ms in 0u64..10_000_000_000u64) {
+            let d = Duration::from_millis(ms);
+            let first = humantime::format_duration(d).to_string();
+            let second = humantime::format_duration(d).to_string();
+            prop_assert_eq!(first, second);
+        }
+
+        /// format → parse round-trip preserves the original duration.
+        #[test]
+        fn parse_format_roundtrip(ms in 0u64..10_000_000u64) {
+            let d = Duration::from_millis(ms);
+            let formatted = humantime::format_duration(d).to_string();
+            let parsed = parse_duration(&formatted).expect("should parse formatted duration");
+            prop_assert_eq!(parsed, d);
+        }
+
+        /// Sub-second durations mention "ms" in the formatted output.
+        #[test]
+        fn millisecond_range_contains_ms(ms in 1u64..1000u64) {
+            let d = Duration::from_millis(ms);
+            let formatted = humantime::format_duration(d).to_string();
+            prop_assert!(formatted.contains("ms"), "expected 'ms' in \"{formatted}\"");
+        }
+
+        /// Whole-second durations (< 1 min) mention "s" in the formatted output.
+        #[test]
+        fn seconds_range_contains_s(secs in 1u64..60u64) {
+            let d = Duration::from_secs(secs);
+            let formatted = humantime::format_duration(d).to_string();
+            prop_assert!(formatted.contains('s'), "expected 's' in \"{formatted}\"");
+        }
+
+        /// Whole-minute durations mention "m" in the formatted output.
+        #[test]
+        fn minutes_range_contains_m(mins in 1u64..60u64) {
+            let d = Duration::from_secs(mins * 60);
+            let formatted = humantime::format_duration(d).to_string();
+            prop_assert!(formatted.contains('m'), "expected 'm' in \"{formatted}\"");
+        }
+
+        /// Whole-hour durations mention "h" in the formatted output.
+        #[test]
+        fn hours_range_contains_h(hours in 1u64..24u64) {
+            let d = Duration::from_secs(hours * 3600);
+            let formatted = humantime::format_duration(d).to_string();
+            prop_assert!(formatted.contains('h'), "expected 'h' in \"{formatted}\"");
+        }
+
+        /// Serde JSON round-trip via integer millisecond representation.
+        #[test]
+        fn serde_json_u64_roundtrip(ms in 0u64..10_000_000_000u64) {
+            let json = format!(r#"{{"value":{ms}}}"#);
+            let holder: DurationHolder = serde_json::from_str(&json).expect("deserialize");
+            prop_assert_eq!(holder.value, Duration::from_millis(ms));
+        }
+
+        /// Serde TOML round-trip via human-readable string representation.
+        #[test]
+        fn serde_toml_string_roundtrip(ms in 1u64..10_000_000u64) {
+            let d = Duration::from_millis(ms);
+            let formatted = humantime::format_duration(d).to_string();
+            let toml_str = format!("value = \"{formatted}\"");
+            let holder: DurationHolder = toml::from_str(&toml_str).expect("toml deserialize");
+            prop_assert_eq!(holder.value, d);
+        }
+
+        /// Arbitrary UTF-8 strings never cause parse_duration to panic.
+        #[test]
+        fn arbitrary_strings_never_panic(s in "\\PC{0,64}") {
+            let _ = parse_duration(&s);
+        }
+
+        /// Adding two durations then formatting and reparsing produces the sum.
+        #[test]
+        fn combined_duration_format_roundtrip(
+            a_ms in 0u64..1_000_000u64,
+            b_ms in 0u64..1_000_000u64,
+        ) {
+            let combined = Duration::from_millis(a_ms) + Duration::from_millis(b_ms);
+            let formatted = humantime::format_duration(combined).to_string();
+            let parsed = parse_duration(&formatted).expect("should parse formatted combined duration");
+            prop_assert_eq!(parsed, combined);
+        }
+    }
+}
+
+#[cfg(test)]
+mod edge_case_tests {
+    use super::*;
+
+    // -- Zero duration --
+
+    #[test]
+    fn parse_zero_ms() {
+        assert_eq!(parse_duration("0ms").unwrap(), Duration::ZERO);
+    }
+
+    #[test]
+    fn parse_zero_seconds() {
+        assert_eq!(parse_duration("0s").unwrap(), Duration::ZERO);
+    }
+
+    #[test]
+    fn deserialize_zero_from_integer() {
+        #[derive(serde::Deserialize)]
+        struct H {
+            #[serde(deserialize_with = "deserialize_duration")]
+            v: Duration,
+        }
+        let h: H = serde_json::from_str(r#"{"v":0}"#).unwrap();
+        assert_eq!(h.v, Duration::ZERO);
+    }
+
+    #[test]
+    fn serialize_zero_is_zero() {
+        #[derive(serde::Serialize)]
+        struct H {
+            #[serde(serialize_with = "serialize_duration")]
+            v: Duration,
+        }
+        let json = serde_json::to_value(H { v: Duration::ZERO }).unwrap();
+        assert_eq!(json["v"], 0);
+    }
+
+    // -- Large durations --
+
+    #[test]
+    fn parse_large_hours() {
+        let d = parse_duration("9999h").unwrap();
+        assert_eq!(d, Duration::from_secs(9999 * 3600));
+    }
+
+    #[test]
+    fn serialize_large_millis() {
+        #[derive(serde::Serialize)]
+        struct H {
+            #[serde(serialize_with = "serialize_duration")]
+            v: Duration,
+        }
+        let large = Duration::from_secs(365 * 24 * 3600); // 1 year
+        let json = serde_json::to_value(H { v: large }).unwrap();
+        assert_eq!(json["v"], 365 * 24 * 3600 * 1000_u64);
+    }
+
+    // -- Sub-millisecond precision --
+
+    #[test]
+    fn parse_microseconds() {
+        let d = parse_duration("500us").unwrap();
+        assert_eq!(d, Duration::from_micros(500));
+    }
+
+    #[test]
+    fn parse_nanoseconds() {
+        let d = parse_duration("100ns").unwrap();
+        assert_eq!(d, Duration::from_nanos(100));
+    }
+
+    #[test]
+    fn serialize_truncates_sub_millis_to_zero() {
+        // Duration with only microseconds → as_millis() == 0
+        #[derive(serde::Serialize)]
+        struct H {
+            #[serde(serialize_with = "serialize_duration")]
+            v: Duration,
+        }
+        let d = Duration::from_micros(999);
+        let json = serde_json::to_value(H { v: d }).unwrap();
+        assert_eq!(json["v"], 0);
+    }
+
+    // -- Parsing edge cases --
+
+    #[test]
+    fn parse_empty_string_is_error() {
+        assert!(parse_duration("").is_err());
+    }
+
+    #[test]
+    fn parse_whitespace_only_is_error() {
+        assert!(parse_duration("   ").is_err());
+    }
+
+    #[test]
+    fn parse_combined_units() {
+        let d = parse_duration("1h 30m 15s").unwrap();
+        assert_eq!(d, Duration::from_secs(3600 + 30 * 60 + 15));
+    }
+
+    #[test]
+    fn parse_day_unit() {
+        let d = parse_duration("2days").unwrap();
+        assert_eq!(d, Duration::from_secs(2 * 86400));
+    }
+
+    // -- Comparison / ordering --
+
+    #[test]
+    fn parsed_durations_maintain_ordering() {
+        let a = parse_duration("500ms").unwrap();
+        let b = parse_duration("1s").unwrap();
+        let c = parse_duration("1m").unwrap();
+        let d = parse_duration("1h").unwrap();
+        assert!(a < b);
+        assert!(b < c);
+        assert!(c < d);
+    }
+
+    // -- Arithmetic --
+
+    #[test]
+    fn parsed_durations_support_addition() {
+        let a = parse_duration("30s").unwrap();
+        let b = parse_duration("30s").unwrap();
+        assert_eq!(a + b, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn parsed_durations_support_subtraction() {
+        let a = parse_duration("2m").unwrap();
+        let b = parse_duration("30s").unwrap();
+        assert_eq!(a - b, Duration::from_secs(90));
+    }
+
+    #[test]
+    fn parsed_duration_supports_multiplication() {
+        let a = parse_duration("500ms").unwrap();
+        assert_eq!(a * 4, Duration::from_secs(2));
+    }
+
+    // -- Combined units without spaces --
+
+    #[test]
+    fn parse_combined_no_spaces() {
+        assert_eq!(
+            parse_duration("1h30m").unwrap(),
+            Duration::from_secs(3600 + 30 * 60)
+        );
+        assert_eq!(
+            parse_duration("2m30s").unwrap(),
+            Duration::from_secs(2 * 60 + 30)
+        );
+    }
+
+    // -- Zero forms equivalence --
+
+    #[test]
+    fn parse_zero_forms_are_equivalent() {
+        let zero = Duration::ZERO;
+        assert_eq!(parse_duration("0s").unwrap(), zero);
+        assert_eq!(parse_duration("0ms").unwrap(), zero);
+        assert_eq!(parse_duration("0ns").unwrap(), zero);
+        assert_eq!(parse_duration("0us").unwrap(), zero);
+    }
+
+    // -- Invalid input patterns --
+
+    #[test]
+    fn parse_number_without_unit_is_error() {
+        assert!(parse_duration("42").is_err());
+    }
+
+    #[test]
+    fn parse_unknown_unit_is_error() {
+        assert!(parse_duration("5xyz").is_err());
+    }
+
+    #[test]
+    fn parse_negative_is_error() {
+        assert!(parse_duration("-5s").is_err());
+    }
+
+    #[test]
+    fn parse_overflow_is_error() {
+        assert!(parse_duration("99999999999999999999999999999s").is_err());
+    }
+
+    // -- Format-parse roundtrips --
+
+    #[test]
+    fn format_then_parse_roundtrip_deterministic() {
+        let cases = [
+            Duration::ZERO,
+            Duration::from_millis(250),
+            Duration::from_secs(42),
+            Duration::from_secs(3661),
+            Duration::from_secs(90061),
+        ];
+        for d in cases {
+            let formatted = humantime::format_duration(d).to_string();
+            let parsed = parse_duration(&formatted).unwrap();
+            assert_eq!(parsed, d, "roundtrip failed for {formatted}");
+        }
+    }
+
+    // -- Complex multi-unit combinations --
+
+    #[test]
+    fn parse_days_hours_minutes_combined() {
+        let d = parse_duration("1day 2h 30m").unwrap();
+        assert_eq!(d, Duration::from_secs(86400 + 2 * 3600 + 30 * 60));
+    }
+}
+
+#[cfg(test)]
+mod coverage_gaps {
+    use super::*;
+
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    struct Holder {
+        #[serde(
+            deserialize_with = "deserialize_duration",
+            serialize_with = "serialize_duration"
+        )]
+        value: Duration,
+    }
+
+    // -- deserialize_duration: unexpected JSON types must error, not silently coerce --
+
+    #[test]
+    fn deserialize_json_null_is_error() {
+        let err = serde_json::from_str::<Holder>(r#"{"value":null}"#).expect_err("null must fail");
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn deserialize_json_array_is_error() {
+        let err = serde_json::from_str::<Holder>(r#"{"value":[]}"#).expect_err("array must fail");
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn deserialize_json_true_is_error() {
+        let err = serde_json::from_str::<Holder>(r#"{"value":true}"#).expect_err("true must fail");
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn deserialize_json_false_is_error() {
+        let err =
+            serde_json::from_str::<Holder>(r#"{"value":false}"#).expect_err("false must fail");
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn deserialize_json_float_is_error() {
+        let err = serde_json::from_str::<Holder>(r#"{"value":1.5}"#).expect_err("float must fail");
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn deserialize_json_negative_integer_is_error() {
+        let err =
+            serde_json::from_str::<Holder>(r#"{"value":-1}"#).expect_err("negative must fail");
+        assert!(!err.to_string().is_empty());
+    }
+
+    // -- deserialize_duration: unexpected TOML types must error --
+
+    #[test]
+    fn deserialize_toml_bool_is_error() {
+        let err = toml::from_str::<Holder>(r#"value = true"#).expect_err("bool must fail");
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn deserialize_toml_float_is_error() {
+        let err = toml::from_str::<Holder>(r#"value = 1.5"#).expect_err("float must fail");
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn deserialize_toml_array_is_error() {
+        let err = toml::from_str::<Holder>(r#"value = []"#).expect_err("array must fail");
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn deserialize_toml_negative_integer_is_error() {
+        let err = toml::from_str::<Holder>(r#"value = -1"#).expect_err("negative must fail");
+        assert!(!err.to_string().is_empty());
+    }
+
+    // -- serialize_duration: sub-millisecond inputs truncate toward zero, never round up --
+
+    #[test]
+    fn serialize_500us_truncates_to_zero() {
+        let h = Holder {
+            value: Duration::from_nanos(500_000),
+        };
+        let json = serde_json::to_value(&h).unwrap();
+        assert_eq!(json["value"], 0);
+    }
+
+    #[test]
+    fn serialize_1us_truncates_to_zero() {
+        let h = Holder {
+            value: Duration::from_micros(1),
+        };
+        let json = serde_json::to_value(&h).unwrap();
+        assert_eq!(json["value"], 0);
+    }
+
+    #[test]
+    fn serialize_1500us_truncates_to_1ms() {
+        // 1500us is 1.5ms; truncation (not rounding) yields 1ms.
+        let h = Holder {
+            value: Duration::from_micros(1500),
+        };
+        let json = serde_json::to_value(&h).unwrap();
+        assert_eq!(json["value"], 1);
+    }
+
+    // -- serialize_duration: very large values must not panic --
+
+    #[test]
+    fn serialize_u32_max_seconds_does_not_panic() {
+        let h = Holder {
+            value: Duration::from_secs(u32::MAX as u64),
+        };
+        let json = serde_json::to_value(&h).expect("serialize");
+        assert_eq!(json["value"], (u32::MAX as u64) * 1000);
+    }
+
+    #[test]
+    fn serialize_duration_max_does_not_panic() {
+        // Duration::MAX.as_millis() exceeds u64::MAX; the `as u64` cast wraps
+        // (returns the low 64 bits of the u128). Pinning: must not panic.
+        let h = Holder {
+            value: Duration::MAX,
+        };
+        let _ = serde_json::to_value(&h).expect("serialize");
+    }
+
+    // -- parse_duration: whitespace handling --
+
+    #[test]
+    fn parse_leading_and_trailing_whitespace_is_accepted() {
+        assert_eq!(parse_duration("  2s  ").unwrap(), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn parse_trailing_newline_is_accepted() {
+        assert_eq!(parse_duration("2s\n").unwrap(), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn parse_internal_space_between_digit_and_unit_is_accepted() {
+        // humantime allows whitespace between the number and its unit suffix.
+        assert_eq!(parse_duration("2 s").unwrap(), Duration::from_secs(2));
+    }
+
+    // -- parse_duration: error path coverage --
+
+    #[test]
+    fn parse_empty_string_error_is_duration_error() {
+        let err: humantime::DurationError = parse_duration("").expect_err("empty must fail");
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn parse_garbage_string_error_is_duration_error() {
+        let err: humantime::DurationError =
+            parse_duration("not a duration").expect_err("garbage must fail");
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn parse_negative_string_error_is_duration_error() {
+        let err: humantime::DurationError = parse_duration("-1s").expect_err("negative must fail");
+        assert!(!err.to_string().is_empty());
+    }
+
+    // -- Round-trip across JSON and TOML for cross-format consistency --
+
+    #[test]
+    fn json_then_toml_roundtrip_yields_identical_duration() {
+        let original = Holder {
+            value: Duration::from_millis(3_750),
+        };
+
+        let json = serde_json::to_string(&original).expect("json ser");
+        let via_json: Holder = serde_json::from_str(&json).expect("json de");
+        assert_eq!(via_json, original);
+
+        // serialize_duration emits a u64 millisecond count; TOML accepts that as
+        // an integer for the deserializer's u64 arm.
+        let toml_str = toml::to_string(&original).expect("toml ser");
+        let via_toml: Holder = toml::from_str(&toml_str).expect("toml de");
+        assert_eq!(via_toml, original);
+
+        assert_eq!(via_json, via_toml);
+    }
+
+    #[test]
+    fn json_integer_and_toml_string_yield_same_duration() {
+        let json: Holder = serde_json::from_str(r#"{"value":150000}"#).expect("json");
+        let toml_val: Holder = toml::from_str(r#"value = "2m 30s""#).expect("toml");
+        assert_eq!(json, toml_val);
+        assert_eq!(json.value, Duration::from_secs(150));
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    use insta::assert_debug_snapshot;
+
+    #[test]
+    fn snapshot_parsed_zero() {
+        assert_debug_snapshot!(parse_duration("0s").unwrap());
+    }
+
+    #[test]
+    fn snapshot_parsed_millis() {
+        assert_debug_snapshot!(parse_duration("250ms").unwrap());
+    }
+
+    #[test]
+    fn snapshot_parsed_seconds() {
+        assert_debug_snapshot!(parse_duration("42s").unwrap());
+    }
+
+    #[test]
+    fn snapshot_parsed_minutes() {
+        assert_debug_snapshot!(parse_duration("5m").unwrap());
+    }
+
+    #[test]
+    fn snapshot_parsed_hours() {
+        assert_debug_snapshot!(parse_duration("2h").unwrap());
+    }
+
+    #[test]
+    fn snapshot_parsed_combined() {
+        assert_debug_snapshot!(parse_duration("1h 30m 15s 200ms").unwrap());
+    }
+
+    #[test]
+    fn snapshot_parse_error() {
+        assert_debug_snapshot!(parse_duration("not-valid"));
+    }
+
+    #[test]
+    fn snapshot_deserialized_from_integer() {
+        #[derive(Debug, serde::Deserialize)]
+        #[allow(dead_code)]
+        struct H {
+            #[serde(deserialize_with = "deserialize_duration")]
+            v: Duration,
+        }
+        let h: H = serde_json::from_str(r#"{"v":3661000}"#).unwrap();
+        assert_debug_snapshot!(h);
+    }
+
+    #[test]
+    fn snapshot_deserialized_from_string() {
+        #[derive(Debug, serde::Deserialize)]
+        #[allow(dead_code)]
+        struct H {
+            #[serde(deserialize_with = "deserialize_duration")]
+            v: Duration,
+        }
+        let h: H = serde_json::from_str(r#"{"v":"1h 1m 1s"}"#).unwrap();
+        assert_debug_snapshot!(h);
+    }
+
+    #[test]
+    fn snapshot_formatted_common_durations() {
+        let formatted: Vec<(&str, String)> = vec![
+            ("zero", Duration::ZERO),
+            ("half_second", Duration::from_millis(500)),
+            ("one_minute", Duration::from_secs(60)),
+            ("one_hour_one_min_one_sec", Duration::from_secs(3661)),
+            ("one_day", Duration::from_secs(86400)),
+        ]
+        .into_iter()
+        .map(|(name, d)| (name, humantime::format_duration(d).to_string()))
+        .collect();
+        assert_debug_snapshot!(formatted);
+    }
+
+    #[test]
+    fn snapshot_parse_errors_various() {
+        let results: Vec<(&str, String)> = vec!["", "   ", "42", "-5s", "5xyz"]
+            .into_iter()
+            .map(|input| (input, parse_duration(input).unwrap_err().to_string()))
+            .collect();
+        assert_debug_snapshot!(results);
+    }
+}

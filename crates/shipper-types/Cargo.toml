@@ -1,0 +1,29 @@
+[package]
+name = "shipper-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Core types for shipper"
+repository = "https://github.com/EffortlessMetrics/shipper"
+documentation = "https://docs.rs/shipper-types"
+keywords = ["types", "publish", "workspace"]
+categories = ["development-tools"]
+
+[dependencies]
+serde.workspace = true
+anyhow = "1.0"
+chrono = { version = "0.4.44", features = ["serde"] }
+serde_with = "3.20.0"
+shipper-encrypt.workspace = true
+shipper-webhook.workspace = true
+shipper-retry.workspace = true
+shipper-duration.workspace = true
+
+[dev-dependencies]
+serde_json = "1.0"
+proptest = "1.10.0"
+insta = { version = "1", features = ["yaml"] }
+
+[lints]
+workspace = true

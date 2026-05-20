@@ -1,0 +1,20 @@
+---
+source: crates/shipper-cli/tests/e2e_expanded.rs
+expression: normalize_output(&stdout)
+---
+plan_id: <PLAN_ID>
+registry: crates-io (https://crates.io)
+workspace_root: <WORKSPACE_ROOT>
+
+Total packages to publish: 1
+Plan summary:
+  Publishable packages: 1
+  Skipped packages: 1
+  Internal dependency edges: 0
+  Publish levels: 1
+  Plan artifact: .shipper/plan.txt (`shipper plan --format json` capture)
+
+Skipped packages:
+  - beta-internal@0.0.1 (publish = false)
+
+  1. alpha@0.1.0 (no workspace dependencies)
