@@ -46,6 +46,7 @@ jobs:
         id: pick
         env:
           FORCE_ROUTE: ${{ github.event.inputs.force_route || 'auto' }}
+          GITHUB_TOKEN: ${{ github.token }}
           RUNNER_READ_TOKEN: ${{ secrets.EM_RUNNER_READ_TOKEN }}
         run: |
           python3 <<'PY'
@@ -53,27 +54,55 @@ jobs:
           import os
           import sys
           import urllib.error
+          import urllib.parse
           import urllib.request
 
           repo = os.environ["GITHUB_REPOSITORY"]
           event_name = os.environ["GITHUB_EVENT_NAME"]
           event_path = os.environ["GITHUB_EVENT_PATH"]
           force_route = os.environ.get("FORCE_ROUTE", "auto").strip().lower() or "auto"
+          github_token = os.environ.get("GITHUB_TOKEN", "")
           token = os.environ.get("RUNNER_READ_TOKEN", "")
           route_order = ["cx43", "cx33", "cx53"]
 
           with open(event_path, "r", encoding="utf-8") as fh:
               event = json.load(fh)
 
+          def request_json(url, bearer_token):
+              request = urllib.request.Request(
+                  url,
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "Authorization": f"Bearer {bearer_token}",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                  },
+              )
+              with urllib.request.urlopen(request, timeout=10) as response:
+                  return json.load(response)
+
+          def source_branch_matches(head_ref, head_sha):
+              if not github_token or not head_ref or not head_sha:
+                  return False
+              encoded_ref = urllib.parse.quote(head_ref, safe="")
+              try:
+                  branch = request_json(
+                      f"https://api.github.com/repos/{repo}/branches/{encoded_ref}",
+                      github_token,
+                  )
+              except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+                  print(f"head_branch_probe_error={exc}")
+                  return False
+              return branch.get("commit", {}).get("sha") == head_sha
+
           trusted = event_name in {"push", "workflow_dispatch"}
           if event_name == "pull_request":
-              head_repo = (
-                  event.get("pull_request", {})
-                  .get("head", {})
-                  .get("repo", {})
-                  .get("full_name")
-              )
+              pull_request = event.get("pull_request", {})
+              head = pull_request.get("head", {})
+              head_repo_obj = head.get("repo")
+              head_repo = head_repo_obj.get("full_name") if isinstance(head_repo_obj, dict) else None
               trusted = head_repo == repo
+              if not trusted and head_repo is None:
+                  trusted = source_branch_matches(head.get("ref"), head.get("sha"))
 
           def set_output(target, reason):
               output_path = os.environ["GITHUB_OUTPUT"]
@@ -104,18 +133,11 @@ jobs:
               set_output("github", "no_runner_read_token")
               sys.exit(0)
 
-          request = urllib.request.Request(
-              "https://api.github.com/orgs/EffortlessMetrics/actions/runners?per_page=100",
-              headers={
-                  "Accept": "application/vnd.github+json",
-                  "Authorization": f"Bearer {token}",
-                  "X-GitHub-Api-Version": "2022-11-28",
-              },
-          )
-
           try:
-              with urllib.request.urlopen(request, timeout=10) as response:
-                  payload = json.load(response)
+              payload = request_json(
+                  "https://api.github.com/orgs/EffortlessMetrics/actions/runners?per_page=100",
+                  token,
+              )
           except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
               print(f"runner_api_error={exc}")
               set_output("github", "runner_api_failed")
