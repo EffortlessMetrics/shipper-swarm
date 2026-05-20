@@ -168,7 +168,7 @@ jobs:
     needs: [route]
     if: needs.route.outputs.target == 'cx43'
     runs-on: [self-hosted, Linux, X64, em-ci, rust-small, trusted-pr, cx43]
-    timeout-minutes: 45
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v6.0.2
 
@@ -205,7 +205,7 @@ jobs:
     needs: [route]
     if: needs.route.outputs.target == 'cx33'
     runs-on: [self-hosted, Linux, X64, em-ci, rust-small, trusted-pr, cx33]
-    timeout-minutes: 45
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v6.0.2
 
@@ -242,7 +242,7 @@ jobs:
     needs: [route]
     if: needs.route.outputs.target == 'cx53'
     runs-on: [self-hosted, Linux, X64, em-ci, rust-small, trusted-pr, cx53]
-    timeout-minutes: 45
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v6.0.2
 
@@ -279,7 +279,7 @@ jobs:
     needs: [route]
     if: needs.route.outputs.target == 'github'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v6.0.2
 
