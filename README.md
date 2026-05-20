@@ -170,6 +170,19 @@ See [docs/specs/SHIPPER-SPEC-0006-release-auth-evidence-and-trusted-publishing.m
 - [CHANGELOG.md](CHANGELOG.md) — release history
 - [CONTRIBUTING.md](CONTRIBUTING.md) — how to contribute
 
+## Repository split
+
+Active development now targets
+[`EffortlessMetrics/shipper-swarm`](https://github.com/EffortlessMetrics/shipper-swarm).
+The original [`EffortlessMetrics/shipper`](https://github.com/EffortlessMetrics/shipper)
+repository remains the release authority for crates.io publishing, release
+evidence, and signing credentials until that authority is deliberately moved.
+
+Do not add crates.io publish tokens, release signing secrets, or GitHub Release
+credentials to this repo. See
+[docs/how-to/shipper-swarm-migration-runbook.md](docs/how-to/shipper-swarm-migration-runbook.md)
+for the CI routing and trust-boundary proof.
+
 ## License
 
 Licensed under either of Apache-2.0 or MIT at your option.
