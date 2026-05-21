@@ -3,8 +3,6 @@
 //! This module keeps `shipper`'s public webhook API stable while delegating the
 //! HTTP transport behavior to the dedicated microcrate.
 
-use std::collections::BTreeMap;
-
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -119,112 +117,179 @@ pub fn maybe_send_event(config: &WebhookConfig, event: WebhookEvent) {
 }
 
 pub(crate) fn to_micro_payload(payload: &WebhookPayload) -> shipper_webhook::WebhookPayload {
-    let (message, title, success, package, version, registry, error, extra) = match &payload.event {
-        WebhookEvent::PublishStarted {
-            plan_id,
-            package_count,
-            registry,
-        } => (
-            format!("publish started for plan {plan_id} ({package_count} packages) on {registry}"),
-            Some("Publish Started".to_string()),
-            true,
-            None,
-            None,
-            Some(registry.clone()),
-            None,
-            serde_json::json!({
+    micro_payload::convert(payload)
+}
+
+mod micro_payload {
+    use std::collections::BTreeMap;
+
+    use crate::webhook::{WebhookEvent, WebhookPayload};
+
+    struct MicroFields {
+        message: String,
+        title: Option<String>,
+        success: bool,
+        package: Option<String>,
+        version: Option<String>,
+        registry: Option<String>,
+        error: Option<String>,
+        legacy: serde_json::Value,
+    }
+
+    pub(super) fn convert(payload: &WebhookPayload) -> shipper_webhook::WebhookPayload {
+        let fields = fields_for_event(&payload.event);
+        let mut extra = BTreeMap::new();
+        extra.insert("legacy".to_string(), fields.legacy);
+
+        shipper_webhook::WebhookPayload {
+            message: fields.message,
+            title: fields.title,
+            success: fields.success,
+            package: fields.package,
+            version: fields.version,
+            registry: fields.registry,
+            error: fields.error,
+            extra,
+        }
+    }
+
+    fn fields_for_event(event: &WebhookEvent) -> MicroFields {
+        match event {
+            WebhookEvent::PublishStarted {
+                plan_id,
+                package_count,
+                registry,
+            } => convert_publish_started(plan_id, *package_count, registry),
+            WebhookEvent::PublishSucceeded {
+                plan_id,
+                package_name,
+                package_version,
+                duration_ms,
+            } => convert_publish_succeeded(plan_id, package_name, package_version, *duration_ms),
+            WebhookEvent::PublishFailed {
+                plan_id,
+                package_name,
+                package_version,
+                error_class,
+                message,
+            } => {
+                convert_publish_failed(plan_id, package_name, package_version, error_class, message)
+            }
+            WebhookEvent::PublishCompleted {
+                plan_id,
+                total_packages,
+                success_count,
+                failure_count,
+                skipped_count,
+                result,
+            } => convert_publish_completed(
+                plan_id,
+                *total_packages,
+                *success_count,
+                *failure_count,
+                *skipped_count,
+                result,
+            ),
+        }
+    }
+
+    fn convert_publish_started(plan_id: &str, package_count: usize, registry: &str) -> MicroFields {
+        MicroFields {
+            message: format!(
+                "publish started for plan {plan_id} ({package_count} packages) on {registry}"
+            ),
+            title: Some("Publish Started".to_string()),
+            success: true,
+            package: None,
+            version: None,
+            registry: Some(registry.to_string()),
+            error: None,
+            legacy: serde_json::json!({
                 "event": "publish_started",
                 "plan_id": plan_id,
                 "package_count": package_count,
                 "registry": registry,
             }),
-        ),
-        WebhookEvent::PublishSucceeded {
-            plan_id,
-            package_name,
-            package_version,
-            duration_ms,
-            ..
-        } => (
-            format!(
+        }
+    }
+
+    fn convert_publish_succeeded(
+        plan_id: &str,
+        package_name: &str,
+        package_version: &str,
+        duration_ms: u64,
+    ) -> MicroFields {
+        MicroFields {
+            message: format!(
                 "publish succeeded for package {package_name} version {package_version} in {duration_ms}ms (plan {plan_id})"
             ),
-            Some("Publish Succeeded".to_string()),
-            true,
-            Some(package_name.clone()),
-            Some(package_version.clone()),
-            None,
-            None,
-            serde_json::json!({
+            title: Some("Publish Succeeded".to_string()),
+            success: true,
+            package: Some(package_name.to_string()),
+            version: Some(package_version.to_string()),
+            registry: None,
+            error: None,
+            legacy: serde_json::json!({
                 "event": "publish_succeeded",
                 "plan_id": plan_id,
                 "duration_ms": duration_ms,
             }),
-        ),
-        WebhookEvent::PublishFailed {
-            plan_id,
-            package_name,
-            package_version,
-            error_class,
-            message,
-            ..
-        } => (
-            format!(
+        }
+    }
+
+    fn convert_publish_failed(
+        plan_id: &str,
+        package_name: &str,
+        package_version: &str,
+        error_class: &str,
+        message: &str,
+    ) -> MicroFields {
+        MicroFields {
+            message: format!(
                 "publish failed for package {package_name} version {package_version} ({error_class}): {message}"
             ),
-            Some("Publish Failed".to_string()),
-            false,
-            Some(package_name.clone()),
-            Some(package_version.clone()),
-            None,
-            Some(message.clone()),
-            serde_json::json!({
+            title: Some("Publish Failed".to_string()),
+            success: false,
+            package: Some(package_name.to_string()),
+            version: Some(package_version.to_string()),
+            registry: None,
+            error: Some(message.to_string()),
+            legacy: serde_json::json!({
                 "event": "publish_failed",
                 "plan_id": plan_id,
                 "error_class": error_class,
             }),
-        ),
-        WebhookEvent::PublishCompleted {
-            plan_id,
-            total_packages,
-            success_count,
-            failure_count,
-            skipped_count,
-            result,
-        } => (
-            format!(
+        }
+    }
+
+    fn convert_publish_completed(
+        plan_id: &str,
+        total_packages: usize,
+        success_count: usize,
+        failure_count: usize,
+        skipped_count: usize,
+        result: &str,
+    ) -> MicroFields {
+        MicroFields {
+            message: format!(
                 "publish completed: {success_count}/{total_packages} succeeded, {failure_count} failed, {skipped_count} skipped (plan {plan_id}, result: {result})"
             ),
-            Some("Publish Completed".to_string()),
-            *failure_count == 0,
-            None,
-            None,
-            None,
-            None,
-            serde_json::json!({
+            title: Some("Publish Completed".to_string()),
+            success: failure_count == 0,
+            package: None,
+            version: None,
+            registry: None,
+            error: None,
+            legacy: serde_json::json!({
                 "event": "publish_completed",
                 "plan_id": plan_id,
                 "total_packages": total_packages,
                 "success_count": success_count,
                 "failure_count": failure_count,
-            "skipped_count": skipped_count,
-            "result": result,
+                "skipped_count": skipped_count,
+                "result": result,
             }),
-        ),
-    };
-
-    let mut extra_fields = BTreeMap::new();
-    extra_fields.insert("legacy".to_string(), extra);
-
-    shipper_webhook::WebhookPayload {
-        message,
-        title,
-        success,
-        package,
-        version,
-        registry,
-        error,
-        extra: extra_fields,
+        }
     }
 }
 
@@ -485,7 +550,6 @@ mod tests {
         ] {
             let json = serde_json::to_string(&event).expect("serialize");
             let back: WebhookEvent = serde_json::from_str(&json).expect("deserialize");
-            // Reuse serialization for structural equality.
             assert_eq!(
                 json,
                 serde_json::to_string(&back).expect("re-serialize"),
