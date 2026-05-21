@@ -3,6 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::{Context, Result, bail};
 use cargo_metadata::{DependencyKind, PackageId};
 
+use crate::plan::topology::{build_indegree_map, initial_ready_set, package_name};
+
 pub(super) struct DependencyGraph {
     pub(super) deps_of: BTreeMap<PackageId, BTreeSet<PackageId>>,
     pub(super) dependents_of: BTreeMap<PackageId, BTreeSet<PackageId>>,
@@ -126,29 +128,13 @@ pub(super) fn topo_sort(
     dependents_of: &BTreeMap<PackageId, BTreeSet<PackageId>>,
     pkg_map: &BTreeMap<PackageId, &cargo_metadata::Package>,
 ) -> Result<Vec<PackageId>> {
-    let mut indegree: BTreeMap<PackageId, usize> = BTreeMap::new();
-    for id in included {
-        let deps = deps_of.get(id).cloned().unwrap_or_default();
-        let count = deps.into_iter().filter(|d| included.contains(d)).count();
-        indegree.insert(id.clone(), count);
-    }
-
-    // Deterministic queue: sort by package name.
-    let mut ready: BTreeSet<(String, PackageId)> = BTreeSet::new();
-    for (id, deg) in &indegree {
-        if *deg == 0 {
-            let name = pkg_map
-                .get(id)
-                .map(|p| p.name.to_string())
-                .unwrap_or_else(|| String::from("unknown"));
-            ready.insert((name, id.clone()));
-        }
-    }
+    let mut indegree = build_indegree_map(included, deps_of);
+    let mut ready = initial_ready_set(&indegree, pkg_map);
 
     let mut out: Vec<PackageId> = Vec::with_capacity(included.len());
 
     while let Some((_, id)) = ready.iter().next().cloned() {
-        ready.remove(&(pkg_map.get(&id).unwrap().name.to_string(), id.clone()));
+        ready.remove(&(package_name(pkg_map, &id), id.clone()));
         out.push(id.clone());
 
         if let Some(deps) = dependents_of.get(&id) {
@@ -161,8 +147,7 @@ pub(super) fn topo_sort(
                     .expect("included package must have indegree");
                 *d = d.saturating_sub(1);
                 if *d == 0 {
-                    let name = pkg_map.get(dep).unwrap().name.to_string();
-                    ready.insert((name, dep.clone()));
+                    ready.insert((package_name(pkg_map, dep), dep.clone()));
                 }
             }
         }

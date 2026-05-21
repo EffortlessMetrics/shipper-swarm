@@ -86,6 +86,7 @@ pub(crate) mod levels;
 mod metadata;
 mod publishability;
 mod selection;
+mod topology;
 
 use assembly::{compute_plan_id, dependency_map, planned_packages};
 use graph::{build_dependency_graph, topo_sort, validate_publishable_dependencies};
