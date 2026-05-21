@@ -1,0 +1,29 @@
+schema_version = "1.0"
+
+id = "rails-adoption"
+name = "Rails adoption"
+status = "active"
+owner = "docs"
+
+objective = """
+Establish `.rails/` as the durable, indexed framework footprint for proposals,
+specs, ADRs, lanes, templates, support references, and closeouts.
+"""
+
+end_state = [
+  "Core Rails artifact graph exists and resolves through `.rails/index.toml`.",
+  "Contributor docs explain ownership boundaries and authoring rules.",
+]
+
+[[work_item]]
+id = "rails-adoption-footprint"
+status = "done"
+proposal = "SHIPPER-PROP-0003"
+spec = "SHIPPER-SPEC-0009"
+adr = "SHIPPER-ADR-0003"
+implementation_plan = ".rails/lanes/rails-adoption/implementation-plan.md"
+blocks = []
+blocked_by = []
+proof = [
+  "git diff --check",
+]

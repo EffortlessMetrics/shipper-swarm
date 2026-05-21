@@ -1,0 +1,11 @@
+schema_version = "1.0"
+
+[[ledger]]
+id = "shipper-no-panic-policy"
+path = "docs/NO_PANIC_POLICY.md"
+notes = "Live policy reference; Rails does not duplicate policy text."
+
+[[ledger]]
+id = "shipper-file-policy"
+path = "docs/FILE_POLICY.md"
+notes = "Live policy reference; Rails points to source ledger."

@@ -1,0 +1,48 @@
+schema_version = "1.0"
+
+[project]
+repo = "shipper"
+framework = "rails"
+root = ".rails"
+
+[conventions]
+proposal_prefix = "SHIPPER-PROP"
+spec_prefix = "SHIPPER-SPEC"
+adr_prefix = "SHIPPER-ADR"
+lane_prefix = "SHIPPER-LANE"
+
+[external_namespaces]
+codex = ".codex"
+speckit = ".spec"
+claude = ".claude"
+jules = ".jules"
+
+[[artifact]]
+id = "SHIPPER-PROP-0003"
+kind = "proposal"
+path = ".rails/proposals/SHIPPER-PROP-0003-rails-knowledge-base.md"
+status = "accepted"
+owner = "rails-adoption"
+
+[[artifact]]
+id = "SHIPPER-SPEC-0009"
+kind = "spec"
+path = ".rails/specs/SHIPPER-SPEC-0009-rails-artifact-graph.md"
+status = "accepted"
+owner = "rails-adoption"
+linked_proposal = "SHIPPER-PROP-0003"
+
+[[artifact]]
+id = "SHIPPER-ADR-0003"
+kind = "adr"
+path = ".rails/adr/SHIPPER-ADR-0003-rails-framework-footprint.md"
+status = "accepted"
+owner = "rails-adoption"
+linked_specs = ["SHIPPER-SPEC-0009"]
+
+[[lane]]
+id = "rails-adoption"
+name = "Rails adoption"
+path = ".rails/lanes/rails-adoption/tracker.toml"
+status = "active"
+owner = "docs"

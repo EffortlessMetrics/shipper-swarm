@@ -1,0 +1,28 @@
+schema_version = "1.0"
+
+id = "<lane-id>"
+name = "<Lane name>"
+status = "active"
+owner = "<owner>"
+
+objective = """
+What this lane is trying to make true.
+"""
+
+end_state = [
+  "Concrete done-state item.",
+  "Another done-state item.",
+]
+
+[[work_item]]
+id = "<work-item-id>"
+status = "ready"
+proposal = "<REPO>-PROP-0001"
+spec = "<REPO>-SPEC-0001"
+adr = ""
+implementation_plan = ".rails/lanes/<lane-id>/implementation-plan.md"
+blocks = []
+blocked_by = []
+proof = [
+  "git diff --check",
+]
