@@ -22,9 +22,11 @@
 /// let empty: Vec<i32> = vec![];
 /// assert!(chunk_by_max_concurrent(&empty, 3).is_empty());
 /// ```
+mod srp;
+
 pub fn chunk_by_max_concurrent<T: Clone>(items: &[T], max_concurrent: usize) -> Vec<Vec<T>> {
-    let batch_size = max_concurrent.max(1);
-    items.chunks(batch_size).map(<[T]>::to_vec).collect()
+    let batch_size = srp::batch_size::normalize_batch_size(max_concurrent);
+    srp::partition::contiguous_chunks(items, batch_size)
 }
 
 #[cfg(test)]
