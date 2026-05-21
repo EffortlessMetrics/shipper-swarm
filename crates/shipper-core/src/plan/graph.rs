@@ -126,46 +126,21 @@ pub(super) fn topo_sort(
     dependents_of: &BTreeMap<PackageId, BTreeSet<PackageId>>,
     pkg_map: &BTreeMap<PackageId, &cargo_metadata::Package>,
 ) -> Result<Vec<PackageId>> {
-    let mut indegree: BTreeMap<PackageId, usize> = BTreeMap::new();
-    for id in included {
-        let deps = deps_of.get(id).cloned().unwrap_or_default();
-        let count = deps.into_iter().filter(|d| included.contains(d)).count();
-        indegree.insert(id.clone(), count);
-    }
-
-    // Deterministic queue: sort by package name.
-    let mut ready: BTreeSet<(String, PackageId)> = BTreeSet::new();
-    for (id, deg) in &indegree {
-        if *deg == 0 {
-            let name = pkg_map
-                .get(id)
-                .map(|p| p.name.to_string())
-                .unwrap_or_else(|| String::from("unknown"));
-            ready.insert((name, id.clone()));
-        }
-    }
+    let mut indegree = compute_indegree(included, deps_of);
+    let mut ready = seed_ready_queue(&indegree, pkg_map);
 
     let mut out: Vec<PackageId> = Vec::with_capacity(included.len());
 
-    while let Some((_, id)) = ready.iter().next().cloned() {
-        ready.remove(&(pkg_map.get(&id).unwrap().name.to_string(), id.clone()));
+    while let Some(id) = pop_next_ready(&mut ready) {
         out.push(id.clone());
-
-        if let Some(deps) = dependents_of.get(&id) {
-            for dep in deps {
-                if !included.contains(dep) {
-                    continue;
-                }
-                let d = indegree
-                    .get_mut(dep)
-                    .expect("included package must have indegree");
-                *d = d.saturating_sub(1);
-                if *d == 0 {
-                    let name = pkg_map.get(dep).unwrap().name.to_string();
-                    ready.insert((name, dep.clone()));
-                }
-            }
-        }
+        relax_dependents(
+            &id,
+            included,
+            dependents_of,
+            &mut indegree,
+            &mut ready,
+            pkg_map,
+        );
     }
 
     if out.len() != included.len() {
@@ -173,4 +148,69 @@ pub(super) fn topo_sort(
     }
 
     Ok(out)
+}
+
+fn compute_indegree(
+    included: &BTreeSet<PackageId>,
+    deps_of: &BTreeMap<PackageId, BTreeSet<PackageId>>,
+) -> BTreeMap<PackageId, usize> {
+    let mut indegree: BTreeMap<PackageId, usize> = BTreeMap::new();
+    for id in included {
+        let deps = deps_of.get(id).cloned().unwrap_or_default();
+        let count = deps.into_iter().filter(|d| included.contains(d)).count();
+        indegree.insert(id.clone(), count);
+    }
+    indegree
+}
+
+fn seed_ready_queue(
+    indegree: &BTreeMap<PackageId, usize>,
+    pkg_map: &BTreeMap<PackageId, &cargo_metadata::Package>,
+) -> BTreeSet<(String, PackageId)> {
+    // Deterministic queue: sort by package name.
+    let mut ready: BTreeSet<(String, PackageId)> = BTreeSet::new();
+    for (id, deg) in indegree {
+        if *deg == 0 {
+            ready.insert((package_name(pkg_map, id), id.clone()));
+        }
+    }
+    ready
+}
+
+fn pop_next_ready(ready: &mut BTreeSet<(String, PackageId)>) -> Option<PackageId> {
+    let entry = ready.iter().next().cloned()?;
+    let id = entry.1.clone();
+    ready.remove(&entry);
+    Some(id)
+}
+
+fn relax_dependents(
+    id: &PackageId,
+    included: &BTreeSet<PackageId>,
+    dependents_of: &BTreeMap<PackageId, BTreeSet<PackageId>>,
+    indegree: &mut BTreeMap<PackageId, usize>,
+    ready: &mut BTreeSet<(String, PackageId)>,
+    pkg_map: &BTreeMap<PackageId, &cargo_metadata::Package>,
+) {
+    if let Some(deps) = dependents_of.get(id) {
+        for dep in deps {
+            if !included.contains(dep) {
+                continue;
+            }
+            let d = indegree
+                .get_mut(dep)
+                .expect("included package must have indegree");
+            *d = d.saturating_sub(1);
+            if *d == 0 {
+                ready.insert((package_name(pkg_map, dep), dep.clone()));
+            }
+        }
+    }
+}
+
+fn package_name(pkg_map: &BTreeMap<PackageId, &cargo_metadata::Package>, id: &PackageId) -> String {
+    pkg_map
+        .get(id)
+        .map(|p| p.name.to_string())
+        .unwrap_or_else(|| String::from("unknown"))
 }
