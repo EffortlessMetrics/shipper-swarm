@@ -1,0 +1,16 @@
+schema_version = "1.0"
+
+repo = "shipper"
+namespace = ".shipper-spec"
+
+[conventions]
+proposal_prefix = "SHIPPER-PROP"
+spec_prefix = "SHIPPER-SPEC"
+adr_prefix = "SHIPPER-ADR"
+lane_prefix = "SHIPPER-LANE"
+
+[external_namespaces]
+codex = ".codex"
+speckit = ".spec"
+claude = ".claude"
+jules = ".jules"
