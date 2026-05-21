@@ -22,9 +22,28 @@ We follow the [Rust Code of Conduct](https://www.rust-lang.org/policies/code-of-
 
 ## Getting Started
 
-1. Fork the repository
+Routine development happens in
+[`EffortlessMetrics/shipper-swarm`](https://github.com/EffortlessMetrics/shipper-swarm).
+This repository remains the release authority for crates.io publishing, release
+evidence, tags, GitHub Releases, and release credentials until that authority is
+explicitly moved.
+
+Use this repository for swarm sync PRs, release-authority docs, release
+workflow changes, release evidence, signing/provenance work, or explicit
+emergency hotfixes. Use `shipper-swarm` for normal feature work, refactors, and
+tests.
+
+See [docs/status/SWARM_SYNC.md](docs/status/SWARM_SYNC.md) for the merge and
+credential boundary policy.
+
+1. Fork the relevant repository
 2. Clone your fork:
    ```bash
+   # routine development
+   git clone https://github.com/YOUR_USERNAME/shipper-swarm.git
+   cd shipper-swarm
+
+   # release-authority work only
    git clone https://github.com/YOUR_USERNAME/shipper.git
    cd shipper
    ```
@@ -168,13 +187,15 @@ cargo test --package shipper
 - **Description**: Explain what and why, not how
 - **Link issues**: Reference any related issues
 - **Small PRs**: Keep changes focused and reviewable
+- **Source repo merge method**: use merge commits for `shipper` PRs. Do not
+  squash or rebase swarm sync PRs.
 
 ### Review Process
 
 1. All PRs require at least one approval
 2. CI must pass (tests, clippy, fmt)
 3. Address review feedback promptly
-4. Squash commits before merge (if requested)
+4. Merge `shipper` PRs with a merge commit, especially swarm sync PRs
 
 ---
 

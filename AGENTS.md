@@ -1,5 +1,17 @@
 # AGENTS.md
 
+## Repository role
+
+`EffortlessMetrics/shipper` is the release authority for crates.io publishing,
+release evidence, tags, GitHub Releases, release workflow credentials, and
+signing credentials. Routine development happens in
+`EffortlessMetrics/shipper-swarm`.
+
+Syncs from `shipper-swarm/main` into `shipper/main` use merge commits and must
+not be squashed or rebased. Normal feature work, refactors, and tests should
+target `shipper-swarm` unless the user explicitly declares release-authority or
+emergency work in this repo. See [docs/status/SWARM_SYNC.md](docs/status/SWARM_SYNC.md).
+
 Use this file with [CLAUDE.md](./CLAUDE.md) before making changes in this directory.
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
@@ -12,6 +24,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - [**docs/explanation/why-shipper.md**](docs/explanation/why-shipper.md) — the *why*, distilled.
 - [**docs/product.md**](docs/product.md), [**docs/structure.md**](docs/structure.md), [**docs/tech.md**](docs/tech.md) — steering docs.
 - [**docs/INVARIANTS.md**](docs/INVARIANTS.md) — events-as-truth contract.
+- [**docs/status/SWARM_SYNC.md**](docs/status/SWARM_SYNC.md) — source-repo release authority and swarm sync policy.
 
 ## Useful command entry points
 
@@ -116,4 +129,3 @@ Factory Droid runs automated review and security review on same-repo PRs and on 
 - [`docs/agent-context/droid-smoke-tests.md`](docs/agent-context/droid-smoke-tests.md) — how to verify the Droid workflows after a change.
 
 When changing `.github/workflows/droid*.yml`, `.factory/`, or `docs/agent-context/`, follow the smoke-test procedure and update `review-invariants.md` if any invariant changes.
-
