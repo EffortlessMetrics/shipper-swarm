@@ -3,6 +3,9 @@
 //! This crate isolates the "split work list by max concurrency" concern from the
 //! parallel publish engine so it can be validated and fuzzed independently.
 
+mod partition;
+mod size;
+
 /// Split a list of items into contiguous chunks bounded by `max_concurrent`.
 ///
 /// - `max_concurrent <= 0` is treated as `1`.
@@ -23,8 +26,8 @@
 /// assert!(chunk_by_max_concurrent(&empty, 3).is_empty());
 /// ```
 pub fn chunk_by_max_concurrent<T: Clone>(items: &[T], max_concurrent: usize) -> Vec<Vec<T>> {
-    let batch_size = max_concurrent.max(1);
-    items.chunks(batch_size).map(<[T]>::to_vec).collect()
+    let batch_size = size::normalized_batch_size(max_concurrent);
+    partition::contiguous_chunks(items, batch_size)
 }
 
 #[cfg(test)]
