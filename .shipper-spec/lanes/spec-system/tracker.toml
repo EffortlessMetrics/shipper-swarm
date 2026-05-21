@@ -1,0 +1,28 @@
+schema_version = "1.0"
+
+id = "spec-system"
+name = "Repo-native spec system"
+status = "active"
+owner = "repo-architecture"
+
+objective = "Install durable proposal/spec/ADR/lane/closeout rails under .shipper-spec."
+
+end_state = [
+  "Durable artifacts live under .shipper-spec.",
+  "Agent/tool namespaces are awareness-only.",
+  "Index links proposal, spec, ADR, and active lane tracker."
+]
+
+[[work_item]]
+id = "namespace-doctrine"
+status = "done"
+proposal = "SHIPPER-PROP-0001"
+spec = "SHIPPER-SPEC-0001"
+proof = ["git diff --check"]
+
+[[work_item]]
+id = "seed-artifacts"
+status = "ready"
+proposal = "SHIPPER-PROP-0001"
+spec = "SHIPPER-SPEC-0001"
+proof = ["git diff --check"]

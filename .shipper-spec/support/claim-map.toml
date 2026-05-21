@@ -1,0 +1,7 @@
+schema_version = "1.0"
+
+[[external_policy]]
+id = "support-tiers"
+kind = "support_claim_map"
+path = "docs/status/SUPPORT_TIERS.md"
+relationship = "referenced_source_of_truth"

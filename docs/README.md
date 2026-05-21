@@ -56,6 +56,8 @@ Design decisions and reasoning. Read these to understand *why* things are the wa
 - [Product overview](product.md)
 - [Repository structure](structure.md)
 - [Tech stack](tech.md)
+- [Source-of-truth stack](architecture/source-of-truth-stack.md)
+- [Spec style](spec-style.md)
 
 ## Root-level orientation
 
@@ -66,6 +68,7 @@ The following live at the repo root because they carry repo-wide authority:
 - [README.md](../README.md) — product README
 - [CLAUDE.md](../CLAUDE.md) / [GEMINI.md](../GEMINI.md) / [AGENTS.md](../AGENTS.md) — AI-assistant orientation
 - [CONTRIBUTING.md](../CONTRIBUTING.md) — contribution guide
+- [Spec rails guide](contributing/spec-rails.md) — contributor workflow for repo-native spec artifacts
 - [SECURITY.md](../SECURITY.md) — security policy
 - [CHANGELOG.md](../CHANGELOG.md) — release history
 

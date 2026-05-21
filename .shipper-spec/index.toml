@@ -1,0 +1,46 @@
+schema_version = "1.0"
+
+repo = "shipper"
+namespace = ".shipper-spec"
+
+[conventions]
+proposal_prefix = "SHIPPER-PROP"
+spec_prefix = "SHIPPER-SPEC"
+adr_prefix = "SHIPPER-ADR"
+lane_prefix = "SHIPPER-LANE"
+
+[external_namespaces]
+codex = ".codex"
+speckit = ".spec"
+claude = ".claude"
+jules = ".jules"
+
+[[artifact]]
+id = "SHIPPER-PROP-0001"
+kind = "proposal"
+path = ".shipper-spec/proposals/SHIPPER-PROP-0001-repo-native-spec-knowledge-base.md"
+status = "proposed"
+owner = "spec-system"
+
+[[artifact]]
+id = "SHIPPER-SPEC-0001"
+kind = "spec"
+path = ".shipper-spec/specs/SHIPPER-SPEC-0001-repo-native-spec-rails.md"
+status = "draft"
+owner = "spec-system"
+linked_proposal = "SHIPPER-PROP-0001"
+
+[[artifact]]
+id = "SHIPPER-ADR-0001"
+kind = "adr"
+path = ".shipper-spec/adr/SHIPPER-ADR-0001-repo-owned-spec-namespace.md"
+status = "accepted"
+owner = "spec-system"
+linked_specs = ["SHIPPER-SPEC-0001"]
+
+[[lane]]
+id = "spec-system"
+name = "Repo-native spec system"
+path = ".shipper-spec/lanes/spec-system/tracker.toml"
+status = "active"
+owner = "repo-architecture"
