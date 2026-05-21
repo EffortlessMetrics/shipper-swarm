@@ -118,112 +118,177 @@ pub fn maybe_send_event(config: &WebhookConfig, event: WebhookEvent) {
     });
 }
 
-pub(crate) fn to_micro_payload(payload: &WebhookPayload) -> shipper_webhook::WebhookPayload {
-    let (message, title, success, package, version, registry, error, extra) = match &payload.event {
-        WebhookEvent::PublishStarted {
-            plan_id,
-            package_count,
-            registry,
-        } => (
-            format!("publish started for plan {plan_id} ({package_count} packages) on {registry}"),
-            Some("Publish Started".to_string()),
-            true,
-            None,
-            None,
-            Some(registry.clone()),
-            None,
-            serde_json::json!({
+mod payload_mapping {
+    use serde_json::Value;
+
+    use super::WebhookEvent;
+
+    pub(super) struct MappedPayloadFields {
+        pub(super) message: String,
+        pub(super) title: Option<String>,
+        pub(super) success: bool,
+        pub(super) package: Option<String>,
+        pub(super) version: Option<String>,
+        pub(super) registry: Option<String>,
+        pub(super) error: Option<String>,
+        pub(super) extra: Value,
+    }
+
+    pub(super) fn map_event(event: &WebhookEvent) -> MappedPayloadFields {
+        match event {
+            WebhookEvent::PublishStarted {
+                plan_id,
+                package_count,
+                registry,
+            } => build_publish_started(plan_id, *package_count, registry),
+            WebhookEvent::PublishSucceeded {
+                plan_id,
+                package_name,
+                package_version,
+                duration_ms,
+            } => build_publish_succeeded(plan_id, package_name, package_version, *duration_ms),
+            WebhookEvent::PublishFailed {
+                plan_id,
+                package_name,
+                package_version,
+                error_class,
+                message,
+            } => build_publish_failed(plan_id, package_name, package_version, error_class, message),
+            WebhookEvent::PublishCompleted {
+                plan_id,
+                total_packages,
+                success_count,
+                failure_count,
+                skipped_count,
+                result,
+            } => build_publish_completed(
+                plan_id,
+                *total_packages,
+                *success_count,
+                *failure_count,
+                *skipped_count,
+                result,
+            ),
+        }
+    }
+
+    fn build_publish_started(
+        plan_id: &str,
+        package_count: usize,
+        registry: &str,
+    ) -> MappedPayloadFields {
+        MappedPayloadFields {
+            message: format!(
+                "publish started for plan {plan_id} ({package_count} packages) on {registry}"
+            ),
+            title: Some("Publish Started".to_string()),
+            success: true,
+            package: None,
+            version: None,
+            registry: Some(registry.to_string()),
+            error: None,
+            extra: serde_json::json!({
                 "event": "publish_started",
                 "plan_id": plan_id,
                 "package_count": package_count,
                 "registry": registry,
             }),
-        ),
-        WebhookEvent::PublishSucceeded {
-            plan_id,
-            package_name,
-            package_version,
-            duration_ms,
-            ..
-        } => (
-            format!(
+        }
+    }
+
+    fn build_publish_succeeded(
+        plan_id: &str,
+        package_name: &str,
+        package_version: &str,
+        duration_ms: u64,
+    ) -> MappedPayloadFields {
+        MappedPayloadFields {
+            message: format!(
                 "publish succeeded for package {package_name} version {package_version} in {duration_ms}ms (plan {plan_id})"
             ),
-            Some("Publish Succeeded".to_string()),
-            true,
-            Some(package_name.clone()),
-            Some(package_version.clone()),
-            None,
-            None,
-            serde_json::json!({
+            title: Some("Publish Succeeded".to_string()),
+            success: true,
+            package: Some(package_name.to_string()),
+            version: Some(package_version.to_string()),
+            registry: None,
+            error: None,
+            extra: serde_json::json!({
                 "event": "publish_succeeded",
                 "plan_id": plan_id,
                 "duration_ms": duration_ms,
             }),
-        ),
-        WebhookEvent::PublishFailed {
-            plan_id,
-            package_name,
-            package_version,
-            error_class,
-            message,
-            ..
-        } => (
-            format!(
+        }
+    }
+
+    fn build_publish_failed(
+        plan_id: &str,
+        package_name: &str,
+        package_version: &str,
+        error_class: &str,
+        message: &str,
+    ) -> MappedPayloadFields {
+        MappedPayloadFields {
+            message: format!(
                 "publish failed for package {package_name} version {package_version} ({error_class}): {message}"
             ),
-            Some("Publish Failed".to_string()),
-            false,
-            Some(package_name.clone()),
-            Some(package_version.clone()),
-            None,
-            Some(message.clone()),
-            serde_json::json!({
+            title: Some("Publish Failed".to_string()),
+            success: false,
+            package: Some(package_name.to_string()),
+            version: Some(package_version.to_string()),
+            registry: None,
+            error: Some(message.to_string()),
+            extra: serde_json::json!({
                 "event": "publish_failed",
                 "plan_id": plan_id,
                 "error_class": error_class,
             }),
-        ),
-        WebhookEvent::PublishCompleted {
-            plan_id,
-            total_packages,
-            success_count,
-            failure_count,
-            skipped_count,
-            result,
-        } => (
-            format!(
+        }
+    }
+
+    fn build_publish_completed(
+        plan_id: &str,
+        total_packages: usize,
+        success_count: usize,
+        failure_count: usize,
+        skipped_count: usize,
+        result: &str,
+    ) -> MappedPayloadFields {
+        MappedPayloadFields {
+            message: format!(
                 "publish completed: {success_count}/{total_packages} succeeded, {failure_count} failed, {skipped_count} skipped (plan {plan_id}, result: {result})"
             ),
-            Some("Publish Completed".to_string()),
-            *failure_count == 0,
-            None,
-            None,
-            None,
-            None,
-            serde_json::json!({
+            title: Some("Publish Completed".to_string()),
+            success: failure_count == 0,
+            package: None,
+            version: None,
+            registry: None,
+            error: None,
+            extra: serde_json::json!({
                 "event": "publish_completed",
                 "plan_id": plan_id,
                 "total_packages": total_packages,
                 "success_count": success_count,
                 "failure_count": failure_count,
-            "skipped_count": skipped_count,
-            "result": result,
+                "skipped_count": skipped_count,
+                "result": result,
             }),
-        ),
-    };
+        }
+    }
+}
+pub(crate) fn to_micro_payload(payload: &WebhookPayload) -> shipper_webhook::WebhookPayload {
+    let mapped = payload_mapping::map_event(&payload.event);
 
     let mut extra_fields = BTreeMap::new();
-    extra_fields.insert("legacy".to_string(), extra);
+    extra_fields.insert("legacy".to_string(), mapped.extra);
 
     shipper_webhook::WebhookPayload {
-        message,
-        title,
-        success,
-        package,
-        version,
-        registry,
-        error,
+        message: mapped.message,
+        title: mapped.title,
+        success: mapped.success,
+        package: mapped.package,
+        version: mapped.version,
+        registry: mapped.registry,
+        error: mapped.error,
         extra: extra_fields,
     }
 }
