@@ -84,27 +84,51 @@ pub fn verify_events_state_consistency(
 /// Render a human-readable summary of a drift report. Used by the Reporter
 /// to surface the finding loudly at end of run.
 pub fn format_drift_summary(drift: &StateEventDrift) -> String {
-    if drift.is_consistent() {
-        return "events.jsonl and state.json are consistent".to_string();
+    drift_summary::format(drift)
+}
+
+mod drift_summary {
+    use shipper_types::StateEventDrift;
+
+    const CONSISTENT_MESSAGE: &str = "events.jsonl and state.json are consistent";
+    const DRIFT_HEADER: &str = "state/event drift detected (events.jsonl is authoritative):";
+
+    pub(super) fn format(drift: &StateEventDrift) -> String {
+        if drift.is_consistent() {
+            return CONSISTENT_MESSAGE.to_string();
+        }
+
+        let mut lines = vec![DRIFT_HEADER.to_string()];
+        push_events_only_line(&mut lines, drift);
+        push_state_only_line(&mut lines, drift);
+        lines.join("\n")
     }
 
-    let mut lines = Vec::new();
-    lines.push("state/event drift detected (events.jsonl is authoritative):".to_string());
-    if !drift.in_events_only.is_empty() {
-        lines.push(format!(
-            "  published in events.jsonl but NOT in state.json ({}): {}",
-            drift.in_events_only.len(),
-            drift.in_events_only.join(", ")
+    fn push_events_only_line(lines: &mut Vec<String>, drift: &StateEventDrift) {
+        if drift.in_events_only.is_empty() {
+            return;
+        }
+
+        lines.push(format_package_line(
+            "published in events.jsonl but NOT in state.json",
+            &drift.in_events_only,
         ));
     }
-    if !drift.in_state_only.is_empty() {
-        lines.push(format!(
-            "  marked published in state.json but NO event ({}): {}",
-            drift.in_state_only.len(),
-            drift.in_state_only.join(", ")
+
+    fn push_state_only_line(lines: &mut Vec<String>, drift: &StateEventDrift) {
+        if drift.in_state_only.is_empty() {
+            return;
+        }
+
+        lines.push(format_package_line(
+            "marked published in state.json but NO event",
+            &drift.in_state_only,
         ));
     }
-    lines.join("\n")
+
+    fn format_package_line(prefix: &str, packages: &[String]) -> String {
+        format!("  {prefix} ({}): {}", packages.len(), packages.join(", "))
+    }
 }
 
 /// Verify the end-of-run evidence packet before `receipt.json` becomes the
