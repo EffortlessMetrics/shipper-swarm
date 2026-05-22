@@ -1,126 +1,168 @@
-# How-to: Remediate a compromised release
+# How-to: Remediate a Compromised Release
 
-You shipped a release. Later you discover one or more crates in that
-release are compromised — a CVE, a leaked token in a debug impl, a
-broken build artifact. You need to:
+You shipped a release. Later you discover that one or more crates in that
+release are compromised: a CVE, a leaked token in a debug impl, a broken build
+artifact. You need to contain new resolves, publish clean successors, and keep
+an audit trail that explains what happened.
 
-1. **Contain** the damage (stop new resolves from pulling the bad chain).
-2. **Fix-forward** (ship a clean successor so existing consumers have
-   something good to upgrade to).
-3. **Finalize** (optionally yank the bad versions once the clean chain
-   is live).
+This guide uses Shipper's current proof-backed remediation boundary:
 
-This guide walks you through all three, using the Remediate commands
-landed in [#98](https://github.com/EffortlessMetrics/shipper/issues/98).
+- `shipper remediate --dry-run` writes a reviewable
+  `.shipper/remediation-plan.json` artifact.
+- `shipper remediate --execute-plan` executes only the reviewed containment
+  yanks recorded in that artifact.
+- Fix-forward remains an operator step: Shipper suggests successor versions,
+  but does not edit manifests or publish replacements for you.
+- Live crates.io remediation is an operator action. PR CI proves the guarded
+  execution path with fake Cargo and mock surfaces, not live registry yanks.
 
-> **Containment is not undo.** `cargo yank` prevents NEW resolves for a
-> version; it does NOT invalidate existing `Cargo.lock` pins. That's
-> why containment alone isn't enough — the operator running `cargo
-> build` in an existing checkout will still resolve to the bad version
-> unless you ALSO fix-forward and they run `cargo update`.
+> **Containment is not undo.** `cargo yank` prevents new resolves for a
+> version; it does not invalidate existing `Cargo.lock` pins or remove already
+> downloaded bytes. Existing consumers still need a clean successor and a
+> `cargo update`.
 
 ## Prerequisites
 
-- A `receipt.json` from the compromised release in `<state_dir>`
-  (default `.shipper/receipt.json`), produced by the `shipper publish`
-  that shipped it.
-- Publish credentials for the affected registry (same token / OIDC
-  setup you used for the release).
-- For a compromised chain spanning multiple crates, you should know
-  the compromise scope — which crate names are bad. A CVE
-  advisory, an audit report, or an incident ticket should tell you.
+- A `receipt.json` from the compromised release, usually
+  `.shipper/receipt.json`.
+- The crate name and version where the compromise starts.
+- An incident reason from a CVE, audit report, security ticket, or operator
+  note.
+- Registry credentials only if you choose to execute yanks. The dry-run plan
+  only needs the receipt and workspace context.
 
-## Step 1 — Record the compromise in the receipt
+## Step 1 - Generate a Remediation Plan
 
-Use `shipper yank --mark-compromised` to yank AND annotate the
-receipt in one go. Run this for each compromised crate+version:
+Start with a dry run. This is the safest default because it creates the
+evidence artifact before any irreversible registry action:
+
+```bash
+shipper remediate --dry-run \
+  --from-receipt .shipper/receipt.json \
+  --crate my-lib \
+  --target-version 0.3.0 \
+  --reason "CVE-2026-0001: token leak via Debug impl"
+```
+
+This writes:
+
+```text
+.shipper/remediation-plan.json
+```
+
+The plan records:
+
+- source receipt path
+- target crate and version
+- affected packages
+- reverse-topological yank order
+- fix-forward suggestions
+- risk notes
+- command sequence for reviewed containment
+
+No yanks, manifest edits, or publishes happen during `--dry-run`. The durable
+artifact also redacts the operator-supplied reason text and uses a placeholder
+in generated commands, so incident details do not leak into uploaded evidence
+unless you deliberately record them elsewhere.
+
+## Step 2 - Review the Plan
+
+Inspect `.shipper/remediation-plan.json` before execution. At minimum, confirm:
+
+- `source_receipt` points at the compromised release receipt.
+- `target.crate` and `target.version` match the bad crate version.
+- `affected_packages` covers the expected downstream crates.
+- `yank_order` is dependents-first.
+- `fix_forward_suggestions` is publish-directional.
+- `risk_notes` match the current support boundary.
+- `command_sequence` contains only yanks you intend to run.
+
+Keep the plan with the incident record. It is the evidence object that explains
+which containment action was reviewed.
+
+## Step 3 - Execute Containment, If Approved
+
+After review, execute the recorded containment yanks:
+
+```bash
+shipper remediate --execute-plan .shipper/remediation-plan.json
+```
+
+This command consumes the reviewed artifact and runs only the recorded yank
+steps. It does not edit manifests, publish fix-forward successors, or invent new
+commands. It halts on the first failed yank and records `PackageYanked` event
+evidence.
+
+For a one-off operator action you can still use the lower-level primitive:
 
 ```bash
 shipper yank \
-  --crate my-lib --version 0.3.0 \
+  --crate my-lib \
+  --version 0.3.0 \
   --reason "CVE-2026-0001: token leak via Debug impl" \
   --mark-compromised
 ```
 
-What this does:
+Use this direct path only when you intentionally want to combine live yank
+execution with receipt annotation for a known crate version. Prefer the
+dry-run plan when the compromise may affect multiple workspace crates.
 
-- Invokes `cargo yank --version 0.3.0 my-lib` against the registry.
-  The version becomes unresolvable for new dependency resolves.
-- Emits a `PackageYanked` event to `events.jsonl`.
-- Amends the matching `PackageReceipt` entry in `<state_dir>/receipt.json`:
-  - `compromised_at = <now>`
-  - `compromised_by = "CVE-2026-0001: token leak via Debug impl"`
+## Step 4 - Plan the Fix-Forward
 
-The `--mark-compromised` flag is **opt-in** — without it, `shipper yank`
-only yanks. We keep it explicit because marking a receipt is an
-annotation over an audit document and should be an operator decision.
-
-> **Idempotent.** Running this twice for the same crate+version is
-> safe: the second yank is a no-op on crates.io, and the receipt
-> amendment just updates `compromised_at` to the latest timestamp.
-
-## Step 2 — Plan the fix-forward
+Containment prevents new resolves from choosing bad versions. It does not give
+existing users a clean upgrade path. Use `fix-forward` to plan the successor
+release:
 
 ```bash
 shipper fix-forward --from-receipt .shipper/receipt.json
 ```
 
-This reads the receipt, finds every package whose entry was marked
-compromised in Step 1, and prints a supersession plan — dependencies
-first, dependents last, same direction as the original publish (because
-you're *publishing* replacements, not *removing* reachability):
+This reads compromised receipt entries and prints a supersession plan:
 
-```
-# fix-forward plan — registry=crates-io, plan_id=abc123
+```text
+# fix-forward plan - registry=crates-io, plan_id=abc123
 # 1 package(s) marked compromised
 # Steps:
 #   1. For each crate below, bump the version in its Cargo.toml to the
 #      suggested successor (or your preferred bump).
 #   2. Commit the bumps; they're part of the fix-forward audit trail.
 #   3. Run `shipper publish` to ship the successors in topo order.
-#   4. Once all successors are live, optionally run `shipper plan-yank
-#      --from-receipt <path> --compromised-only` to contain the
-#      compromised versions.
 #
-  1. my-lib: 0.3.0 -> 0.3.0-next  # CVE-2026-0001: token leak via Debug impl
+  1. my-lib: 0.3.0 -> 0.3.0-next
 ```
 
-`fix-forward` is **planning only**. It does not edit Cargo.toml and
-does not invoke `shipper publish`. The operator steps are:
+`fix-forward` is planning only. It does not edit `Cargo.toml` and does not
+invoke `shipper publish`.
 
-1. Bump `my-lib`'s version in its Cargo.toml. `0.3.0-next` is a
-   suggestion — use `0.3.1` for a real patch, or whatever your
-   SemVer policy dictates.
-2. Also bump any workspace crate whose version should travel with
-   `my-lib` (typically everything in a single-version workspace).
-3. Commit the bumps as a single "fix-forward: <reason>" commit. The
-   git history becomes part of the remediation trail.
-4. Run `shipper publish` to ship the successors.
+The operator steps are:
 
-Optional `--format json` emits the plan as structured JSON for
-programmatic remediation tooling.
+1. Bump the compromised crate to a clean successor version.
+2. Bump any workspace crate that should travel with it.
+3. Commit the version changes as part of the incident trail.
+4. Run the normal Shipper release path.
 
-## Step 3 — Execute the publish
+## Step 5 - Publish the Clean Successors
 
-Same as a normal release train:
+Use the standard release workflow:
 
 ```bash
-shipper plan      # confirm the bump is what you expect
-shipper preflight # git clean, registry reachable, dry-run
-shipper publish   # topological train with retry + readiness
+shipper plan
+shipper preflight
+shipper publish
 ```
 
-Shipper's engine handles retry / backoff / ambiguous reconciliation
-automatically. See the [release runbook](../release-runbook.md) for
-the production-release checklist.
+Shipper's publish engine handles topological order, retry/backoff, ambiguous
+outcome reconciliation, state, events, and receipts. See the
+[release runbook](../release-runbook.md) for the production-release checklist.
 
-The new receipt records the successors. At this point `my-lib@0.3.0` is
-yanked and compromised, `my-lib@0.3.1` is live and clean.
+The new receipt records the successor versions. Downstream users still need to
+upgrade their lockfiles to the clean chain.
 
-## Step 4 — Finalize: yank the old chain (optional)
+## Optional: Generate a Yank Plan Without `remediate`
 
-If you want belt-and-braces containment, generate a reverse-topological
-yank plan from the original compromised receipt and walk it:
+If you already marked receipt entries compromised with `shipper yank
+--mark-compromised`, or if you want a text-only containment plan, use
+`plan-yank`:
 
 ```bash
 shipper plan-yank \
@@ -130,80 +172,72 @@ shipper plan-yank \
 
 Output is a copy-pasteable list of `shipper yank` commands:
 
-```
-# yank plan (reverse topological) — registry=crates-io, plan_id=abc123, filter=compromised_only
+```text
+# yank plan (reverse topological) - registry=crates-io, plan_id=abc123, filter=compromised_only
 # 1 entries
-  1. shipper yank --crate my-lib --version 0.3.0 --reason <REASON>  # CVE-2026-0001: token leak via Debug impl
+  1. shipper yank --crate my-lib --version 0.3.0 --reason <REASON>
 ```
 
-For multi-crate compromises, the order is **dependents first** — the
-opposite of publish order — so downstream consumers stop being
-resolvable BEFORE the bad version they depend on is pulled.
+For multi-crate compromises, yank order is dependents-first: the opposite of
+publish order.
 
-You don't *have* to run Step 4 if you did Step 1 already (Step 1 yanked
-each crate as you marked it). This step exists for the case where the
-operator marked packages compromised but *didn't* yank them yet (using
-a separate `--mark-compromised`-only tool), or where the plan needs
-reviewing before yanking.
+## Worked Example
 
-## Worked example: single-CVE in a multi-crate release
-
-Scenario: released `core@0.3.0`, `app@0.3.0` as a linked workspace.
-Later found `core@0.3.0` has a credential-leak bug. `app@0.3.0` is
-uncompromised *on its own* but depends on `core@0.3.0`, so it's in
-scope for the fix-forward to pick up the clean `core`.
+Scenario: you released `core@0.3.0` and `app@0.3.0` as a linked workspace.
+Later you discover `core@0.3.0` leaks a credential. `app@0.3.0` is not bad on
+its own, but it depends on the bad `core`, so it may need containment and a
+clean successor.
 
 ```bash
-# 1. Yank + mark just the directly compromised crate
-shipper yank \
-  --crate core --version 0.3.0 \
-  --reason "CVE-2026-0001" \
-  --mark-compromised
+# 1. Generate the reviewed plan.
+shipper remediate --dry-run \
+  --from-receipt .shipper/receipt.json \
+  --crate core \
+  --target-version 0.3.0 \
+  --reason "CVE-2026-0001"
 
-# 2. Plan the fix-forward
-shipper fix-forward
-# → tells you to bump core, commit, shipper publish
+# 2. Review .shipper/remediation-plan.json.
 
-# 3. Bump Cargo.toml: core -> 0.3.1, app -> 0.3.1 (app picks up clean core)
-#    Commit, then:
+# 3. Execute containment if approved.
+shipper remediate --execute-plan .shipper/remediation-plan.json
+
+# 4. Plan and perform the fix-forward.
+shipper fix-forward --from-receipt .shipper/receipt.json
+# Bump Cargo.toml: core -> 0.3.1, app -> 0.3.1.
+# Commit the version changes, then:
+shipper plan
+shipper preflight
 shipper publish
-# → publishes core@0.3.1 and app@0.3.1
-
-# 4. Optionally yank app@0.3.0 too so resolvers can't fall back to it:
-shipper yank \
-  --crate app --version 0.3.0 \
-  --reason "CVE-2026-0001 (transitive via core)" \
-  --mark-compromised
 ```
 
 End state:
 
-- `core@0.3.0` — yanked, marked compromised.
-- `app@0.3.0` — yanked, marked compromised (transitive).
-- `core@0.3.1` — live, clean.
-- `app@0.3.1` — live, clean, depends on `core@0.3.1`.
-- Existing `app@0.3.0` users run `cargo update -p core -p app` and
-  they're on the clean chain.
+- `core@0.3.0` is contained if its reviewed yank step succeeded.
+- `app@0.3.0` is contained if the plan included and executed it.
+- `core@0.3.1` is live and clean after the fix-forward publish.
+- `app@0.3.1` is live and clean after the fix-forward publish.
+- Existing users run `cargo update -p core -p app` to move to the clean chain.
 
-## What "remediation" does NOT cover
+## What Remediation Does Not Cover
 
-- **Lockfile invalidation.** Yanking does not force-upgrade downstream
-  lockfiles. You cannot un-ship a compromised version; only prevent
-  new resolves. Operators running existing checkouts with pinned
-  lockfiles continue to resolve to the bad version until they
-  `cargo update`.
-- **Version bumping.** Shipper doesn't (yet) edit Cargo.toml on your
-  behalf. `fix-forward` tells you what to bump; you do the bumping.
-- **Consumer notifications.** If your crate has consumers outside your
-  control, you still need to announce the CVE (RustSec advisory,
-  release notes, security mailing list). Shipper's trail captures the
-  technical remediation; it doesn't publish the disclosure.
+- **Lockfile invalidation.** Yanking does not force downstream lockfiles to
+  update.
+- **Automatic version bumping.** Shipper suggests fix-forward versions; you edit
+  manifests and commit the changes.
+- **Automatic successor publishing.** Shipper does not publish clean successors
+  from a remediation plan.
+- **Consumer notifications.** Publish RustSec advisories, release notes, or
+  other disclosure material through your normal security process.
+- **Live-registry proof in PR CI.** The guarded execution tests use fake Cargo
+  and mock surfaces. Live crates.io yanks remain an explicit operator action.
 
-## See also
+## See Also
 
-- [Inspect state, events, and receipts](inspect-state-and-receipts.md) —
-  understanding the audit trail that `--mark-compromised` writes into.
-- [Release runbook](../release-runbook.md) — the standard publish
-  procedure that Step 3 invokes.
-- [Remediate pillar on the roadmap](../../ROADMAP.md) — where this fits
-  in Shipper's five-pillar release-closure model.
+- [Inspect state, events, and receipts](inspect-state-and-receipts.md) -
+  understand the audit trail that remediation commands read and write.
+- [Release runbook](../release-runbook.md) - the standard publish procedure for
+  Step 5.
+- [Receipt-driven remediation spec](../specs/SHIPPER-SPEC-0008-receipt-driven-remediation.md) -
+  support boundary and proof map.
+- [Remediate pillar on the roadmap](../../ROADMAP.md) - where this fits in
+  Shipper's release-closure model.
