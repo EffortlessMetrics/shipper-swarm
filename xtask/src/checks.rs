@@ -181,7 +181,7 @@ enum UniverseSource {
     ExecutableTrackedFiles,
     /// Universe = tracked dependency-manifest/lockfile candidates
     /// (Cargo.toml, Cargo.lock, deny.toml, crates/*/Cargo.toml, fuzz/Cargo.toml,
-    /// fuzz/Cargo.lock).
+    /// fuzz/Cargo.lock, xtask/Cargo.toml).
     DependencySurfaceFiles,
 }
 
@@ -537,7 +537,8 @@ fn executable_tracked_files(workspace_root: &Path) -> Result<Vec<String>> {
 }
 
 /// Dependency-surface universe: top-level Cargo.toml, Cargo.lock, deny.toml,
-/// plus every per-crate Cargo.toml, plus the fuzz crate's manifests.
+/// every per-crate Cargo.toml, the fuzz crate's manifests, and the xtask
+/// manifest.
 fn dependency_surface_files(workspace_root: &Path) -> Result<Vec<String>> {
     let output = Command::new("git")
         .arg("-C")
@@ -563,8 +564,10 @@ fn dependency_surface_files(workspace_root: &Path) -> Result<Vec<String>> {
         .filter(|s| !s.is_empty())
         .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
         .filter(|p| {
-            matches!(p.as_str(), "Cargo.toml" | "Cargo.lock" | "deny.toml")
-                || crates_glob.is_match(p)
+            matches!(
+                p.as_str(),
+                "Cargo.toml" | "Cargo.lock" | "deny.toml" | "xtask/Cargo.toml"
+            ) || crates_glob.is_match(p)
                 || fuzz_glob.is_match(p)
         })
         .collect();
@@ -735,4 +738,22 @@ fn print_stdout_summary(r: &Report) {
         r.summary.stale,
         r.summary.unused,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dependency_surface_files_include_xtask_manifest() -> Result<()> {
+        let root = workspace_root()?;
+        let files = dependency_surface_files(&root)?;
+
+        assert!(
+            files.iter().any(|path| path == "xtask/Cargo.toml"),
+            "dependency-surface coverage should include the xtask manifest"
+        );
+
+        Ok(())
+    }
 }
