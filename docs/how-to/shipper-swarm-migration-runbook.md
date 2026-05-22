@@ -157,7 +157,7 @@ Do **not** directly require conditional implementation jobs:
 
 ```bash
 cargo check --workspace --locked --all-targets
-cargo test --workspace --locked --all-targets
+cargo nextest run --workspace --locked --all-targets --all-features --profile ci
 cargo test --workspace --locked --doc
 cargo run -p shipper -- --help
 cargo run -p shipper -- plan --help
