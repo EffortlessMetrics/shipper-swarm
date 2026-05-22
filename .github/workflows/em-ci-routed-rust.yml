@@ -1,0 +1,450 @@
+name: Routed Rust Small
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      force_route:
+        description: Force one route for proof runs.
+        required: false
+        default: auto
+        type: choice
+        options:
+          - auto
+          - cpx42
+          - cx43
+          - cx53
+          - github
+
+concurrency:
+  group: routed-rust-small-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+  INSTA_UPDATE: "no"
+  PROPTEST_CASES: "16"
+  PROPTEST_MAX_SHRINK_ITERS: "1000"
+
+permissions:
+  contents: read
+
+jobs:
+  route:
+    name: Route Shipper Rust Small
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      target: ${{ steps.pick.outputs.target }}
+      reason: ${{ steps.pick.outputs.reason }}
+      trusted: ${{ steps.pick.outputs.trusted }}
+    steps:
+      - name: Pick route
+        id: pick
+        env:
+          FORCE_ROUTE: ${{ github.event.inputs.force_route || 'auto' }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.EM_RUNNER_READ_TOKEN }}
+          ORG: EffortlessMetrics
+        run: |
+          python3 <<'PY'
+          import json
+          import os
+          import sys
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          event_name = os.environ["GITHUB_EVENT_NAME"]
+          event_path = os.environ["GITHUB_EVENT_PATH"]
+          force_route = os.environ.get("FORCE_ROUTE", "auto").strip().lower() or "auto"
+          github_token = os.environ.get("GITHUB_TOKEN", "")
+          token = os.environ.get("GH_TOKEN", "")
+          org = os.environ.get("ORG", "EffortlessMetrics")
+          route_order = ["cpx42", "cx43", "cx53"]
+
+          with open(event_path, "r", encoding="utf-8") as fh:
+              event = json.load(fh)
+
+          def request_json(url, bearer_token):
+              request = urllib.request.Request(
+                  url,
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "Authorization": f"Bearer {bearer_token}",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                  },
+              )
+              with urllib.request.urlopen(request, timeout=10) as response:
+                  return json.load(response)
+
+          def source_branch_matches(head_ref, head_sha):
+              if not github_token or not head_ref or not head_sha:
+                  return False
+              encoded_ref = urllib.parse.quote(head_ref, safe="")
+              try:
+                  branch = request_json(
+                      f"https://api.github.com/repos/{repo}/branches/{encoded_ref}",
+                      github_token,
+                  )
+              except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+                  print(f"head_branch_probe_error={exc}")
+                  return False
+              return branch.get("commit", {}).get("sha") == head_sha
+
+          trusted = event_name in {"push", "workflow_dispatch"}
+          if event_name == "pull_request":
+              pull_request = event.get("pull_request", {})
+              head = pull_request.get("head", {})
+              head_repo_obj = head.get("repo")
+              head_repo = head_repo_obj.get("full_name") if isinstance(head_repo_obj, dict) else None
+              trusted = head_repo == repo
+              if not trusted and head_repo is None:
+                  trusted = source_branch_matches(head.get("ref"), head.get("sha"))
+
+          def set_output(target, reason):
+              output_path = os.environ["GITHUB_OUTPUT"]
+              with open(output_path, "a", encoding="utf-8") as out:
+                  out.write(f"target={target}\n")
+                  out.write(f"reason={reason}\n")
+                  out.write(f"trusted={str(trusted).lower()}\n")
+                  out.write(f"error={str(reason in {'runner_token_unauthorized','runner_token_forbidden','runner_api_failed','parse_failed'}).lower()}\n")
+              print(f"repo={repo}")
+              print("workflow=em-ci-routed-rust")
+              print(f"run_id={os.environ['GITHUB_RUN_ID']}")
+              print(f"router_target={target}")
+              print(f"router_reason={reason}")
+              print(f"trusted={str(trusted).lower()}")
+              print(f"router_error={str(reason in {'runner_token_unauthorized','runner_token_forbidden','runner_api_failed','parse_failed'}).lower()}")
+
+          if not trusted:
+              set_output("github", "fork_pr")
+              sys.exit(0)
+
+          if force_route == "github":
+              set_output("github", "forced_github")
+              sys.exit(0)
+
+          if force_route in route_order:
+              set_output(force_route, f"forced_{force_route}")
+              sys.exit(0)
+
+          if not token:
+              set_output("github", "runner_token_missing")
+              sys.exit(0)
+
+          try:
+              payload = request_json(
+                  f"https://api.github.com/orgs/{org}/actions/runners?per_page=100",
+                  token,
+              )
+          except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+              print(f"runner_api_error={exc}")
+              status = getattr(exc, "code", None)
+              if status == 401:
+                  set_output("github", "runner_token_unauthorized")
+              elif status == 403:
+                  set_output("github", "runner_token_forbidden")
+              else:
+                  set_output("github", "runner_api_failed")
+              sys.exit(0)
+
+          runners = payload.get("runners", [])
+          if not isinstance(runners, list):
+              set_output("github", "parse_failed")
+              sys.exit(0)
+
+          target_labels = {
+              "cpx42": {"self-hosted", "linux", "x64", "em-ci", "cpx42", "rust-16gb", "rust-medium", "trusted-pr"},
+              "cx43": {"self-hosted", "linux", "x64", "em-ci", "cx43", "rust-small", "trusted-pr"},
+              "cx53": {"self-hosted", "linux", "x64", "em-ci", "cx53", "rust-small", "trusted-pr"},
+          }
+
+          for target in route_order:
+              required = target_labels[target]
+              for runner in runners:
+                  labels = {
+                      str(label.get("name", "")).lower()
+                      for label in runner.get("labels", [])
+                  }
+                  if (
+                      runner.get("status") == "online"
+                      and not runner.get("busy", False)
+                      and required.issubset(labels)
+                  ):
+                      set_output(target, f"{target}_idle")
+                      sys.exit(0)
+
+          set_output("github", "no_idle_runner")
+          PY
+
+  rust_small_cx43:
+    name: Shipper Rust Small on CX43
+    needs: [route]
+    if: needs.route.outputs.target == 'cx43'
+    runs-on: [self-hosted, Linux, X64, em-ci, rust-small, trusted-pr, cx43]
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Cache Cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-routed-rust-small-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-routed-rust-small-
+
+      - name: Check workspace
+        run: cargo check --workspace --locked --all-targets
+
+      - name: Test workspace
+        run: cargo nextest run --workspace --locked --all-targets --all-features --profile ci
+
+      - name: Test docs
+        run: cargo test --workspace --locked --doc
+
+      - name: Smoke CLI help
+        run: |
+          cargo run -p shipper -- --help
+          cargo run -p shipper -- plan --help
+          cargo run -p shipper -- preflight --help
+
+  rust_small_cpx42:
+    name: Shipper Rust Small on CPX42
+    needs: [route]
+    if: needs.route.outputs.target == 'cpx42'
+    runs-on:
+      group: em-ci-small
+      labels: [self-hosted, linux, x64, em-ci, cpx42, rust-16gb, rust-medium, trusted-pr]
+    timeout-minutes: 75
+    env:
+      CARGO_BUILD_JOBS: "7"
+      CARGO_INCREMENTAL: "0"
+      TMPDIR: /mnt/ci-scratch/tmp/${{ github.run_id }}-${{ github.run_attempt }}
+      CARGO_TARGET_DIR: /mnt/ci-scratch/shipper/${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v6.0.2
+        with:
+          fetch-depth: 1
+
+      - name: Prepare CPX42 scratch
+        run: |
+          set -euo pipefail
+          ci-disk-guard /mnt/ci-scratch 45
+          ci-disk-guard /mnt/ci-cache 10
+          mkdir -p "$TMPDIR" "$CARGO_TARGET_DIR"
+
+      - name: Install Rust 1.95.0
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: 1.95.0
+          components: rustfmt, clippy
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Cache Cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-routed-rust-small-cpx42-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-routed-rust-small-cpx42-
+
+      - name: Preflight disk and toolchain
+        run: |
+          set -euo pipefail
+          df -h /mnt/ci-scratch /mnt/ci-cache || true
+          rustc --version
+          cargo --version
+          if command -v python3 >/dev/null 2>&1; then python3 --version; fi
+          if command -v sccache >/dev/null 2>&1; then sccache --show-stats || true; fi
+
+      - name: Run Rust small gate
+        run: |
+          set -euo pipefail
+          cargo check --workspace --locked --all-targets
+          cargo nextest run --workspace --locked --all-targets --all-features --profile ci
+          cargo test --workspace --locked --doc
+          cargo run -p shipper -- --help
+          cargo run -p shipper -- plan --help
+          cargo run -p shipper -- preflight --help
+
+      - name: Cleanup and final stats
+        if: always()
+        run: |
+          set +e
+          if command -v sccache >/dev/null 2>&1; then sccache --show-stats || true; fi
+          rm -rf "$TMPDIR" "$CARGO_TARGET_DIR"
+          df -h /mnt/ci-scratch /mnt/ci-cache || true
+
+  rust_small_cx53:
+    name: Shipper Rust Small on CX53
+    needs: [route]
+    if: needs.route.outputs.target == 'cx53'
+    runs-on: [self-hosted, Linux, X64, em-ci, rust-small, trusted-pr, cx53]
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Cache Cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-routed-rust-small-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-routed-rust-small-
+
+      - name: Check workspace
+        run: cargo check --workspace --locked --all-targets
+
+      - name: Test workspace
+        run: cargo nextest run --workspace --locked --all-targets --all-features --profile ci
+
+      - name: Test docs
+        run: cargo test --workspace --locked --doc
+
+      - name: Smoke CLI help
+        run: |
+          cargo run -p shipper -- --help
+          cargo run -p shipper -- plan --help
+          cargo run -p shipper -- preflight --help
+
+  rust_small_github:
+    name: Shipper Rust Small on GitHub Hosted
+    needs: [route]
+    if: needs.route.outputs.target == 'github'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Cache Cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-routed-rust-small-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-routed-rust-small-
+
+      - name: Check workspace
+        run: cargo check --workspace --locked --all-targets
+
+      - name: Test workspace
+        run: cargo nextest run --workspace --locked --all-targets --all-features --profile ci
+
+      - name: Test docs
+        run: cargo test --workspace --locked --doc
+
+      - name: Smoke CLI help
+        run: |
+          cargo run -p shipper -- --help
+          cargo run -p shipper -- plan --help
+          cargo run -p shipper -- preflight --help
+
+  result:
+    name: Shipper Rust Small Result
+    needs:
+      - route
+      - rust_small_cx43
+      - rust_small_cpx42
+      - rust_small_cx53
+      - rust_small_github
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Normalize routed result
+        env:
+          TARGET: ${{ needs.route.outputs.target }}
+          REASON: ${{ needs.route.outputs.reason }}
+          TRUSTED: ${{ needs.route.outputs.trusted }}
+          ROUTE_RESULT: ${{ needs.route.result }}
+          CX43_RESULT: ${{ needs.rust_small_cx43.result }}
+          CPX42_RESULT: ${{ needs.rust_small_cpx42.result }}
+          CX53_RESULT: ${{ needs.rust_small_cx53.result }}
+          GITHUB_RESULT: ${{ needs.rust_small_github.result }}
+        run: |
+          python3 <<'PY'
+          import os
+          import sys
+
+          target = os.environ.get("TARGET", "")
+          reason = os.environ.get("REASON", "")
+          route_result = os.environ.get("ROUTE_RESULT", "")
+          trusted = os.environ.get("TRUSTED", "")
+          results = {
+              "cx43": os.environ.get("CX43_RESULT", ""),
+              "cpx42": os.environ.get("CPX42_RESULT", ""),
+              "cx53": os.environ.get("CX53_RESULT", ""),
+              "github": os.environ.get("GITHUB_RESULT", ""),
+          }
+
+          print(f"router_target={target}")
+          print(f"router_reason={reason}")
+          print(f"trusted={trusted}")
+          print(f"route_result={route_result}")
+          for name, value in results.items():
+              print(f"{name}_result={value}")
+
+          if route_result != "success":
+              print("Route job did not succeed.")
+              sys.exit(1)
+
+          if target not in results:
+              print("Route job did not emit a known target.")
+              sys.exit(1)
+
+          failures = []
+          for name, value in results.items():
+              if name == target:
+                  if value != "success":
+                      failures.append(f"selected {name} job result was {value}")
+              elif value != "skipped":
+                  failures.append(f"unselected {name} job result was {value}")
+
+          if failures:
+              for failure in failures:
+                  print(failure)
+              sys.exit(1)
+
+          print("Exactly one routed Rust small lane succeeded.")
+          PY

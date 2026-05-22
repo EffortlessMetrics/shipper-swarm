@@ -86,10 +86,16 @@ For a first-publish release of many new crates, crates.io's 1-new-crate-per-10-m
 ### Token vs Trusted Publishing
 
 The example above uses `CARGO_REGISTRY_TOKEN` — a long-lived personal
-access token stored as a repo secret. **Prefer Trusted Publishing
-(OIDC)**: short-lived tokens, scoped to a specific repo + workflow + ref
-pattern + GitHub Actions environment. No secrets to rotate, no PATs to
-leak.
+access token stored as a repo secret. That is the current proven Shipper
+release path: the 0.4.0 release evidence recorded Trusted Publishing token
+mint failure, a configured fallback secret, and `selected_token_source =
+"fallback_secret"` without storing token values.
+
+Trusted Publishing (OIDC) is the target path once crates.io registration and a
+release rehearsal prove it for every crate in the workspace. It uses
+short-lived tokens scoped to a specific repo, workflow, ref pattern, and GitHub
+Actions environment, with no PATs to rotate or leak. Keep the fallback secret
+configured until the Trusted Publishing path is proven end to end.
 
 **One-time setup on crates.io** (per crate):
 
@@ -157,9 +163,11 @@ checks for existing crates.
 
 When the workflow keeps `secrets.CARGO_REGISTRY_TOKEN` as a fallback,
 `shipper doctor` and `shipper preflight` keep that path visible with
-advisory warnings. Treat the fallback as incident recovery or bootstrap
-support; the normal release path should use the short-lived token produced
-by `rust-lang/crates-io-auth-action@v1`.
+advisory warnings. Treat the fallback as the current proven release posture and
+as the incident-recovery path. Promote the short-lived token from
+`rust-lang/crates-io-auth-action@v1` to the normal release path only after
+release evidence proves the token mint path succeeds and fallback use is
+explicitly unnecessary for the published crate set.
 
 **Troubleshooting**:
 

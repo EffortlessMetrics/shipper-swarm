@@ -63,7 +63,7 @@ The `policy` job runs each check in blocking-allowlist mode and uploads `target/
 | `cargo xtask check-process-policy` | Workflow `run:` commands stay inside their declared process profile. | #211 |
 | `cargo xtask check-network-policy` | Workflow endpoints stay inside their declared network profile. | #211 |
 | `cargo xtask check-lint-policy` | MSRV agrees across `Cargo.toml`, `clippy.toml`, `policy/clippy-lints.toml`; every `[workspace.lints.clippy]` entry has a ledger entry. | #179 / #191 |
-| `cargo xtask no-panic check --mode blocking` | No new panic-family debt since `policy/no-panic-baseline.json`. Runs in `release.yml` policy-gate today (see Release Proof). | #187 PR 8b |
+| `cargo xtask no-panic check --mode blocking` | No new panic-family debt since `policy/no-panic-baseline.json`. Runs in `release.yml` policy-gate today (see Release Proof). | #187 |
 
 ## Advisory / Routed (PRs only)
 
@@ -119,7 +119,7 @@ A maintainer should apply the label when:
 |---|---|
 | `build-binaries` | Linux/Windows/macOS release binaries produced (one matrix leg per target). |
 | `msrv-gate` | `cargo check --workspace` on declared MSRV. |
-| `policy-gate` | `cargo xtask no-panic check --mode blocking` + `cargo xtask check-lint-policy`. Blocks publish if either ledger has drifted since the SHA the baseline was generated at. (#187 PR 8b) |
+| `policy-gate` | `cargo xtask no-panic check --mode blocking` + `cargo xtask check-lint-policy`. Blocks publish if either ledger has drifted since the SHA the baseline was generated at. (#187) |
 | `publish-crates-io` | Dogfoods Shipper itself: `shipper plan` → `shipper preflight` → `shipper publish`. Trusted Publishing via OIDC; falls back to `CARGO_REGISTRY_TOKEN`. Idempotent — resumes from `.shipper/state.json` on rerun. |
 | `create-release` | Attaches platform binaries and `.shipper/` state to the GitHub Release. Runs only after `publish-crates-io` succeeds. |
 | `release-rehearse` | `workflow_dispatch mode=rehearse`: plan + preflight dry-run only. Useful before cutting a tag. |

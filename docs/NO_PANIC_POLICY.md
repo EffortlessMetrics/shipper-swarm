@@ -1,6 +1,6 @@
 # No-Panic Policy
 
-This document describes the no-panic discipline for `shipper`. The authoritative state is `policy/no-panic-baseline.json` (machine-generated, see PR 8a / #187) and `policy/no-panic-allowlist.toml` (human-curated, future); this document explains the rationale and operating rules.
+This document describes the no-panic discipline for `shipper`. The authoritative state is `policy/no-panic-baseline.json` (machine-generated, see #187); a human-curated permanent allowlist is future work. This document explains the rationale and operating rules.
 
 ## Goals
 
@@ -11,7 +11,7 @@ This document describes the no-panic discipline for `shipper`. The authoritative
 
 ## Policy Mode
 
-The policy operates in `no-new-debt` mode. Existing panic-family calls that existed when the baseline was established are receipted in `policy/no-panic-baseline.toml`. Any call not in the baseline is a policy violation.
+The policy operates in `no-new-debt` mode. Existing panic-family calls that existed when the baseline was established are receipted in `policy/no-panic-baseline.json`. Any call not in the baseline is a policy violation.
 
 ## Panic-Family Shapes Tracked
 
@@ -45,7 +45,7 @@ This means one allowed `unwrap` does not mask unrelated calls in the same file.
 
 ## Allowlist vs Baseline
 
-- **`policy/no-panic-allowlist.toml`**: Permanent receipts. Calls that are genuinely invariant assertions (truly cannot fail given the surrounding logic) and are owned indefinitely.
+- **Future permanent allowlist**: Permanent receipts for calls that are genuinely invariant assertions (truly cannot fail given the surrounding logic) and are owned indefinitely.
 - **`policy/no-panic-baseline.json`**: Debt snapshot. Calls that exist today but are not yet converted. The baseline is frozen and may only shrink; it cannot grow. JSON rather than TOML because the file is machine-generated and entries are dense; TOML's table-per-entry shape is awkward at this density.
 
 The baseline is marked `linguist-generated=true` in `.gitattributes` to indicate it is machine-maintained.
@@ -56,8 +56,8 @@ The baseline is marked `linguist-generated=true` in `.gitattributes` to indicate
 # Regenerate `policy/no-panic-baseline.json` (PR 8a — landed).
 cargo xtask no-panic baseline
 
-# Check that no new debt has been added since the baseline (PR 8b — planned).
-cargo xtask no-panic check
+# Check that no new debt has been added since the baseline.
+cargo xtask no-panic check --mode blocking
 
 # Report current policy state including panic-family debt.
 cargo xtask policy-report
@@ -100,7 +100,7 @@ These patterns are acceptable in production code:
 
 ## Release Proof
 
-The release workflow calls `cargo xtask check-no-panic-family` as a release gate. A regression in the no-panic surface blocks publication.
+The release workflow calls `cargo xtask no-panic check --mode blocking` as a release gate. A regression in the no-panic surface blocks publication.
 
 ## Critical Paths
 

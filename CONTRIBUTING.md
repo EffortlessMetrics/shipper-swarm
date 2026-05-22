@@ -22,30 +22,30 @@ We follow the [Rust Code of Conduct](https://www.rust-lang.org/policies/code-of-
 
 ## Getting Started
 
-Routine development happens in
+Active development happens in
 [`EffortlessMetrics/shipper-swarm`](https://github.com/EffortlessMetrics/shipper-swarm).
-This repository remains the release authority for crates.io publishing, release
-evidence, tags, GitHub Releases, and release credentials until that authority is
-explicitly moved.
+The original [`EffortlessMetrics/shipper`](https://github.com/EffortlessMetrics/shipper)
+repository remains the release authority for crates.io publishing and release
+evidence until that authority is explicitly moved.
 
-Use this repository for swarm sync PRs, release-authority docs, release
-workflow changes, release evidence, signing/provenance work, or explicit
-emergency hotfixes. Use `shipper-swarm` for normal feature work, refactors, and
-tests.
+Do not add crates.io publish tokens, release signing secrets, or release
+workflow credentials to `shipper-swarm`.
 
-See [docs/status/SWARM_SYNC.md](docs/status/SWARM_SYNC.md) for the merge and
-credential boundary policy.
+The operating policy is documented in
+[docs/status/SWARM_OPERATION.md](docs/status/SWARM_OPERATION.md):
 
-1. Fork the relevant repository
+- PRs into `shipper-swarm/main` are squash-merged.
+- Promotion from `shipper-swarm/main` back to `shipper/main` uses a merge
+  commit, never squash or rebase.
+- `shipper-swarm/main` must remain a continuation of `shipper/main` history.
+- Source-repo sync and credential rules are mirrored in
+  [docs/status/SWARM_SYNC.md](docs/status/SWARM_SYNC.md).
+
+1. Fork the development repository
 2. Clone your fork:
    ```bash
-   # routine development
    git clone https://github.com/YOUR_USERNAME/shipper-swarm.git
    cd shipper-swarm
-
-   # release-authority work only
-   git clone https://github.com/YOUR_USERNAME/shipper.git
-   cd shipper
    ```
 3. Create a branch for your changes:
    ```bash
@@ -76,10 +76,10 @@ cargo build --workspace --release
 
 ```bash
 # Run the CLI locally
-cargo run --package shipper-cli -- <command>
+cargo run --package shipper -- <command>
 
 # Example
-cargo run --package shipper-cli -- plan --help
+cargo run --package shipper -- plan --help
 ```
 
 ---
@@ -88,7 +88,9 @@ cargo run --package shipper-cli -- plan --help
 
 ### Before You Start
 
-- Check existing [issues](https://github.com/effortlessmetrics/shipper/issues) for related work
+- Check existing [issues](https://github.com/effortlessmetrics/shipper/issues)
+  for related work. Issue tracking remains in the release-authority repo until
+  it is explicitly moved.
 - For significant changes, open an issue first to discuss the approach
 - Keep changes focused and atomic
 
@@ -96,8 +98,9 @@ cargo run --package shipper-cli -- plan --help
 
 | Directory | Purpose |
 |-----------|---------|
-| `crates/shipper/` | Library crate with core logic |
-| `crates/shipper-cli/` | CLI binary |
+| `crates/shipper/` | Install facade and curated library re-export |
+| `crates/shipper-cli/` | CLI adapter: clap, subcommands, help, human/JSON output |
+| `crates/shipper-core/` | Engine/library implementation |
 | `docs/` | User documentation |
 | `templates/` | CI/CD templates |
 | `fuzz/` | Fuzzing targets |
@@ -106,14 +109,13 @@ cargo run --package shipper-cli -- plan --help
 
 | Module | Responsibility |
 |--------|----------------|
-| `plan.rs` | Publish planning and ordering |
-| `engine.rs` | Main publish execution engine |
-| `engine_parallel.rs` | Parallel publishing implementation |
-| `registry.rs` | Registry API interactions |
-| `cargo.rs` | Cargo command wrappers |
-| `state.rs` | State persistence |
-| `events.rs` | Event logging |
-| `config.rs` | Configuration handling |
+| `crates/shipper-core/src/plan/` | Publish planning and ordering |
+| `crates/shipper-core/src/engine/` | Publish/preflight/resume execution engine |
+| `crates/shipper-core/src/registry/` | Registry API interactions |
+| `crates/shipper-core/src/cargo.rs` | Cargo command wrappers |
+| `crates/shipper-core/src/state/` | State persistence |
+| `crates/shipper-core/src/events.rs` | Event logging |
+| `crates/shipper-config/` | Configuration handling |
 
 ---
 
@@ -187,15 +189,20 @@ cargo test --package shipper
 - **Description**: Explain what and why, not how
 - **Link issues**: Reference any related issues
 - **Small PRs**: Keep changes focused and reviewable
-- **Source repo merge method**: use merge commits for `shipper` PRs. Do not
-  squash or rebase swarm sync PRs.
+- **Required gate**: `shipper-swarm/main` requires `Shipper Rust Small Result`;
+  do not require route-specific implementation jobs directly because only one
+  route runs per attempt.
+- **Merge method**: use squash merge for normal `shipper-swarm` PRs.
+  Source-backfill PRs that merge release-authority commits from `shipper/main`
+  are the exception and must use merge commits.
 
 ### Review Process
 
 1. All PRs require at least one approval
 2. CI must pass (tests, clippy, fmt)
 3. Address review feedback promptly
-4. Merge `shipper` PRs with a merge commit, especially swarm sync PRs
+4. Squash-merge normal development PRs into `shipper-swarm/main`; merge
+   source-backfill PRs with a merge commit
 
 ---
 
@@ -245,7 +252,11 @@ Types: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`
 
 ## Questions?
 
-- Open a [discussion](https://github.com/effortlessmetrics/shipper/discussions) for questions
-- Open an [issue](https://github.com/effortlessmetrics/shipper/issues) for bugs or features
+- Open a [discussion](https://github.com/effortlessmetrics/shipper/discussions)
+  for questions. Discussions remain in the release-authority repo until
+  explicitly moved.
+- Open an [issue](https://github.com/effortlessmetrics/shipper/issues) for bugs
+  or features. Issues remain in the release-authority repo until explicitly
+  moved.
 
 Thank you for contributing!
