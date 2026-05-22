@@ -1,6 +1,9 @@
 # Policy Allowlists
 
-This document is the index for all policy allowlist files in `shipper`. Each allowlist is a TOML file in `policy/` with a defined schema and purpose.
+This document is the index for policy allowlist and baseline files in
+`shipper`. Most allowlists are TOML files in `policy/` with a defined schema
+and purpose; generated baselines may use JSON when that is a better fit for
+dense machine-maintained data.
 
 ## Allowlist Files
 
@@ -9,8 +12,7 @@ This document is the index for all policy allowlist files in `shipper`. Each all
 | `policy/clippy-lints.toml` | Active and planned Clippy lint ledger | `cargo xtask check-lint-policy` |
 | `policy/clippy-debt.toml` | Receipted Clippy suppression debt with owner + expiry | `cargo xtask check-clippy-exceptions` |
 | `policy/clippy-exceptions.toml` | Permanent Clippy exceptions with business justification | `cargo xtask check-clippy-exceptions` |
-| `policy/no-panic-allowlist.toml` | Permanently receipted panic-family calls (true invariants) | `cargo xtask check-no-panic-family` |
-| `policy/no-panic-baseline.toml` | Debt snapshot of existing panic-family calls (generated) | `cargo xtask check-no-panic-family` |
+| `policy/no-panic-baseline.json` | Debt snapshot of existing panic-family calls (generated) | `cargo xtask no-panic check --mode blocking` |
 | `policy/non-rust-allowlist.toml` | General non-Rust files (docs, configs, templates) | `cargo xtask check-file-policy` |
 | `policy/generated-allowlist.toml` | Machine-generated files (snapshots, baselines) | `cargo xtask check-generated` |
 | `policy/executable-allowlist.toml` | Files with execute permission | `cargo xtask check-executable-files` |
@@ -57,14 +59,15 @@ reason = "Refactor planned in API cleanup PR."
 
 ### No-Panic Baseline Entry
 
-```toml
-[[entry]]
-path = "crates/shipper-core/src/engine/publish.rs"
-family = "unwrap"
-selector_kind = "method_call"
-selector_callee = "unwrap"
-snippet = "lock.read().unwrap()"
-count = 1
+```json
+{
+  "path": "crates/shipper-core/src/engine/publish.rs",
+  "family": "unwrap",
+  "selector_kind": "method_call",
+  "selector_callee": "unwrap",
+  "snippet": "lock.read().unwrap()",
+  "count": 1
+}
 ```
 
 ### Non-Rust Allowlist Entry
@@ -171,7 +174,7 @@ Umbrella tracking issue for the file-policy work: [#180](https://github.com/Effo
 | `clippy-lints.toml` / `clippy-debt.toml` / `clippy-exceptions.toml` ledgers | [#179](https://github.com/EffortlessMetrics/shipper/issues/179) | planned |
 | Rust 1.95 rustc lint floor | [#198](https://github.com/EffortlessMetrics/shipper/issues/198) | planned |
 | Clippy 1.94/1.95 ratchets | [#191](https://github.com/EffortlessMetrics/shipper/issues/191) | planned |
-| `no-panic-baseline.toml` + checker | [#187](https://github.com/EffortlessMetrics/shipper/issues/187) | planned |
+| `policy/no-panic-baseline.json` + `cargo xtask no-panic check` | [#187](https://github.com/EffortlessMetrics/shipper/issues/187) | landed |
 | ripr advisory lane + targeted mutation scoping | [#182](https://github.com/EffortlessMetrics/shipper/issues/182) | planned |
 | CI lane policy | [#189](https://github.com/EffortlessMetrics/shipper/issues/189) | planned |
 | Rust 1.95 API cleanup | [#184](https://github.com/EffortlessMetrics/shipper/issues/184) | planned |
