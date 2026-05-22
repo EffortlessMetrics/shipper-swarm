@@ -282,7 +282,7 @@ pub(crate) fn run_publish_parallel_inner(
                 &level.packages,
                 &st_arc,
                 opts.resume_from.as_deref(),
-            ) {
+            )? {
                 LevelResumeAction::ReachedResumePoint => reached_resume_point = true,
                 LevelResumeAction::SkipAlreadyComplete => {
                     reporter.info(&format!(
@@ -290,7 +290,7 @@ pub(crate) fn run_publish_parallel_inner(
                         level.level
                     ));
                     all_receipts
-                        .extend(collect_level_receipts_from_state(&level.packages, &st_arc));
+                        .extend(collect_level_receipts_from_state(&level.packages, &st_arc)?);
                     continue;
                 }
                 LevelResumeAction::SkipBeforeResumePoint(resume_point) => {
@@ -299,7 +299,7 @@ pub(crate) fn run_publish_parallel_inner(
                         level.level, resume_point
                     ));
                     all_receipts
-                        .extend(collect_level_receipts_from_state(&level.packages, &st_arc));
+                        .extend(collect_level_receipts_from_state(&level.packages, &st_arc)?);
                     continue;
                 }
             };

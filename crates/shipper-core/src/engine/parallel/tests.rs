@@ -1807,6 +1807,58 @@ fn test_resume_from_skips_earlier_levels() {
     server.join();
 }
 
+#[test]
+fn skipped_level_helpers_report_poisoned_state_lock() {
+    let registry = Registry {
+        name: "crates-io".to_string(),
+        api_base: "http://127.0.0.1".to_string(),
+        index_base: None,
+    };
+    let st_arc = Arc::new(Mutex::new(init_state_for_package(
+        "plan-poison",
+        &registry,
+        "base",
+        "1.0.0",
+    )));
+    let poisoned_state = Arc::clone(&st_arc);
+
+    let poison_result = std::thread::spawn(move || {
+        let _guard = poisoned_state.lock().expect("lock execution state");
+        panic!("poison execution state lock for regression test");
+    })
+    .join();
+    assert!(poison_result.is_err(), "test setup should poison the lock");
+
+    let packages = vec![PlannedPackage {
+        name: "base".to_string(),
+        version: "1.0.0".to_string(),
+        manifest_path: PathBuf::from("base/Cargo.toml"),
+        regime: None,
+    }];
+
+    let receipt_err = match collect_level_receipts_from_state(&packages, &st_arc) {
+        Ok(_) => panic!("poisoned state lock should fail receipt collection"),
+        Err(err) => err,
+    };
+    assert!(
+        receipt_err
+            .to_string()
+            .contains("execution state lock poisoned while collecting level receipts"),
+        "unexpected receipt collection error: {receipt_err:#}"
+    );
+
+    let action_err = match determine_level_resume_action(&packages, &st_arc, Some("dependent")) {
+        Ok(_) => panic!("poisoned state lock should fail resume action selection"),
+        Err(err) => err,
+    };
+    assert!(
+        action_err
+            .to_string()
+            .contains("execution state lock poisoned while checking completed level"),
+        "unexpected resume action error: {action_err:#}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // All packages already published: entire workspace is a no-op
 // ---------------------------------------------------------------------------
