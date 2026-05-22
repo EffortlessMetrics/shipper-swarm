@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 
+use anyhow::Result;
 use shipper_types::PlannedPackage;
 use shipper_types::{ExecutionState, PackageEvidence, PackageReceipt, PackageState};
 
@@ -19,29 +20,33 @@ pub(super) fn determine_level_resume_action(
     level_packages: &[PlannedPackage],
     st_arc: &Arc<Mutex<ExecutionState>>,
     resume_from: Option<&str>,
-) -> LevelResumeAction {
+) -> Result<LevelResumeAction> {
     let Some(resume_point) = resume_from else {
-        return LevelResumeAction::ReachedResumePoint;
+        return Ok(LevelResumeAction::ReachedResumePoint);
     };
 
     if level_packages.iter().any(|p| p.name == resume_point) {
-        return LevelResumeAction::ReachedResumePoint;
+        return Ok(LevelResumeAction::ReachedResumePoint);
     }
 
-    if is_level_already_complete(level_packages, st_arc) {
-        LevelResumeAction::SkipAlreadyComplete
+    if is_level_already_complete(level_packages, st_arc)? {
+        Ok(LevelResumeAction::SkipAlreadyComplete)
     } else {
-        LevelResumeAction::SkipBeforeResumePoint(resume_point.to_string())
+        Ok(LevelResumeAction::SkipBeforeResumePoint(
+            resume_point.to_string(),
+        ))
     }
 }
 
 pub(super) fn collect_level_receipts_from_state(
     level_packages: &[PlannedPackage],
     st_arc: &Arc<Mutex<ExecutionState>>,
-) -> Vec<PackageReceipt> {
-    let st_guard = st_arc.lock().unwrap();
+) -> Result<Vec<PackageReceipt>> {
+    let st_guard = st_arc.lock().map_err(|_| {
+        anyhow::anyhow!("execution state lock poisoned while collecting level receipts")
+    })?;
 
-    level_packages
+    Ok(level_packages
         .iter()
         .filter_map(|p| {
             let key = crate::runtime::execution::pkg_key(&p.name, &p.version);
@@ -62,16 +67,18 @@ pub(super) fn collect_level_receipts_from_state(
                 superseded_by: None,
             })
         })
-        .collect()
+        .collect())
 }
 
 fn is_level_already_complete(
     level_packages: &[PlannedPackage],
     st_arc: &Arc<Mutex<ExecutionState>>,
-) -> bool {
-    let st_guard = st_arc.lock().unwrap();
+) -> Result<bool> {
+    let st_guard = st_arc.lock().map_err(|_| {
+        anyhow::anyhow!("execution state lock poisoned while checking completed level")
+    })?;
 
-    level_packages.iter().all(|p| {
+    Ok(level_packages.iter().all(|p| {
         let key = crate::runtime::execution::pkg_key(&p.name, &p.version);
         st_guard.packages.get(&key).is_some_and(|progress| {
             matches!(
@@ -79,5 +86,5 @@ fn is_level_already_complete(
                 PackageState::Published | PackageState::Skipped { .. }
             )
         })
-    })
+    }))
 }
