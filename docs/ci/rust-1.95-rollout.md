@@ -1,27 +1,27 @@
 # Rust 1.95 / 0.4.0 Quality Rollout
 
-This document is the authoritative map for the Rust 1.95 and 0.4.0 release-quality rollout for `shipper`. Read it before branching any implementation PR.
+This document is the historical map for the Rust 1.95 and 0.4.0 release-quality rollout for `shipper`. The current claim-to-proof map lives in [docs/status/SUPPORT_TIERS.md](../status/SUPPORT_TIERS.md); use that file for live support-tier decisions.
 
-## Current / Target State
+## Current State
 
 | Layer | Current | Target | Status |
 |---|---|---|---|
 | Edition | 2024 | 2024 | done |
-| MSRV | 1.92 | 1.95.0 | planned |
-| Toolchain file | none | `rust-toolchain.toml` pinned to 1.95.0 | planned |
-| Release line | 0.3.0-rc.2 | 0.4.0-rc.1 / v0.4.0 | planned |
-| Clippy | light root lints | strict staged lint ledger | planned |
-| No-panic | none | exact no-new-debt baseline | planned |
-| Non-Rust file policy | none | allowlist + companion policies | planned |
+| MSRV | 1.95 | 1.95.0 | done |
+| Toolchain file | `rust-toolchain.toml` pinned to 1.95.0 | keep pinned | done |
+| Release line | 0.4.0 | v0.4.0 published and proven | done |
+| Clippy | workspace lint floor + staged lint ledger | keep policy-backed | stable/internal |
+| No-panic | exact no-new-debt baseline | keep clean | stable/internal |
+| Non-Rust file policy | allowlist + companion policies | keep clean | stable/internal |
 | Coverage | advisory / routed | keep advisory / routed | present |
-| ripr | absent | advisory PR exposure lane | planned |
-| Mutation | fuzz/proptest heavy lanes only | targeted PR + nightly/release mutation | planned |
-| CI economics | broad direct CI | LEM/risk-pack routing later | planned |
-| Release proof | strong dogfood workflow | preserve and policy-wrap | present |
+| ripr | advisory PR exposure lane | keep advisory | advisory |
+| Mutation | weekly + label-gated PR lane | keep opt-in | advisory / opt-in |
+| CI economics | full CI + routed Rust small lane | preserve cost discipline | present |
+| Release proof | 0.4.0 readiness and publish proof | preserve release authority proof | stable |
 
 ## Why This Is a Minor Release
 
-MSRV is part of the semver promise for a library/tool. Raising from 1.92 to 1.95 changes the supported consumer set. The policy rule is: MSRV increase → minor version bump. Therefore `0.3.0-rc.2` advances to `0.4.0-rc.1` during prep and `v0.4.0` at tag time. No fold into the current rc.2 line.
+MSRV is part of the semver promise for a library/tool. Raising from 1.92 to 1.95 changed the supported consumer set. The policy rule was: MSRV increase -> minor version bump. Therefore `0.3.0-rc.2` advanced through the 0.4.0 line and was published as `v0.4.0`. No future work should reopen the old rc.2 line.
 
 ## What Rust 1.95 Adds for `shipper`
 
@@ -42,29 +42,33 @@ The current CI already provides strong safety coverage. This rollout must not we
 |---|---|---|
 | fmt + clippy | Every PR / push | `RUSTFLAGS=-Dwarnings` and `-D warnings` — warns are errors |
 | nextest (Linux/Windows/macOS) | Every PR / push | Three-OS matrix |
-| MSRV gate | Every PR / push | Currently pinned to `1.92.0` → must move to `1.95.0` in PR 3 |
+| MSRV gate | Every PR / push | Pinned to `1.95.0` |
 | BDD smoke | Every PR / push | Cucumber feature specs in `features/` |
 | Architecture guard | Every PR / push | Crate boundary enforcement |
 | Security / audit | Every PR / push | `cargo audit` |
 | Coverage | main / dispatch / `coverage` / `full-ci` | Codecov integration, advisory |
 | Fuzz | Nightly schedule | Fuzz targets in `fuzz/` |
 | Mutation | Nightly / labeled PRs | `.cargo/mutants.toml` |
-| Release dogfood | `v*.*.*` tags / `workflow_dispatch` | `shipper plan` → `preflight` → `publish` → `resume` with Trusted Publishing |
+| Release dogfood | `v*.*.*` tags / `workflow_dispatch` | Source repo release workflow remains the release authority; Trusted Publishing default is not promoted without short-lived-token proof |
 
-## Gaps Before This Rollout
+## Gaps Closed Or Converted By This Rollout
 
-The following are absent today and are introduced in the PR ladder:
+The following were the pre-rollout gaps this ladder was designed to close or
+turn into explicit advisory lanes:
 
-- `rust-toolchain.toml` — no pinned toolchain file
-- `clippy.toml` — no repo-level Clippy MSRV/config
-- `policy/` directory — no policy ledgers
-- `xtask/` — no Rust-native policy runner
-- No-panic tracking — no baseline or allowlist
-- Non-Rust file policy — no allowlist for workflows, docs, configs
-- ripr — no PR-time exposure analysis
-- Targeted mutation routing — mutation only in nightly/dispatch lanes today
+- `rust-toolchain.toml` pins Rust 1.95.0.
+- Workspace lint configuration and policy ledgers define the Rust/Clippy floor.
+- `policy/` contains allowlists, ledgers, and generated baselines.
+- `xtask/` owns Rust-native policy and evidence checks.
+- No-panic tracking has an exact baseline and blocking check.
+- Non-Rust file policy receipts workflows, docs, configs, and companion surfaces.
+- ripr exists as an advisory PR-time exposure lane.
+- Targeted mutation exists as a label-gated PR-time lane, with broader mutation outside ordinary PR cost.
 
-## Rollout Constraints
+## Historical Rollout Constraints
+
+These governed the original rollout PR ladder. Current work should follow
+`AGENTS.md`, the active goal, support tiers, and the live PR queue.
 
 1. Do not mix this rollout into open PR #164 (Factory Droid review workflows).
 2. Start every PR from clean `origin/main`.
@@ -81,7 +85,11 @@ The following are absent today and are introduced in the PR ladder:
 13. Do not put full mutation on ordinary PRs.
 14. Do not weaken the release dogfood proof, Trusted Publishing behavior, or resume semantics.
 
-## PR Ladder
+## Historical PR Ladder
+
+This ladder is historical context, not the active queue. Do not branch new work
+from these branch names; branch from current `origin/main` and use support tiers
+plus the active goal for current scope.
 
 | PR | Branch | Title | Depends on |
 |---|---|---|---|
@@ -101,7 +109,7 @@ The following are absent today and are introduced in the PR ladder:
 | 14 | `release/0.4.0-prep-rust-1.95` | release: prepare 0.4.0 for Rust 1.95 | PR 13 |
 | 15 | `release/0.4.0-dry-run` | release: validate 0.4.0 publish readiness | PR 14 |
 
-## Acceptance Gates per PR
+## Historical Acceptance Gates per PR
 
 ### PR 1 (this PR — docs only)
 ```bash
