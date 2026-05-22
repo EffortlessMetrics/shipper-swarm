@@ -2733,6 +2733,7 @@ fn package_noun(count: usize) -> &'static str {
 struct PublishJsonReport<'a> {
     schema_version: &'static str,
     command: &'static str,
+    safe_to_rerun: bool,
     registry: String,
     plan_id: &'a str,
     state_dir: String,
@@ -2859,10 +2860,13 @@ fn build_publish_json_report<'a>(
     let reconciled = reconciled_packages(state_dir)?;
     let packages = command_package_reports(receipt, &reconciled);
     let counts = command_package_counts(receipt);
+    let safe_to_rerun =
+        counts.pending == 0 && counts.failed == 0 && counts.ambiguous == 0 && counts.uploaded == 0;
 
     Ok(PublishJsonReport {
         schema_version: "shipper.publish.v1",
         command: "publish",
+        safe_to_rerun,
         registry: receipt.registry.name.clone(),
         plan_id: &receipt.plan_id,
         state_dir: state_dir.display().to_string(),
