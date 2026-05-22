@@ -163,7 +163,7 @@ cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 ### PR 8 (no-panic baseline)
 ```bash
 cargo test -p xtask no_panic --locked
-cargo xtask check-no-panic-family
+cargo xtask no-panic check --mode blocking
 cargo xtask policy-report
 git diff --check
 ```
@@ -192,7 +192,7 @@ cargo xtask policy-report
 ```bash
 cargo test --workspace --all-features --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo xtask check-no-panic-family
+cargo xtask no-panic check --mode blocking
 cargo xtask policy-report
 git diff --check
 ```
@@ -201,7 +201,7 @@ git diff --check
 ```bash
 cargo test -p <touched-crate> --locked
 cargo clippy -p <touched-crate> --all-targets --all-features --locked -- -D warnings
-cargo xtask check-no-panic-family
+cargo xtask no-panic check --mode blocking
 cargo xtask no-panic baseline
 cargo xtask policy-report
 ```
@@ -222,7 +222,7 @@ cargo xtask package-surface
 cargo xtask policy-report
 cargo xtask check-lint-policy
 cargo xtask check-clippy-exceptions
-cargo xtask check-no-panic-family
+cargo xtask no-panic check --mode blocking
 cargo xtask check-file-policy --mode blocking-allowlist
 cargo publish --dry-run -p shipper-duration   # ... all 13 crates in publish order
 ```

@@ -12,8 +12,8 @@
 //! blocks are classified exactly. See docs/NO_PANIC_POLICY.md for the
 //! intended semantics; this module is the operational implementation.
 //!
-//! This PR ships the detector + baseline only — the matching `check`
-//! subcommand (verify mode + release CI gate) lands in PR 8b.
+//! The `check` subcommand compares a fresh scan against the generated
+//! baseline and powers the release CI gate.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
