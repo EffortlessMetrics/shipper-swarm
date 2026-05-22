@@ -1,6 +1,10 @@
 # Non-Rust File-Policy Rollout
 
-This is the working tracker for the 12-PR rollout that turns Shipper's planned file-policy infrastructure into a real, enforceable system. The umbrella issue is [#180](https://github.com/EffortlessMetrics/shipper/issues/180); each PR below has its own issue.
+This is the archived tracker for the 12-PR rollout that turned Shipper's
+planned file-policy infrastructure into a real, enforceable system. The
+umbrella issue is [#180](https://github.com/EffortlessMetrics/shipper/issues/180);
+each PR below has its own issue. Current policy status comes from
+`cargo xtask policy-report`.
 
 ## Operating rules
 
@@ -15,20 +19,20 @@ This is the working tracker for the 12-PR rollout that turns Shipper's planned f
 
 | PR | Issue | Title | Status | Depends on |
 |---:|---|---|---|---|
-| 1/12 | [#201](https://github.com/EffortlessMetrics/shipper/issues/201) | `docs(policy): clarify non-Rust allowlist rollout status` | in flight | — |
-| 2/12 | [#202](https://github.com/EffortlessMetrics/shipper/issues/202) | `chore(policy): add non-Rust policy allowlist ledgers` | planned | PR 1 |
-| 3/12 | [#203](https://github.com/EffortlessMetrics/shipper/issues/203) | `chore(policy): receipt high-risk non-Rust surfaces` | planned | PR 2 |
-| 4/12 | [#212](https://github.com/EffortlessMetrics/shipper/issues/212) | `feat(xtask): add non-Rust inventory command` | planned | — (relates to [#176](https://github.com/EffortlessMetrics/shipper/issues/176)) |
-| 5/12 | [#204](https://github.com/EffortlessMetrics/shipper/issues/204) | `feat(policy): check non-Rust file allowlist` | planned | PR 2, PR 4 |
-| 6/12 | [#205](https://github.com/EffortlessMetrics/shipper/issues/205) | `feat(policy): propose non-Rust allowlist entries` | planned | PR 2, PR 4, PR 5 |
-| 7/12 | [#206](https://github.com/EffortlessMetrics/shipper/issues/206) | `feat(policy): check generated, executable, and dependency surfaces` | planned | PR 2, PR 4 |
-| 8/12 | [#207](https://github.com/EffortlessMetrics/shipper/issues/207) | `feat(policy): check workflow, process, and network surfaces` | planned | PR 2, PR 3, PR 4 |
+| 1/12 | [#201](https://github.com/EffortlessMetrics/shipper/issues/201) | `docs(policy): clarify non-Rust allowlist rollout status` | landed | — |
+| 2/12 | [#202](https://github.com/EffortlessMetrics/shipper/issues/202) | `chore(policy): add non-Rust policy allowlist ledgers` | landed | PR 1 |
+| 3/12 | [#203](https://github.com/EffortlessMetrics/shipper/issues/203) | `chore(policy): receipt high-risk non-Rust surfaces` | landed | PR 2 |
+| 4/12 | [#212](https://github.com/EffortlessMetrics/shipper/issues/212) | `feat(xtask): add non-Rust inventory command` | landed | — (relates to [#176](https://github.com/EffortlessMetrics/shipper/issues/176)) |
+| 5/12 | [#204](https://github.com/EffortlessMetrics/shipper/issues/204) | `feat(policy): check non-Rust file allowlist` | landed | PR 2, PR 4 |
+| 6/12 | [#205](https://github.com/EffortlessMetrics/shipper/issues/205) | `feat(policy): propose non-Rust allowlist entries` | landed | PR 2, PR 4, PR 5 |
+| 7/12 | [#206](https://github.com/EffortlessMetrics/shipper/issues/206) | `feat(policy): check generated, executable, and dependency surfaces` | landed | PR 2, PR 4 |
+| 8/12 | [#207](https://github.com/EffortlessMetrics/shipper/issues/207) | `feat(policy): check workflow, process, and network surfaces` | landed | PR 2, PR 3, PR 4 |
 | 9/12 | [#208](https://github.com/EffortlessMetrics/shipper/issues/208) | `feat(policy): add unified policy report` | landed | PR 5–8 |
 | 10/12 | [#209](https://github.com/EffortlessMetrics/shipper/issues/209) | `ci(policy): run file policy checks advisory` | landed | PR 5–9 |
 | 11/12 | [#210](https://github.com/EffortlessMetrics/shipper/issues/210) | `ci(policy): require non-Rust file policy allowlist` | landed | PR 10 |
-| 12/12 | [#211](https://github.com/EffortlessMetrics/shipper/issues/211) | `ci(policy): require process and network policy receipts` | in flight | PR 10, PR 11 |
+| 12/12 | [#211](https://github.com/EffortlessMetrics/shipper/issues/211) | `ci(policy): require process and network policy receipts` | landed | PR 10, PR 11 |
 
-Tracked under milestone [`0.4.0-rc.1`](https://github.com/EffortlessMetrics/shipper/milestone/1).
+Tracked under the 0.4.0 quality rollout.
 
 ## Receipt schema
 
@@ -80,7 +84,9 @@ expires = "2026-08-11"
 
 Both are valid. Both are visible. Both have an owner.
 
-## Definition of done for the ladder
+## Definition of done for the completed ladder
+
+The ladder is complete when these checks stay true:
 
 - Every current non-Rust file is receipted.
 - Every receipt has `owner` and `reason`.
@@ -88,10 +94,13 @@ Both are valid. Both are visible. Both have an owner.
 - `cargo xtask non-rust inventory` works.
 - `cargo xtask non-rust propose` works.
 - `cargo xtask check-file-policy --mode blocking-allowlist` works.
-- Generated, executable, dependency, and workflow checks are blocking.
-- Process and network checks are at least `blocking-allowlist` after baseline.
+- Generated, executable, dependency, workflow, process, and network checks are clean.
 - `cargo xtask policy-report` emits Markdown and JSON.
-- CI uploads the policy report as an artifact.
-- A new anonymous non-Rust file fails CI.
+- CI runs the policy checks and uploads the policy report as an artifact.
+- A new anonymous non-Rust file fails the blocking policy gate.
 
-When all twelve PRs land and the above hold, close [#180](https://github.com/EffortlessMetrics/shipper/issues/180) with a comment summarizing the final receipt set.
+Current proof command:
+
+```bash
+cargo xtask policy-report
+```

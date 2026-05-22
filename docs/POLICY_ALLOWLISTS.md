@@ -143,41 +143,45 @@ Every suppression in code must have a corresponding entry in `policy/clippy-debt
 
 ## Rollout Status
 
-The 0.4.0 quality rollout is split into a ladder of small, separately reviewable PRs rather than one large policy-infrastructure PR. The full tracker for the non-Rust file-policy subset (PRs 1–12 below) lives in [docs/policy/NON_RUST_ROLLOUT.md](policy/NON_RUST_ROLLOUT.md). The broader 0.4.0 rollout (Clippy, no-panic, ripr, CI lanes, release dry-run) is tracked under [#109](https://github.com/EffortlessMetrics/shipper/issues/109).
+The 0.4.0 non-Rust file-policy rollout has landed. The historical 12-PR
+ladder lives in [docs/policy/NON_RUST_ROLLOUT.md](policy/NON_RUST_ROLLOUT.md);
+the current source of truth is the generated policy report from
+`cargo xtask policy-report`.
+
+As of the current policy report, these surfaces are clean:
+
+- non-Rust file policy
+- generated files
+- executable files
+- dependency surfaces
+- workflow surfaces
+- process policy
+- network policy
 
 A receipt in any of these allowlists is **not** "approved forever." It is "known surface, owner, reason, and current disposition." A valid `reason` may include `"scheduled to be converted to Rust/xtask"` when the file exists for legacy compatibility or migration staging, paired with an `expires` date.
 
-### Non-Rust file-policy ladder (12 SRP PRs)
+### Completed non-Rust file-policy ladder
 
 | Allowlist / change | Rollout PR | Issue | Status |
 |---|---|---|---|
-| Docs: rollout-status clarification | 1/12 | [#201](https://github.com/EffortlessMetrics/shipper/issues/201) | planned |
-| All policy TOML ledgers (scaffold + receipts) | 2/12 | [#202](https://github.com/EffortlessMetrics/shipper/issues/202) | planned |
-| High-risk receipts (workflow/process/network/dep/exec/generated) | 3/12 | [#203](https://github.com/EffortlessMetrics/shipper/issues/203) | planned |
-| `xtask` skeleton + `cargo xtask non-rust inventory` | 4/12 | [#212](https://github.com/EffortlessMetrics/shipper/issues/212) | planned |
-| `cargo xtask check-file-policy` | 5/12 | [#204](https://github.com/EffortlessMetrics/shipper/issues/204) | planned |
-| `cargo xtask non-rust propose` | 6/12 | [#205](https://github.com/EffortlessMetrics/shipper/issues/205) | planned |
-| `check-generated` / `check-executable-files` / `check-dependency-surfaces` | 7/12 | [#206](https://github.com/EffortlessMetrics/shipper/issues/206) | planned |
-| `check-workflow-surfaces` / `check-process-policy` / `check-network-policy` | 8/12 | [#207](https://github.com/EffortlessMetrics/shipper/issues/207) | planned |
-| `cargo xtask policy-report` (unified) | 9/12 | [#208](https://github.com/EffortlessMetrics/shipper/issues/208) | planned |
+| Docs: rollout-status clarification | 1/12 | [#201](https://github.com/EffortlessMetrics/shipper/issues/201) | landed |
+| All policy TOML ledgers (scaffold + receipts) | 2/12 | [#202](https://github.com/EffortlessMetrics/shipper/issues/202) | landed |
+| High-risk receipts (workflow/process/network/dep/exec/generated) | 3/12 | [#203](https://github.com/EffortlessMetrics/shipper/issues/203) | landed |
+| `xtask` skeleton + `cargo xtask non-rust inventory` | 4/12 | [#212](https://github.com/EffortlessMetrics/shipper/issues/212) | landed |
+| `cargo xtask check-file-policy` | 5/12 | [#204](https://github.com/EffortlessMetrics/shipper/issues/204) | landed |
+| `cargo xtask non-rust propose` | 6/12 | [#205](https://github.com/EffortlessMetrics/shipper/issues/205) | landed |
+| `check-generated` / `check-executable-files` / `check-dependency-surfaces` | 7/12 | [#206](https://github.com/EffortlessMetrics/shipper/issues/206) | landed |
+| `check-workflow-surfaces` / `check-process-policy` / `check-network-policy` | 8/12 | [#207](https://github.com/EffortlessMetrics/shipper/issues/207) | landed |
+| `cargo xtask policy-report` (unified) | 9/12 | [#208](https://github.com/EffortlessMetrics/shipper/issues/208) | landed |
 | CI: run all checks in advisory mode + upload artifact | 10/12 | [#209](https://github.com/EffortlessMetrics/shipper/issues/209) | landed |
 | CI: promote file/generated/executable/dependency/workflow to blocking | 11/12 | [#210](https://github.com/EffortlessMetrics/shipper/issues/210) | landed |
-| CI: promote process and network to blocking | 12/12 | [#211](https://github.com/EffortlessMetrics/shipper/issues/211) | in flight |
+| CI: promote process and network to blocking | 12/12 | [#211](https://github.com/EffortlessMetrics/shipper/issues/211) | landed |
 
 Umbrella tracking issue for the file-policy work: [#180](https://github.com/EffortlessMetrics/shipper/issues/180).
 
-### Other 0.4.0 rollout PRs (parallel work)
+### Related quality surfaces
 
-| Allowlist / change | Issue | Status |
-|---|---|---|
-| `xtask` policy foundation (`package-surface`, `policy-report` stub) | [#176](https://github.com/EffortlessMetrics/shipper/issues/176) | landed |
-| `clippy-lints.toml` / `clippy-debt.toml` / `clippy-exceptions.toml` ledgers | [#179](https://github.com/EffortlessMetrics/shipper/issues/179) | planned |
-| Rust 1.95 rustc lint floor | [#198](https://github.com/EffortlessMetrics/shipper/issues/198) | planned |
-| Clippy 1.94/1.95 ratchets | [#191](https://github.com/EffortlessMetrics/shipper/issues/191) | planned |
-| `policy/no-panic-baseline.json` + `cargo xtask no-panic check` | [#187](https://github.com/EffortlessMetrics/shipper/issues/187) | landed |
-| ripr advisory lane + targeted mutation scoping | [#182](https://github.com/EffortlessMetrics/shipper/issues/182) | planned |
-| CI lane policy | [#189](https://github.com/EffortlessMetrics/shipper/issues/189) | planned |
-| Rust 1.95 API cleanup | [#184](https://github.com/EffortlessMetrics/shipper/issues/184) | planned |
-| First debt burn-down (narrow owner lane) | [#190](https://github.com/EffortlessMetrics/shipper/issues/190) | planned |
-| 0.4.0-rc.1 version + changelog | [#192](https://github.com/EffortlessMetrics/shipper/issues/192) | planned |
-| 0.4.0-rc.1 release dry-run proof | [#195](https://github.com/EffortlessMetrics/shipper/issues/195) | planned |
+The broader 0.4.0 quality rollout includes Rust lints, no-panic tracking, ripr,
+mutation, CI lanes, and release proof. Their current claim tiers live in
+[docs/status/SUPPORT_TIERS.md](status/SUPPORT_TIERS.md). Do not infer their
+status from the historical file-policy ladder.
