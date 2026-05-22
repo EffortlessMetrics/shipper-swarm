@@ -9,6 +9,7 @@ owners.
 | Layer | Owns | Does not own |
 |---|---|---|
 | Support tiers | claim -> proof map | detailed implementation |
+| Swarm operation | development/release repository split | release execution |
 | Swarm sync | release-authority repository policy | routine development |
 
 Support-tier documents should answer:
@@ -29,6 +30,7 @@ Support-tier documents should answer:
 ## Documents
 
 - [Support tiers](SUPPORT_TIERS.md)
+- [Shipper swarm operation](SWARM_OPERATION.md)
 - [Shipper swarm sync](SWARM_SYNC.md)
 
 ## Rules

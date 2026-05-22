@@ -52,7 +52,7 @@ git push -u origin sync/shipper-swarm-YYYY-MM-DD
 Open the PR in `EffortlessMetrics/shipper` and merge it with a merge commit.
 Do not use squash merge or rebase merge.
 
-After the sync PR lands, fast-forward `shipper-swarm/main` to the new
+After a swarm-sync PR lands, fast-forward `shipper-swarm/main` to the new
 `shipper/main` merge commit before continuing normal swarm development:
 
 ```bash
@@ -63,8 +63,16 @@ git merge-base --is-ancestor swarm/main origin/main
 git push swarm origin/main:main
 ```
 
-If the merge-base check fails, stop. Do not force push, squash, or rebase the
-sync commit.
+If the merge-base check fails, stop the fast-forward path and use the
+source-backfill path below. Do not force push, squash, or rebase the sync
+commit.
+
+If the source repo receives a release-authority PR that was not a swarm sync
+while `shipper-swarm` already has unsynced development commits, do not
+fast-forward swarm to source. Open a source-backfill PR in `shipper-swarm` that
+merges `shipper/main` into `shipper-swarm/main`, and merge that backfill with a
+merge commit. This preserves both the source merge commit and the swarm
+development commits.
 
 ## Credential Boundary
 

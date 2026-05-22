@@ -1,22 +1,24 @@
 //! Basic command runners without timeout.
 
-use std::process::{Command, Stdio};
-
 use anyhow::{Context, Result};
 
 use super::types::CommandResult;
+
+mod command_builder;
+mod execution;
 
 /// Run a command and capture its output.
 #[allow(dead_code)]
 pub(crate) fn run_command(program: &str, args: &[&str]) -> Result<CommandResult> {
     let start = std::time::Instant::now();
 
-    let output = Command::new(program)
-        .args(args)
-        .output()
-        .with_context(|| format!("failed to run command: {} {:?}", program, args))?;
-
-    Ok(CommandResult::from_output(&output, start.elapsed()))
+    execution::run_and_capture(
+        command_builder::base_command(program, args),
+        program,
+        args,
+        None,
+        start,
+    )
 }
 
 /// Run a command in a specific directory.
@@ -28,20 +30,16 @@ pub(crate) fn run_command_in_dir(
 ) -> Result<CommandResult> {
     let start = std::time::Instant::now();
 
-    let output = Command::new(program)
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .with_context(|| {
-            format!(
-                "failed to run command: {} {:?} in {}",
-                program,
-                args,
-                dir.display()
-            )
-        })?;
+    let mut command = command_builder::base_command(program, args);
+    command.current_dir(dir);
 
-    Ok(CommandResult::from_output(&output, start.elapsed()))
+    execution::run_and_capture(
+        command,
+        program,
+        args,
+        Some(&format!(" in {}", dir.display())),
+        start,
+    )
 }
 
 /// Run a command with environment variables.
@@ -53,18 +51,13 @@ pub(crate) fn run_command_with_env(
 ) -> Result<CommandResult> {
     let start = std::time::Instant::now();
 
-    let mut cmd = Command::new(program);
-    cmd.args(args);
+    let mut command = command_builder::base_command(program, args);
 
     for (key, value) in env {
-        cmd.env(key, value);
+        command.env(key, value);
     }
 
-    let output = cmd
-        .output()
-        .with_context(|| format!("failed to run command: {} {:?}", program, args))?;
-
-    Ok(CommandResult::from_output(&output, start.elapsed()))
+    execution::run_and_capture(command, program, args, None, start)
 }
 
 /// Run a command and stream output to stdout/stderr.
@@ -72,23 +65,20 @@ pub(crate) fn run_command_with_env(
 pub(crate) fn run_command_streaming(program: &str, args: &[&str]) -> Result<CommandResult> {
     let start = std::time::Instant::now();
 
-    let output = Command::new(program)
-        .args(args)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .output()
-        .with_context(|| format!("failed to run command: {} {:?}", program, args))?;
-
-    Ok(CommandResult::from_output(&output, start.elapsed()))
+    execution::run_and_capture(
+        command_builder::streaming_command(program, args),
+        program,
+        args,
+        None,
+        start,
+    )
 }
 
 /// Run a command and return success/failure without capturing output.
 #[allow(dead_code)]
 pub(crate) fn run_command_simple(program: &str, args: &[&str]) -> Result<bool> {
-    let status = Command::new(program)
-        .args(args)
+    let status = command_builder::base_command(program, args)
         .status()
         .with_context(|| format!("failed to run command: {} {:?}", program, args))?;
-
     Ok(status.success())
 }

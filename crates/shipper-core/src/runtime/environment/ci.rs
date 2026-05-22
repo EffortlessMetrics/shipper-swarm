@@ -204,6 +204,22 @@ mod tests {
 
     #[test]
     #[serial]
+    fn ci_detection_priority_prefers_github_for_branch() {
+        temp_env::with_vars(
+            ci_env(&[
+                ("GITHUB_ACTIONS", Some("true")),
+                ("GITHUB_REF_NAME", Some("gh-main")),
+                ("GITLAB_CI", Some("true")),
+                ("CI_COMMIT_REF_NAME", Some("gl-main")),
+            ]),
+            || {
+                assert_eq!(get_ci_branch(), Some("gh-main".to_string()));
+            },
+        );
+    }
+
+    #[test]
+    #[serial]
     fn get_ci_branch_returns_none_locally() {
         temp_env::with_vars(ci_env(&[]), || {
             assert!(get_ci_branch().is_none());
@@ -325,6 +341,22 @@ mod tests {
             ci_env(&[("GITLAB_CI", Some("true")), ("CI_COMMIT_SHA", None)]),
             || {
                 assert_eq!(get_ci_commit_sha(), None);
+            },
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn ci_detection_priority_prefers_github_for_commit_sha() {
+        temp_env::with_vars(
+            ci_env(&[
+                ("GITHUB_ACTIONS", Some("true")),
+                ("GITHUB_SHA", Some("gh-sha")),
+                ("CIRCLECI", Some("true")),
+                ("CIRCLE_SHA1", Some("circle-sha")),
+            ]),
+            || {
+                assert_eq!(get_ci_commit_sha(), Some("gh-sha".to_string()));
             },
         );
     }
@@ -456,6 +488,22 @@ mod tests {
     fn is_pull_request_azure_false_on_manual() {
         temp_env::with_vars(
             ci_env(&[("TF_BUILD", Some("True")), ("BUILD_REASON", Some("Manual"))]),
+            || {
+                assert!(!is_pull_request());
+            },
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn ci_detection_priority_prefers_github_for_pull_request() {
+        temp_env::with_vars(
+            ci_env(&[
+                ("GITHUB_ACTIONS", Some("true")),
+                ("GITHUB_EVENT_NAME", Some("push")),
+                ("TRAVIS", Some("true")),
+                ("TRAVIS_PULL_REQUEST", Some("123")),
+            ]),
             || {
                 assert!(!is_pull_request());
             },

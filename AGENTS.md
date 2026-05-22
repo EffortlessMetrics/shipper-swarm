@@ -2,15 +2,18 @@
 
 ## Repository role
 
-`EffortlessMetrics/shipper` is the release authority for crates.io publishing,
-release evidence, tags, GitHub Releases, release workflow credentials, and
-signing credentials. Routine development happens in
-`EffortlessMetrics/shipper-swarm`.
+`EffortlessMetrics/shipper-swarm` is the active development repository.
+`EffortlessMetrics/shipper` remains the release authority for crates.io
+publishing, release evidence, tags, and signing credentials until that
+authority is explicitly moved.
 
-Syncs from `shipper-swarm/main` into `shipper/main` use merge commits and must
-not be squashed or rebased. Normal feature work, refactors, and tests should
-target `shipper-swarm` unless the user explicitly declares release-authority or
-emergency work in this repo. See [docs/status/SWARM_SYNC.md](docs/status/SWARM_SYNC.md).
+Normal PRs into `shipper-swarm/main` are squash-merged. Syncs from
+`shipper-swarm/main` back to `shipper/main` use merge commits and must not be
+squashed or rebased. See
+[docs/status/SWARM_OPERATION.md](docs/status/SWARM_OPERATION.md).
+
+Do not add crates.io publish tokens, release signing secrets, or release
+workflow credentials to `shipper-swarm`.
 
 Use this file with [CLAUDE.md](./CLAUDE.md) before making changes in this directory.
 
@@ -24,7 +27,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - [**docs/explanation/why-shipper.md**](docs/explanation/why-shipper.md) — the *why*, distilled.
 - [**docs/product.md**](docs/product.md), [**docs/structure.md**](docs/structure.md), [**docs/tech.md**](docs/tech.md) — steering docs.
 - [**docs/INVARIANTS.md**](docs/INVARIANTS.md) — events-as-truth contract.
-- [**docs/status/SWARM_SYNC.md**](docs/status/SWARM_SYNC.md) — source-repo release authority and swarm sync policy.
+- [**docs/status/SWARM_OPERATION.md**](docs/status/SWARM_OPERATION.md) — active-development repo, merge policy, and sync policy.
+- [**docs/status/SWARM_SYNC.md**](docs/status/SWARM_SYNC.md) — release-authority repo sync policy imported from `shipper`.
 
 ## Useful command entry points
 

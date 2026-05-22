@@ -1,5 +1,12 @@
 # Migrate `shipper` to `shipper-swarm` (runbook)
 
+Status: active-development cutover complete.
+
+`EffortlessMetrics/shipper-swarm` is now the active development repository.
+`EffortlessMetrics/shipper` remains the release authority for crates.io
+publishing, release evidence, and signing credentials until that authority is
+explicitly moved.
+
 This runbook defines the recommended migration path from `EffortlessMetrics/shipper` to `EffortlessMetrics/shipper-swarm`.
 
 ## Scope and operating constraints
@@ -18,10 +25,10 @@ This runbook defines the recommended migration path from `EffortlessMetrics/ship
 | Swarm repo | `EffortlessMetrics/shipper-swarm` |
 | Visibility | Public |
 | Default branch | `main` |
-| Merge model | Squash merge, auto-merge enabled, delete branches on merge |
+| Merge model | Squash merge only in swarm; sync back to `shipper` uses merge commits |
 | Required check | `Shipper Rust Small Result` only |
 | Release authority | Keep release/publish/signing in `shipper` initially |
-| CI routing | CX43 → CX33 → CX53 → GitHub-hosted |
+| CI routing | CPX42 → CX43 → CX53 → GitHub-hosted |
 | Fork PR policy | Never run public fork PRs on self-hosted |
 
 ## Why start as small/medium lane
@@ -32,13 +39,13 @@ Primary route:
 
 ```text
 shipper rust-small:
+  CPX42 if idle
   CX43 if idle
-  CX33 if idle
   CX53 if idle
   GitHub-hosted otherwise
 ```
 
-Fallback if CX33 proves constrained in real runs:
+Fallback if CPX42 proves constrained in real runs:
 
 ```text
 shipper rust-small:
@@ -57,7 +64,7 @@ Configure `EffortlessMetrics/shipper-swarm` with:
 - Default branch: `main`
 - Allow squash merge: yes
 - Allow merge commit: no
-- Allow rebase merge: optional/no
+- Allow rebase merge: no
 - Auto-merge: enabled
 - Delete branches on merge: enabled
 - Branch protection: **off initially**
@@ -78,6 +85,18 @@ Do **not** add yet:
 
 ### 3) Seed from `shipper/main`
 
+`shipper-swarm/main` must preserve `shipper/main` ancestry. Do not use an
+orphan snapshot seed. The swarm repo should become a branching continuation of
+the release-authority repo:
+
+```text
+shipper/main:
+A---B---C---D
+
+shipper-swarm/main:
+A---B---C---D---S1---S2
+```
+
 ```bash
 git clone git@github.com:EffortlessMetrics/shipper-swarm.git
 cd shipper-swarm
@@ -86,22 +105,35 @@ git remote add public git@github.com:EffortlessMetrics/shipper.git
 git fetch public --prune --tags
 git fetch origin --prune
 
-git switch --orphan seed/public-main
-git rm -rf . 2>/dev/null || true
-git checkout public/main -- .
-
-git add -A
-git commit -m "seed: import public shipper main for swarm repo"
-git push --force-with-lease origin seed/public-main:main
+git switch -C main public/main
+git push --force-with-lease origin main
 
 git fetch origin main
 git switch main
 git reset --hard origin/main
-git branch -D seed/public-main
 ```
 
-The cleanup is intentional: after the seed push, local work should be on
-`main` tracking `origin/main`, not left on the temporary orphan seed branch.
+After seeding, verify that `shipper/main` is an ancestor of
+`shipper-swarm/main`:
+
+```bash
+git merge-base --is-ancestor public/main origin/main
+git rev-list --left-right --count public/main...origin/main
+```
+
+Expected result:
+
+```text
+0 N
+```
+
+where `N` is the number of swarm-only commits after the seed point.
+
+After a later non-squash sync from `shipper-swarm` to `shipper`, the source
+repo will contain a merge commit that is not yet on `shipper-swarm/main`. Pause
+normal swarm PR merges and fast-forward `shipper-swarm/main` to `shipper/main`
+before continuing development. That restores the `0 N` ancestry shape without
+using orphan snapshots or squashing the sync commit.
 
 ## Phase 2 — Add initial routed Rust lane
 
@@ -116,8 +148,8 @@ First normalized required check:
 Do **not** directly require conditional implementation jobs:
 
 - `Route Shipper Rust Small`
+- `Shipper Rust Small on CPX42`
 - `Shipper Rust Small on CX43`
-- `Shipper Rust Small on CX33`
 - `Shipper Rust Small on CX53`
 - `Shipper Rust Small on GitHub Hosted`
 
@@ -125,7 +157,7 @@ Do **not** directly require conditional implementation jobs:
 
 ```bash
 cargo check --workspace --locked --all-targets
-cargo test --workspace --locked --all-targets
+cargo nextest run --workspace --locked --all-targets --all-features --profile ci
 cargo test --workspace --locked --doc
 cargo run -p shipper -- --help
 cargo run -p shipper -- plan --help
@@ -146,8 +178,8 @@ Avoid for first gate:
 
 Emit one of:
 
+- `cpx42`
 - `cx43`
-- `cx33`
 - `cx53`
 - `github`
 
@@ -157,15 +189,15 @@ Emit one of:
 repo=shipper-swarm
 workflow=em-ci-routed-rust
 run_id=${{ github.run_id }}
-router_target=cx43|cx33|cx53|github
-router_reason=cx43_idle|cx33_idle|cx53_idle|no_idle_runner|runner_api_failed|untrusted_pr
+router_target=cpx42|cx43|cx53|github
+router_reason=cpx42_idle|cx43_idle|cx53_idle|no_idle_runner|runner_token_missing|runner_token_unauthorized|runner_token_forbidden|runner_api_failed|parse_failed|fork_pr
 ```
 
 ### Routing policy
 
 - Trusted same-repo PR or `workflow_dispatch`:
+  - CPX42 if idle
   - CX43 if idle
-  - CX33 if idle
   - CX53 if idle
   - GitHub-hosted fallback
 - Fork PR:
@@ -205,8 +237,8 @@ Run this sequence:
 1. PR that adds routed workflow passes.
 2. `workflow_dispatch` on `shipper-swarm/main` passes.
 3. Tiny same-repo PR passes.
-4. Force CX43 route once.
-5. Force CX33 route once (if present).
+4. Force CPX42 route once.
+5. Force CX43 route once.
 6. Force CX53 overflow once.
 7. Saturate self-hosted and verify GitHub fallback.
 8. Verify cleanup + disk reports healthy.
@@ -253,7 +285,7 @@ X64
 em-ci
 rust-small
 trusted-pr
-cx43 | cx33 | cx53
+cpx42 | cx43 | cx53
 ```
 
 After cutover, confirm each runner appears online and idle for
@@ -275,7 +307,7 @@ After 3–5 clean PRs:
 
 | Lane | Route | Purpose |
 |---|---|---|
-| `Shipper Rust Small Result` | CX43 → CX33 → CX53 → GitHub | Required base gate |
+| `Shipper Rust Small Result` | CPX42 → CX43 → CX53 → GitHub | Required base gate |
 | `Shipper Integration Result` | CX53 → CX43 → GitHub | Fake registry, receipts, resume/reconcile |
 | `Shipper Coverage Lite` | GitHub-hosted or manual CX53 | Non-required initially |
 | `Shipper Fuzz Smoke` | GitHub-hosted or manual CX53 | Non-required initially |
@@ -284,20 +316,37 @@ After 3–5 clean PRs:
 
 ## Immediate checklist
 
-- [ ] Create `EffortlessMetrics/shipper-swarm` as public.
-- [ ] Enable squash merge + auto-merge + delete branch on merge.
-- [ ] Add repo to `em-ci-small` selected repositories.
-- [ ] Add repo to `EM_RUNNER_READ_TOKEN` selected repositories.
-- [ ] Do **not** add crates.io/release/signing secrets.
-- [ ] Seed `shipper-swarm/main` from `shipper/main`.
-- [ ] Add `.github/workflows/em-ci-routed-rust.yml`.
-- [ ] Route small lane CX43 → CX33 → CX53 → GitHub.
-- [ ] Guard self-hosted jobs to trusted same-repo work only.
-- [ ] Include GitHub-hosted fallback.
-- [ ] Add normalized `Shipper Rust Small Result` job.
-- [ ] Run `workflow_dispatch` on `main`.
-- [ ] Open tiny same-repo PR.
-- [ ] Force fallback-path proof cases.
-- [ ] Enable branch protection requiring only normalized result.
-- [ ] Cut runner access over to `shipper-swarm` and verify routed job pickup.
-- [ ] Move active development to side-by-side `shipper-swarm` clones.
+- [x] Create `EffortlessMetrics/shipper-swarm` as public.
+- [x] Enable squash merge + auto-merge + delete branch on merge.
+- [x] Add repo to `em-ci-small` selected repositories.
+- [x] Add repo to `EM_RUNNER_READ_TOKEN` selected repositories.
+- [x] Do **not** add crates.io/release/signing secrets.
+- [x] Seed `shipper-swarm/main` from `shipper/main`.
+- [x] Add `.github/workflows/em-ci-routed-rust.yml`.
+- [x] Route small lane CPX42 → CX43 → CX53 → GitHub.
+- [x] Guard self-hosted jobs to trusted same-repo work only.
+- [x] Include GitHub-hosted fallback.
+- [x] Add normalized `Shipper Rust Small Result` job.
+- [x] Run `workflow_dispatch` on `main`.
+- [x] Open tiny same-repo PR.
+- [x] Force fallback-path proof cases.
+- [x] Enable branch protection requiring only normalized result.
+- [x] Cut runner access over to `shipper-swarm` and verify routed job pickup.
+- [x] Move active development to side-by-side `shipper-swarm` clones.
+
+Proof notes:
+
+- PR #2 added the routed Rust small lane.
+- PR #3 proved same-repo PR flow through the normalized result check.
+- Earlier forced `workflow_dispatch` proof runs covered `cx43`, `cx33`, `cx53`, and
+  GitHub-hosted fallback.
+- PR #31 moved the route to CPX42-first and proved the selected CPX42 lane with
+  `Routed Rust Small` run `26244152934`; `Shipper Rust Small on CPX42` and the
+  normalized `Shipper Rust Small Result` both passed.
+- PR #22 and PR #17 repeated CPX42 proof on normal same-repo refactor PRs with
+  `Routed Rust Small` runs `26252949412` and `26256205458`.
+- PR #24 proved the GitHub-hosted fallback implementation lane with `Routed Rust
+  Small` run `26247605774`.
+- Saturation proof occupied all self-hosted routes and verified auto-routing to
+  GitHub-hosted with `router_reason=no_idle_runner`.
+- Branch protection for `main` requires only `Shipper Rust Small Result`.

@@ -32,8 +32,16 @@ use crate::webhook::{self, WebhookEvent};
 
 mod preflight;
 mod publish;
+mod readiness;
+mod rehearsal;
+mod retry;
 
 pub use preflight::PreflightRunOptions;
+use readiness::verify_published;
+use retry::{
+    emit_retry_backoff_event, record_rate_limit_observed_event, record_retry_backoff_event,
+    wait_after_retry,
+};
 
 pub trait Reporter {
     fn info(&mut self, msg: &str);
@@ -188,90 +196,6 @@ pub fn run_preflight_in_place_with_options(
     preflight::run(ws, opts, reporter, run_opts)
 }
 
-/// Enforce the rehearsal hard gate (#97 PR 3).
-///
-/// Rules, evaluated in order:
-///
-/// 1. **Rehearsal not configured** (`opts.rehearsal_registry` is `None`) →
-///    gate is dormant; publish proceeds. Rehearsal is opt-in; existing
-///    workflows that never set a rehearsal registry are unaffected.
-///
-/// 2. **Operator override** (`opts.rehearsal_skip` is `true`) → publish
-///    proceeds with a loud warning logged to the reporter. Use sparingly
-///    (incident response, bootstrap runs). The skip decision is
-///    operator-visible in stderr; it does *not* synthesize a passing
-///    rehearsal receipt, so the audit trail still shows "no rehearsal
-///    ran."
-///
-/// 3. **No rehearsal receipt** (`rehearsal.json` is missing) → refuse.
-///    The operator needs to run `shipper rehearse` first.
-///
-/// 4. **Stale receipt** (receipt exists but `plan_id` mismatches the
-///    current workspace's plan) → refuse. A workspace change between
-///    rehearse and publish invalidates the rehearsal.
-///
-/// 5. **Failing receipt** (`passed: false`) → refuse.
-///
-/// 6. **Fresh passing receipt for current plan** → publish proceeds.
-fn enforce_rehearsal_gate(
-    ws: &PlannedWorkspace,
-    opts: &RuntimeOptions,
-    state_dir: &Path,
-    reporter: &mut dyn Reporter,
-) -> Result<()> {
-    let Some(rehearsal_name) = opts.rehearsal_registry.as_deref() else {
-        return Ok(());
-    };
-
-    if opts.rehearsal_skip {
-        reporter.warn(&format!(
-            "--skip-rehearsal was set; publish is proceeding without a rehearsal against '{rehearsal_name}'. \
-             This is an operator-authorized bypass; auditors reading events.jsonl will see no RehearsalComplete event for this plan_id."
-        ));
-        return Ok(());
-    }
-
-    let receipt = crate::state::rehearsal::load_rehearsal(state_dir)
-        .context("failed to read rehearsal receipt while enforcing hard gate")?;
-
-    let rehearsal_path = crate::state::rehearsal::rehearsal_path(state_dir);
-
-    let receipt = match receipt {
-        Some(r) => r,
-        None => bail!(
-            "rehearsal is required (rehearsal registry '{rehearsal_name}' is configured) but no rehearsal receipt was found at {}. \
-             Run `shipper rehearse --rehearsal-registry {rehearsal_name}` first, \
-             or pass --skip-rehearsal to override (not recommended).",
-            rehearsal_path.display()
-        ),
-    };
-
-    if receipt.plan_id != ws.plan.plan_id {
-        bail!(
-            "rehearsal receipt is stale: rehearsal ran for plan_id {} but the current plan_id is {}. \
-             The workspace changed between rehearse and publish; re-run `shipper rehearse` against the current plan.",
-            receipt.plan_id,
-            ws.plan.plan_id
-        );
-    }
-
-    if !receipt.passed {
-        bail!(
-            "rehearsal against '{}' did NOT pass for plan_id {}: {}. \
-             Fix the cause and re-run `shipper rehearse` before publishing.",
-            receipt.registry,
-            receipt.plan_id,
-            receipt.summary
-        );
-    }
-
-    reporter.info(&format!(
-        "rehearsal gate: passing receipt found ({} packages against '{}', plan_id {})",
-        receipt.packages_published, receipt.registry, receipt.plan_id
-    ));
-    Ok(())
-}
-
 /// Execute the publish operation for all packages in the workspace.
 ///
 /// This is the main publishing function that:
@@ -418,95 +342,29 @@ pub fn run_publish(
             PackageState::Ambiguous {
                 message: prior_reason,
             } => {
-                // Resume-path reconciliation (#99 follow-on). A prior run left
-                // this package in Ambiguous state (reconciliation inconclusive).
-                // Before doing ANY further work, reconcile against the
-                // registry so we never re-upload a crate whose prior upload
-                // may have actually succeeded.
-                reporter.warn(&format!(
-                    "{}@{}: resume found ambiguous state ({}); reconciling against registry",
-                    p.name, p.version, prior_reason
-                ));
-
-                let readiness_config = crate::types::ReadinessConfig {
-                    enabled: effects.readiness_enabled,
-                    ..opts.readiness.clone()
-                };
-
-                event_log.record(PublishEvent {
-                    timestamp: Utc::now(),
-                    event_type: EventType::PublishReconciling {
-                        method: readiness_config.method,
-                    },
-                    package: pkg_label.clone(),
-                });
-
-                let (outcome, _evidence) =
-                    sequential_reconcile(&reg, &p.name, &p.version, &readiness_config);
-
-                event_log.record(PublishEvent {
-                    timestamp: Utc::now(),
-                    event_type: EventType::PublishReconciled {
-                        outcome: outcome.clone(),
-                    },
-                    package: pkg_label.clone(),
-                });
-                event_log.write_to_file(&events_path)?;
-                event_log.clear();
-                write_reconciliation_report_best_effort(&state_dir, ws, &events_path, reporter);
-                let reconciliation_report_path = state::reconciliation_path(&state_dir);
-
-                match outcome {
-                    ReconciliationOutcome::Published { .. } => {
-                        update_state(&mut st, &state_dir, &key, PackageState::Published)?;
-                        reporter.info(&format!(
-                            "{}@{}: reconciliation outcome: Published; action: mark published and continue without republish (evidence: {})",
-                            p.name,
-                            p.version,
-                            reconciliation_report_path.display()
-                        ));
-                        continue;
-                    }
-                    ReconciliationOutcome::NotPublished { .. } => {
-                        // Clear the Ambiguous state — the registry confirms
-                        // no prior upload succeeded, so falling through to
-                        // the normal publish flow is safe.
-                        update_state(&mut st, &state_dir, &key, PackageState::Pending)?;
-                        reporter.info(&format!(
-                            "{}@{}: reconciliation outcome: NotPublished; action: retry under publish policy (evidence: {})",
-                            p.name,
-                            p.version,
-                            reconciliation_report_path.display()
-                        ));
-                        // fall through to normal flow
-                    }
-                    ReconciliationOutcome::StillUnknown { reason, .. } => {
-                        reporter.error(&format!(
-                            "{}@{}: reconciliation outcome: StillUnknown; action: stop before blind retry; operator action required (evidence: {}): {}",
-                            p.name,
-                            p.version,
-                            reconciliation_report_path.display(),
-                            reason
-                        ));
-                        webhook::maybe_send_event(
-                            &opts.webhook,
-                            WebhookEvent::PublishFailed {
-                                plan_id: ws.plan.plan_id.clone(),
-                                package_name: p.name.clone(),
-                                package_version: p.version.clone(),
-                                error_class: format!("{:?}", ErrorClass::Ambiguous),
-                                message: format!(
-                                    "resume reconciliation still inconclusive: {reason}"
-                                ),
-                            },
-                        );
-                        bail!(
-                            "{}@{}: resume reconciliation still inconclusive; operator action required. Prior reason: {}",
-                            p.name,
-                            p.version,
-                            reason
-                        );
-                    }
+                publish::ambiguous::resolve_ambiguous_resume_state(
+                    ws,
+                    opts,
+                    &reg,
+                    &state_dir,
+                    &events_path,
+                    &mut event_log,
+                    &mut st,
+                    &p.name,
+                    &p.version,
+                    &prior_reason,
+                    reporter,
+                )?;
+                if matches!(
+                    st.packages
+                        .get(&key)
+                        .context(
+                            "missing package progress in state after ambiguous reconciliation"
+                        )?
+                        .state,
+                    PackageState::Published
+                ) {
+                    continue;
                 }
             }
             _ => {}
@@ -1615,256 +1473,6 @@ fn sequential_reconcile(
             Vec::new(),
         ),
     }
-}
-
-/// Emit a [`EventType::RetryBackoffStarted`] event + a human-readable warn
-/// line, then `thread::sleep(delay)`. Used at every retry-backoff site in the
-/// sequential publish loop so operators never stare at a silent CI log during
-/// the wait window. See #91. (The parallel path has a mirror helper in
-/// `engine::parallel::publish::emit_retry_backoff` that handles its
-/// `Arc<Mutex<_>>` wrapping.)
-#[allow(clippy::too_many_arguments)]
-fn emit_retry_backoff_event(
-    event_log: &mut events::EventLog,
-    events_path: &Path,
-    reporter: &mut dyn Reporter,
-    pkg_label: &str,
-    pkg_name: &str,
-    pkg_version: &str,
-    attempt: u32,
-    max_attempts: u32,
-    delay: std::time::Duration,
-    next_attempt_at: chrono::DateTime<Utc>,
-    reason: ErrorClass,
-    message: &str,
-) -> Result<()> {
-    record_retry_backoff_event(
-        event_log,
-        events_path,
-        pkg_label,
-        attempt,
-        max_attempts,
-        delay,
-        next_attempt_at,
-        &reason,
-        message,
-    )?;
-    wait_after_retry(
-        reporter,
-        pkg_name,
-        pkg_version,
-        attempt,
-        max_attempts,
-        delay,
-        reason,
-        message,
-    );
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn record_retry_backoff_event(
-    event_log: &mut events::EventLog,
-    events_path: &Path,
-    pkg_label: &str,
-    attempt: u32,
-    max_attempts: u32,
-    delay: std::time::Duration,
-    next_attempt_at: chrono::DateTime<Utc>,
-    reason: &ErrorClass,
-    message: &str,
-) -> Result<()> {
-    event_log.record(PublishEvent {
-        timestamp: Utc::now(),
-        event_type: EventType::RetryScheduled {
-            attempt,
-            max_attempts,
-            delay_ms: delay.as_millis() as u64,
-            next_attempt_at,
-            reason: reason.clone(),
-            message: message.to_string(),
-        },
-        package: pkg_label.to_string(),
-    });
-    record_publish_wait_event(
-        event_log,
-        events_path,
-        pkg_label,
-        delay,
-        "retry backoff",
-        Some(next_attempt_at),
-    )?;
-    event_log.record(PublishEvent {
-        timestamp: Utc::now(),
-        event_type: EventType::RetryBackoffStarted {
-            attempt,
-            max_attempts,
-            delay_ms: delay.as_millis() as u64,
-            next_attempt_at,
-            reason: reason.clone(),
-            message: message.to_string(),
-        },
-        package: pkg_label.to_string(),
-    });
-    event_log.write_to_file(events_path)?;
-    event_log.clear();
-    Ok(())
-}
-
-fn record_rate_limit_observed_event(
-    event_log: &mut events::EventLog,
-    events_path: &Path,
-    pkg_label: &str,
-    is_new_crate: bool,
-    retry_after: Option<std::time::Duration>,
-    message: &str,
-) -> Result<()> {
-    event_log.record(PublishEvent {
-        timestamp: Utc::now(),
-        event_type: EventType::RateLimitObserved {
-            is_new_crate,
-            retry_after_ms: retry_after.map(|delay| delay.as_millis() as u64),
-            message: message.to_string(),
-        },
-        package: pkg_label.to_string(),
-    });
-    event_log.write_to_file(events_path)?;
-    event_log.clear();
-    Ok(())
-}
-
-fn record_publish_wait_event(
-    event_log: &mut events::EventLog,
-    events_path: &Path,
-    pkg_label: &str,
-    delay: std::time::Duration,
-    reason: &str,
-    until: Option<chrono::DateTime<Utc>>,
-) -> Result<()> {
-    event_log.record(PublishEvent {
-        timestamp: Utc::now(),
-        event_type: EventType::PublishWaiting {
-            reason: reason.to_string(),
-            delay_ms: delay.as_millis() as u64,
-            until: until.unwrap_or_else(|| retry_next_attempt_at(delay)),
-        },
-        package: pkg_label.to_string(),
-    });
-    event_log.write_to_file(events_path)?;
-    event_log.clear();
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn wait_after_retry(
-    reporter: &mut dyn Reporter,
-    pkg_name: &str,
-    pkg_version: &str,
-    attempt: u32,
-    max_attempts: u32,
-    delay: std::time::Duration,
-    reason: ErrorClass,
-    message: &str,
-) {
-    // Delegate the human-facing narration AND the backoff sleep to the
-    // Reporter so TTY-capable UIs can render a live countdown during the
-    // wait. The default `Reporter::retry_wait` impl preserves the pre-#103
-    // behavior (single warn line + `thread::sleep(delay)`), so reporters
-    // that don't override it behave exactly as before.
-    reporter.retry_wait(
-        pkg_name,
-        pkg_version,
-        attempt,
-        max_attempts,
-        delay,
-        reason,
-        message,
-    );
-}
-
-fn verify_published(
-    reg: &RegistryClient,
-    crate_name: &str,
-    version: &str,
-    config: &crate::types::ReadinessConfig,
-    reporter: &mut dyn Reporter,
-    event_log: &mut events::EventLog,
-    events_path: &Path,
-    pkg_label: &str,
-) -> Result<(bool, Vec<ReadinessEvidence>)> {
-    reporter.info(&format!(
-        "{}@{}: readiness check ({:?})...",
-        crate_name, version, config.method
-    ));
-    let started_at = Instant::now();
-    record_readiness_event(
-        event_log,
-        events_path,
-        PublishEvent {
-            timestamp: Utc::now(),
-            event_type: EventType::ReadinessStarted {
-                method: config.method,
-            },
-            package: pkg_label.to_string(),
-        },
-    )?;
-    let mut emit_event = |event| record_readiness_event(event_log, events_path, event);
-    let (visible, evidence) = reg.is_version_visible_with_backoff_and_events(
-        crate_name,
-        version,
-        config,
-        &mut emit_event,
-    )?;
-    if visible {
-        reporter.info(&format!(
-            "{}@{}: visible after {} checks",
-            crate_name,
-            version,
-            evidence.len()
-        ));
-        record_readiness_event(
-            event_log,
-            events_path,
-            PublishEvent {
-                timestamp: Utc::now(),
-                event_type: EventType::ReadinessComplete {
-                    duration_ms: started_at.elapsed().as_millis() as u64,
-                    attempts: evidence.len() as u32,
-                },
-                package: pkg_label.to_string(),
-            },
-        )?;
-    } else {
-        reporter.warn(&format!(
-            "{}@{}: not visible after {} checks",
-            crate_name,
-            version,
-            evidence.len()
-        ));
-        record_readiness_event(
-            event_log,
-            events_path,
-            PublishEvent {
-                timestamp: Utc::now(),
-                event_type: EventType::ReadinessTimeout {
-                    max_wait_ms: config.max_total_wait.as_millis() as u64,
-                },
-                package: pkg_label.to_string(),
-            },
-        )?;
-    }
-    Ok((visible, evidence))
-}
-
-fn record_readiness_event(
-    event_log: &mut events::EventLog,
-    events_path: &Path,
-    event: PublishEvent,
-) -> Result<()> {
-    event_log.record(event);
-    event_log.write_to_file(events_path)?;
-    event_log.clear();
-    Ok(())
 }
 
 #[cfg(test)]
@@ -7910,7 +7518,7 @@ mod tests {
         let opts = default_opts(PathBuf::from(".shipper"));
         // opts.rehearsal_registry is None by default.
         let mut reporter = CollectingReporter::default();
-        enforce_rehearsal_gate(&ws, &opts, td.path(), &mut reporter).expect("gate dormant");
+        rehearsal::enforce_gate(&ws, &opts, td.path(), &mut reporter).expect("gate dormant");
     }
 
     #[test]
@@ -7921,7 +7529,7 @@ mod tests {
         opts.rehearsal_registry = Some("rehearsal".into());
         opts.rehearsal_skip = true;
         let mut reporter = CollectingReporter::default();
-        enforce_rehearsal_gate(&ws, &opts, td.path(), &mut reporter).expect("skip bypass");
+        rehearsal::enforce_gate(&ws, &opts, td.path(), &mut reporter).expect("skip bypass");
         assert!(
             reporter
                 .warns
@@ -7940,7 +7548,7 @@ mod tests {
         opts.rehearsal_registry = Some("rehearsal".into());
         let mut reporter = CollectingReporter::default();
         let err =
-            enforce_rehearsal_gate(&ws, &opts, td.path(), &mut reporter).expect_err("must fail");
+            rehearsal::enforce_gate(&ws, &opts, td.path(), &mut reporter).expect_err("must fail");
         let msg = format!("{err:#}");
         assert!(msg.contains("no rehearsal receipt was found"), "err: {msg}");
         assert!(
@@ -7960,7 +7568,7 @@ mod tests {
 
         let mut reporter = CollectingReporter::default();
         let err =
-            enforce_rehearsal_gate(&ws, &opts, td.path(), &mut reporter).expect_err("must fail");
+            rehearsal::enforce_gate(&ws, &opts, td.path(), &mut reporter).expect_err("must fail");
         let msg = format!("{err:#}");
         assert!(msg.contains("stale"), "err: {msg}");
         assert!(
@@ -7980,7 +7588,7 @@ mod tests {
 
         let mut reporter = CollectingReporter::default();
         let err =
-            enforce_rehearsal_gate(&ws, &opts, td.path(), &mut reporter).expect_err("must fail");
+            rehearsal::enforce_gate(&ws, &opts, td.path(), &mut reporter).expect_err("must fail");
         let msg = format!("{err:#}");
         assert!(msg.contains("did NOT pass"), "err: {msg}");
     }
@@ -7995,7 +7603,7 @@ mod tests {
         write_rehearsal_receipt(td.path(), &ws.plan.plan_id, true);
 
         let mut reporter = CollectingReporter::default();
-        enforce_rehearsal_gate(&ws, &opts, td.path(), &mut reporter).expect("fresh pass");
+        rehearsal::enforce_gate(&ws, &opts, td.path(), &mut reporter).expect("fresh pass");
         assert!(
             reporter.infos.iter().any(|i| i.contains("passing receipt")),
             "infos: {:?}",

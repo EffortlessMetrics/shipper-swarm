@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 
-use crate::engine::{Reporter, enforce_rehearsal_gate, init_registry_client, init_state};
+use crate::engine::{Reporter, init_registry_client, init_state, rehearsal};
 use crate::git;
 use crate::lock;
 use crate::plan::PlannedWorkspace;
@@ -55,7 +55,7 @@ pub(in crate::engine) fn prepare_publish_run(
 
     // #97 PR 3: rehearsal hard gate. Only fires when a rehearsal registry
     // is configured; opt-in until rehearsal phase-2 is stable.
-    enforce_rehearsal_gate(ws, opts, &state_dir, reporter)?;
+    rehearsal::enforce_gate(ws, opts, &state_dir, reporter)?;
 
     let lock = acquire_publish_lock(&state_dir, workspace_root, opts, &ws.plan.plan_id)?;
 
