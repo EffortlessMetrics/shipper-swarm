@@ -340,8 +340,13 @@ Proof notes:
 - PR #3 proved same-repo PR flow through the normalized result check.
 - Earlier forced `workflow_dispatch` proof runs covered `cx43`, `cx33`, `cx53`, and
   GitHub-hosted fallback.
-- CPX42-first routing requires a fresh CPX42 proof run before treating CPX42 as
-  the preferred healthy route.
+- PR #31 moved the route to CPX42-first and proved the selected CPX42 lane with
+  `Routed Rust Small` run `26244152934`; `Shipper Rust Small on CPX42` and the
+  normalized `Shipper Rust Small Result` both passed.
+- PR #22 and PR #17 repeated CPX42 proof on normal same-repo refactor PRs with
+  `Routed Rust Small` runs `26252949412` and `26256205458`.
+- PR #24 proved the GitHub-hosted fallback implementation lane with `Routed Rust
+  Small` run `26247605774`.
 - Saturation proof occupied all self-hosted routes and verified auto-routing to
   GitHub-hosted with `router_reason=no_idle_runner`.
 - Branch protection for `main` requires only `Shipper Rust Small Result`.

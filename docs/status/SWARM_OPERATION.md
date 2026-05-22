@@ -128,6 +128,14 @@ Shipper Rust Small Result
 Do not require route-specific implementation jobs directly. Only one of those
 jobs is expected to run on each attempt.
 
+Current routed Rust-small proof:
+
+- CPX42-first routing passed on PR #31 with `Routed Rust Small` run
+  `26244152934`.
+- Normal same-repo CPX42 routing passed again on PR #22 with run
+  `26252949412` and PR #17 with run `26256205458`.
+- GitHub-hosted fallback execution passed on PR #24 with run `26247605774`.
+
 ## Credential Boundary
 
 Do not add these to `shipper-swarm`:
