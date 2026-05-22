@@ -231,21 +231,20 @@ struct Cli {
     /// Name of a registry (from `[[registries]]` in `.shipper.toml`) to
     /// rehearse the publish against before live dispatch.
     ///
-    /// See issue #97. Plumbed through today; phase-2 execution (actual
-    /// publish to the rehearsal registry + install/smoke checks + live
-    /// dispatch gate) lands in a follow-on PR.
+    /// Runs the rehearsal publish flow against the alternate registry and
+    /// enables the live-publish rehearsal gate when configured.
     #[arg(long, global = true)]
     rehearsal_registry: Option<String>,
 
     /// Skip rehearsal even if `.shipper.toml` enables it.
     ///
-    /// Use with caution — rehearsal (once fully implemented under #97)
-    /// is the proof boundary between "we built it" and "we verified it
-    /// actually resolves from a registry." Bypassing it should be rare.
+    /// Use with caution — rehearsal is the proof boundary between "we built
+    /// it" and "we verified it actually resolves from a registry." Bypassing
+    /// it should be rare.
     #[arg(long, global = true)]
     skip_rehearsal: bool,
 
-    /// Crate name to smoke-install after a successful rehearsal (#97 PR 4).
+    /// Crate name to smoke-install after a successful rehearsal.
     ///
     /// Runs `cargo install --registry <rehearsal> <CRATE>` against the
     /// rehearsal registry to prove the crate actually resolves and
@@ -363,7 +362,7 @@ EXAMPLES:
     shipper resume --force-resume
 ")]
     Resume,
-    /// Rehearse a release against an alternate registry (#97 PR 2).
+    /// Rehearse a release against an alternate registry.
     ///
     /// Publishes every crate in the plan to the registry named by
     /// `--rehearsal-registry` (or `[rehearsal] registry = "..."` in
@@ -375,9 +374,8 @@ EXAMPLES:
     /// crates.io account, or a throwaway alternate registry). Shipper
     /// refuses to rehearse against the same registry as the live target.
     ///
-    /// Part of [#97](https://github.com/EffortlessMetrics/shipper/issues/97).
-    /// The hard gate that blocks live publish without a passing rehearsal
-    /// lands in #97 PR 3.
+    /// When a rehearsal registry is configured, live publish later enforces
+    /// the recorded `rehearsal.json` gate unless `--skip-rehearsal` is used.
     Rehearse,
     /// Compare local workspace versions to the registry.
     #[command(long_about = "\
