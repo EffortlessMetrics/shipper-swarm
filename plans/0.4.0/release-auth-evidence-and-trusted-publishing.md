@@ -32,6 +32,16 @@ Existing foundations, including Doctor JSON diagnostics, preflight OIDC
 warnings, release workflow OIDC wiring, and token sanitizer coverage, are
 treated as already landed baseline.
 
+## Current Status
+
+PRs 1-5 are complete. PR 6 is externally blocked on crates.io
+trusted-publisher registration proof for `EffortlessMetrics/shipper`.
+
+Until a release auth rehearsal or readiness artifact records
+`selected_token_source = "trusted_publishing"` for the release path, the active
+goal remains blocked and the Trusted Publishing default claim stays
+planned/advisory.
+
 ## PR Sequence
 
 ### PR 1 - Source-of-truth activation
