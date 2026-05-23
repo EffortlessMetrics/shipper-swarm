@@ -553,10 +553,38 @@ fn block_has_repository_guard(block: &str, required_repository: &str) -> bool {
     let single_quoted = format!("github.repository == '{required_repository}'");
     let double_quoted = format!("github.repository == \"{required_repository}\"");
     block.lines().any(|line| {
-        let trimmed = line.trim_start();
+        let without_comment = strip_yaml_inline_comment(line);
+        let trimmed = without_comment.trim_start();
         trimmed.starts_with("if:")
             && (trimmed.contains(&single_quoted) || trimmed.contains(&double_quoted))
     })
+}
+
+fn strip_yaml_inline_comment(line: &str) -> &str {
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut previous_was_whitespace = true;
+
+    for (index, ch) in line.char_indices() {
+        match ch {
+            '\'' if !in_double_quote => {
+                in_single_quote = !in_single_quote;
+                previous_was_whitespace = false;
+            }
+            '"' if !in_single_quote => {
+                in_double_quote = !in_double_quote;
+                previous_was_whitespace = false;
+            }
+            '#' if !in_single_quote && !in_double_quote && previous_was_whitespace => {
+                return &line[..index];
+            }
+            _ => {
+                previous_was_whitespace = ch.is_whitespace();
+            }
+        }
+    }
+
+    line
 }
 
 // ─── check-process-policy ───────────────────────────────────────────────────
@@ -1100,5 +1128,28 @@ jobs:
         let missing = workflow_jobs_missing_repository_guard(yaml, "EffortlessMetrics/shipper");
 
         assert_eq!(missing, vec!["publish", "create-release"]);
+    }
+
+    #[test]
+    fn repository_guard_scanner_ignores_inline_comment_bypass() {
+        let yaml = r#"
+name: Release
+
+jobs:
+  publish:
+    if: github.repository == 'EffortlessMetrics/shipper-swarm' # github.repository == 'EffortlessMetrics/shipper'
+    runs-on: ubuntu-latest
+    steps:
+      - run: cargo publish
+  rehearse:
+    if: github.repository == 'EffortlessMetrics/shipper'
+    runs-on: ubuntu-latest
+    steps:
+      - run: cargo xtask policy-report
+"#;
+
+        let missing = workflow_jobs_missing_repository_guard(yaml, "EffortlessMetrics/shipper");
+
+        assert_eq!(missing, vec!["publish"]);
     }
 }
