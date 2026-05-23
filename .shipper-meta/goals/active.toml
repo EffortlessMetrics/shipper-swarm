@@ -43,7 +43,7 @@ spec = "docs/specs/SHIPPER-SPEC-0006-release-auth-evidence-and-trusted-publishin
 plan = "plans/0.4.0/release-auth-evidence-and-trusted-publishing.md"
 issue = "105"
 blocked_by = [
-  "External crates.io trusted-publisher registration is not proven for EffortlessMetrics/shipper; release workflow run 26072938626 recorded selected_token_source = \"fallback_secret\" and the setup gap `No Trusted Publishing config found for repository EffortlessMetrics/shipper`.",
+  "External crates.io trusted-publisher registration is not proven for EffortlessMetrics/shipper; final 0.4.0 Release workflow run 26141754574 recorded selected_token_source = \"fallback_secret\", fallback.configured = true, fallback.used = true, auth_action.outcome = \"failure\", and no token values in .shipper/auth-evidence.json.",
 ]
 next_action = "After crates.io trusted-publisher registration is configured, run a release auth rehearsal and record the resulting `.shipper/auth-evidence.json` artifact."
 commands = [

@@ -157,10 +157,10 @@ not rehearsed.
 - Artifact limits state that token values are omitted and crates.io-side
   trusted-publisher registration is externally unproven unless separately
   rehearsed.
-- Release workflow run `26072938626` uploaded `shipper-rehearse-26072938626`
-  with `.shipper/auth-evidence.json`; the artifact records token mint failure,
-  fallback configured, fallback used, and `selected_token_source =
-  "fallback_secret"`.
+- Final 0.4.0 Release workflow run `26141754574` uploaded
+  `shipper-state-final` with `.shipper/auth-evidence.json`; the artifact
+  records token mint failure, fallback configured, fallback used,
+  `selected_token_source = "fallback_secret"`, and no token values.
 
 #### Proof Commands
 
@@ -178,10 +178,10 @@ fallback behavior.
 
 #### Result
 
-Complete. The first proof artifact exists and proves fallback behavior for the
-current release environment. It intentionally does not promote Trusted
-Publishing as the default, because crates.io returned `No Trusted Publishing
-config found for repository EffortlessMetrics/shipper`.
+Complete. Release workflow proof exists and proves fallback behavior for the
+0.4.0 release environment. It intentionally does not promote Trusted Publishing
+as the default, because the final release evidence selected `fallback_secret`
+rather than a short-lived Trusted Publishing token.
 
 ### PR 4 - Support-tier promotion
 
@@ -307,10 +307,10 @@ configuration, or claiming crates.io registration from repo files alone.
 #### Current Blocker
 
 Blocked on external crates.io trusted-publisher registration evidence. The
-latest recorded release auth proof is workflow run `26072938626`, which uploaded
-`.shipper/auth-evidence.json` with `selected_token_source =
-"fallback_secret"` and the setup gap `No Trusted Publishing config found for
-repository EffortlessMetrics/shipper`.
+latest recorded release auth proof is final 0.4.0 Release workflow run
+`26141754574`, which uploaded `.shipper/auth-evidence.json` with
+`selected_token_source = "fallback_secret"`, fallback configured and used,
+`auth_action.outcome = "failure"`, and token values omitted.
 
 #### Proof Commands
 
