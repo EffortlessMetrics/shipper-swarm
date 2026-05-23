@@ -175,17 +175,15 @@ fallback path; green CI without that artifact is not sufficient.
 
 Current workflow proof:
 
-- Release workflow run `26072938626` (`workflow_dispatch`, `mode=rehearse`,
-  `main`) completed successfully without running publish jobs.
-- The uploaded `shipper-rehearse-26072938626` artifact contains
-  `.shipper/auth-evidence.json`.
+- Final 0.4.0 Release workflow run `26141754574` completed the crates.io
+  publish path and uploaded `shipper-state-final`.
+- The uploaded `shipper-state-final` artifact contains `.shipper/auth-evidence.json`.
 - That artifact records `schema_version = "shipper.release_auth_evidence.v1"`,
   `auth_action.outcome = "failure"`, `auth_action.token_minted = false`,
   `fallback.configured = true`, `fallback.used = true`, and
   `selected_token_source = "fallback_secret"`.
-- The action log records the actionable external setup gap:
-  `No Trusted Publishing config found for repository
-  EffortlessMetrics/shipper`.
+- The readiness proof records the final release carry-over: crates.io-side
+  trusted-publisher registration and short-lived-token proof remain unproven.
 - This proves fallback evidence is recorded and uploaded. It does not prove
   Trusted Publishing is the default release auth path.
 
