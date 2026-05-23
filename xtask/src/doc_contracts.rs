@@ -96,11 +96,19 @@ struct WorkItem {
     #[serde(default)]
     id: String,
     #[serde(default)]
+    status: String,
+    #[serde(default)]
     proposal: String,
     #[serde(default)]
     spec: String,
     #[serde(default)]
     plan: String,
+    #[serde(default)]
+    blocked_by: Vec<String>,
+    #[serde(default)]
+    next_action: String,
+    #[serde(default)]
+    commands: Vec<String>,
 }
 
 pub fn check(mode: Mode) -> Result<()> {
@@ -393,20 +401,17 @@ fn check_active_goal(workspace_root: &Path, findings: &mut Vec<Finding>) -> Resu
     };
 
     for item in active_goal.work_item {
+        check_active_goal_work_item_contract(&item, findings);
         for (field, value) in [
-            ("proposal", item.proposal),
-            ("spec", item.spec),
-            ("plan", item.plan),
+            ("proposal", item.proposal.as_str()),
+            ("spec", item.spec.as_str()),
+            ("plan", item.plan.as_str()),
         ] {
             if value.trim().is_empty() {
                 continue;
             }
-            if !workspace_root.join(&value).exists() {
-                let id = if item.id.is_empty() {
-                    "<missing id>"
-                } else {
-                    item.id.as_str()
-                };
+            if !workspace_root.join(value).exists() {
+                let id = active_goal_work_item_id(&item);
                 findings.push(Finding {
                     path: ACTIVE_GOAL_REL.to_string(),
                     code: "active_goal_missing_link",
@@ -418,6 +423,51 @@ fn check_active_goal(workspace_root: &Path, findings: &mut Vec<Finding>) -> Resu
     }
 
     Ok(true)
+}
+
+fn check_active_goal_work_item_contract(item: &WorkItem, findings: &mut Vec<Finding>) {
+    let id = active_goal_work_item_id(item);
+    match item.status.as_str() {
+        "blocked" => {
+            if !has_non_empty_value(&item.blocked_by) {
+                findings.push(Finding {
+                    path: ACTIVE_GOAL_REL.to_string(),
+                    code: "active_goal_blocked_without_blocker",
+                    message: format!("work_item `{id}` is blocked but does not define blocked_by"),
+                    blocking: true,
+                });
+            }
+            if item.next_action.trim().is_empty() {
+                findings.push(Finding {
+                    path: ACTIVE_GOAL_REL.to_string(),
+                    code: "active_goal_blocked_without_next_action",
+                    message: format!("work_item `{id}` is blocked but does not define next_action"),
+                    blocking: true,
+                });
+            }
+        }
+        "planned" if !has_non_empty_value(&item.commands) => {
+            findings.push(Finding {
+                path: ACTIVE_GOAL_REL.to_string(),
+                code: "active_goal_planned_without_proof_commands",
+                message: format!("work_item `{id}` is planned but does not define proof commands"),
+                blocking: true,
+            });
+        }
+        _ => {}
+    }
+}
+
+fn active_goal_work_item_id(item: &WorkItem) -> &str {
+    if item.id.trim().is_empty() {
+        "<missing id>"
+    } else {
+        item.id.as_str()
+    }
+}
+
+fn has_non_empty_value(values: &[String]) -> bool {
+    values.iter().any(|value| !value.trim().is_empty())
 }
 
 fn mode_str(mode: Mode) -> &'static str {
@@ -557,5 +607,76 @@ Status: proposed
 ";
         let headers = parse_headers(raw);
         assert_eq!(headers.get("Status").map(String::as_str), Some("accepted"));
+    }
+
+    #[test]
+    fn blocked_active_goal_items_require_blocker_and_next_action() {
+        let item = WorkItem {
+            id: "release-auth".to_string(),
+            status: "blocked".to_string(),
+            proposal: String::new(),
+            spec: String::new(),
+            plan: String::new(),
+            blocked_by: Vec::new(),
+            next_action: String::new(),
+            commands: Vec::new(),
+        };
+
+        let mut findings = Vec::new();
+        check_active_goal_work_item_contract(&item, &mut findings);
+
+        let codes = findings
+            .iter()
+            .map(|finding| finding.code)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            codes,
+            vec![
+                "active_goal_blocked_without_blocker",
+                "active_goal_blocked_without_next_action"
+            ]
+        );
+    }
+
+    #[test]
+    fn planned_active_goal_items_require_proof_commands() {
+        let item = WorkItem {
+            id: "support-tier-promotion".to_string(),
+            status: "planned".to_string(),
+            proposal: String::new(),
+            spec: String::new(),
+            plan: String::new(),
+            blocked_by: Vec::new(),
+            next_action: String::new(),
+            commands: Vec::new(),
+        };
+
+        let mut findings = Vec::new();
+        check_active_goal_work_item_contract(&item, &mut findings);
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(
+            findings[0].code,
+            "active_goal_planned_without_proof_commands"
+        );
+    }
+
+    #[test]
+    fn planned_active_goal_items_accept_non_empty_proof_commands() {
+        let item = WorkItem {
+            id: "support-tier-promotion".to_string(),
+            status: "planned".to_string(),
+            proposal: String::new(),
+            spec: String::new(),
+            plan: String::new(),
+            blocked_by: Vec::new(),
+            next_action: String::new(),
+            commands: vec!["cargo xtask policy-report".to_string()],
+        };
+
+        let mut findings = Vec::new();
+        check_active_goal_work_item_contract(&item, &mut findings);
+
+        assert!(findings.is_empty());
     }
 }
