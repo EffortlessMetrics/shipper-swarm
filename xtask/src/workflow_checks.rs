@@ -590,7 +590,12 @@ fn job_level_if_expression(block: &str) -> Option<String> {
                     field_indent,
                 ));
             }
-            return Some(value.to_string());
+            let continuation =
+                collect_yaml_continuation_expression(&lines, index + 1, field_indent);
+            if continuation.is_empty() {
+                return Some(value.to_string());
+            }
+            return Some(format!("{value} {continuation}"));
         }
 
         index += 1;
@@ -1260,6 +1265,25 @@ jobs:
         let missing = workflow_jobs_missing_repository_guard(yaml, "EffortlessMetrics/shipper");
 
         assert_eq!(missing, vec!["publish"]);
+    }
+
+    #[test]
+    fn repository_guard_scanner_accepts_plain_multiline_job_if() {
+        let yaml = r#"
+name: Release
+
+jobs:
+  publish:
+    if: github.event_name == 'push'
+      && github.repository == 'EffortlessMetrics/shipper'
+    runs-on: ubuntu-latest
+    steps:
+      - run: cargo publish
+"#;
+
+        let missing = workflow_jobs_missing_repository_guard(yaml, "EffortlessMetrics/shipper");
+
+        assert!(missing.is_empty());
     }
 
     #[test]
