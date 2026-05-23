@@ -77,9 +77,9 @@ Rust → crates.io is the focus. Alternative cargo-protocol registries (Cloudsmi
 
 The product thesis — the **nine competencies** in [ROADMAP.md](ROADMAP.md) — is the structured measure. Each competency is graded Done / Partial / Missing against engine behavior. We close gaps in the order set by ROADMAP's *Now / Next / Later*.
 
-A short definition of *good enough for v0.3.0 stable*:
+A short definition of *good enough for a stable release-closure line*:
 
-> When an operator can push a tag, walk away for an hour, come back to a complete release with evidence, and have the tool recover automatically when things go wrong — without external monitoring — Shipper has earned the trust its mission claims.
+> When an operator can start a workspace publish from CI, walk away for an hour, come back to a complete release with evidence, and have the tool recover correctly when things go wrong — without log scraping or registry guessing — Shipper has earned the trust its mission claims.
 
 The longer definition lives in [ROADMAP.md](ROADMAP.md) under *Now*.
 
