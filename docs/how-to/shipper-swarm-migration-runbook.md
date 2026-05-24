@@ -151,7 +151,11 @@ Do **not** directly require conditional implementation jobs:
 - `Shipper Rust Small on CPX42`
 - `Shipper Rust Small on CX43`
 - `Shipper Rust Small on CX53`
-- `Shipper Rust Small on GitHub Hosted`
+- `Shipper Rust Tiny Fallback`
+
+Current `shipper-swarm` policy runs the fallback lane on self-hosted capacity.
+Do not sync that 100% self-hosted policy into `EffortlessMetrics/shipper`
+without a separate release-authority decision.
 
 ### Initial lane commands
 
