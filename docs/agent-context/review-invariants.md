@@ -20,6 +20,13 @@ This file captures invariants for both human and Droid review of shipper PRs. Th
 - **Snapshot tests use `insta`; property-based tests use `proptest`.**
 - **CI runs on ubuntu, windows, and macos for the test matrix.** Windows behavior is not optional.
 
+- **Heavy/core PR workflows preserve no-cancel concurrency semantics.** For expensive Rust/core workflows, use a stable concurrency group with `cancel-in-progress: false` so one active run continues while only the newest pending replacement is retained.
+- **Default PR routing is classifier-first, budget-second.** Metadata/control-plane-only changes (for example `docs/**`, markdown-only, `policy/**`, `.codex/campaigns/**`, `docs/tracking/**`, `ci/hardware/**` receipts, `.rails/**`, `.uselesskey/**`) must not trigger Rust compile/test lanes unless mixed with Rust/build/test changes.
+- **Workflow edits are a distinct lane, not docs-light.** Changes under `.github/workflows/**` route to minimal hosted workflow validation/safety checks unless explicitly escalated.
+- **Hosted fallback for Rust lanes is opt-in when expensive.** Missing self-hosted capacity or token/readiness issues must not silently run a full hosted Rust equivalent by default; expensive hosted fallback requires explicit labels/dispatch inputs (for example `full-ci`, `allow-github-hosted`, `ci-budget-ack`).
+- **Default PR artifact uploads stay minimal.** Avoid `if: always()` artifact uploads (receipts/JUnit/log bundles) on default PR lanes unless branch protection requires them; prefer upload-on-failure with short retention.
+- **CI-efficiency PRs include routing/concurrency proof.** Reviewer evidence should include `git diff --check`, YAML parse for edited workflows, classification coverage for docs-only / metadata-only / workflow-only / rust-only / mixed, and explicit confirmation that heavy/core workflows did not regress to `cancel-in-progress: true`.
+
 ## Droid workflow invariants
 
 These constrain how Factory Droid review is configured for shipper. A reviewer should reject any change that violates them without an explicit, scoped justification PR.
