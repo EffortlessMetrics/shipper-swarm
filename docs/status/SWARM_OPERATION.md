@@ -137,10 +137,10 @@ Current routed Rust-small proof:
   run `26350902300`; the CPX42 implementation job and normalized
   `Shipper Rust Small Result` both succeeded. The post-backfill `main` run
   `26354268990` also passed through CPX42 and the normalized result.
-- Forced route proof under the current routing rules passed for CX43 with
-  workflow-dispatch run `26355258014`, for CX53 with workflow-dispatch run
-  `26356173639`, and for explicit `shipper-swarm` GitHub-hosted fallback with
-  workflow-dispatch run `26357093195`.
+- Forced route proof under the current routing rules passed for `CX43` with
+  `workflow_dispatch` run `26355258014`, for `CX53` with `workflow_dispatch`
+  run `26356173639`, and for explicit `shipper-swarm` GitHub-hosted fallback
+  with `workflow_dispatch` run `26357093195`.
 - Source release-authority sync PRs take the intentional GitHub-hosted tiny
   fallback because `EffortlessMetrics/shipper` remains the release authority
   and does not carry the swarm runner-routing secret. Source PR #388 passed
