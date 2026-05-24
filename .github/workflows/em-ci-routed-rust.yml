@@ -37,7 +37,7 @@ permissions:
 jobs:
   route:
     name: Route Shipper Rust Small
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     timeout-minutes: 5
     outputs:
       target: ${{ steps.pick.outputs.target }}
@@ -355,7 +355,7 @@ jobs:
     name: Shipper Rust Tiny Fallback on GitHub Hosted
     needs: [route]
     if: needs.route.outputs.target == 'github' && needs.route.outputs.fallback_allowed == 'true'
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6.0.2
@@ -380,7 +380,7 @@ jobs:
       - rust_small_cx53
       - rust_small_github
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     timeout-minutes: 5
     steps:
       - name: Normalize routed result
