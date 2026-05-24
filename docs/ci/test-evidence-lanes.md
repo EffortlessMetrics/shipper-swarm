@@ -19,7 +19,7 @@ Every workflow under `.github/workflows/` and the lane each one occupies. The au
 | Workflow | Trigger | Lane | Required for merge? |
 |---|---|---|---|
 | `architecture-guard.yml` | `push` + `pull_request` | Every PR | Required |
-| `ci.yml` | `push` + `pull_request` + `workflow_dispatch` + `schedule` | Every PR (most jobs) + nightly heavy proptest | Required (per-job, see below) |
+| `ci.yml` | `push` + `pull_request` + `workflow_dispatch` + `schedule` | Every code/config PR (most jobs) + nightly heavy proptest; skipped for Markdown/docs-only push and PR changes | Required when triggered (per-job, see below) |
 | `coverage.yml` | `push` (main) + `pull_request` + `workflow_dispatch` | Advisory / labeled | Advisory |
 | `droid-review.yml` | `pull_request` | Advisory (same-repo + bot guard) | Advisory |
 | `droid.yml` | `issues` + `pull_request` (command-triggered) | Advisory (trusted-actor guard) | Advisory |
@@ -31,7 +31,15 @@ Every workflow under `.github/workflows/` and the lane each one occupies. The au
 
 ## `ci.yml` — Per-Job Lane Map
 
-`ci.yml` is the load-bearing PR workflow. Every entry below is implicit required-for-merge unless the `Predicate` column carries a gate.
+`ci.yml` is the load-bearing code/config PR workflow. It is intentionally not
+created for Markdown/docs-only push and PR changes (`*.md`, `**/*.md`,
+`docs/**`) so documentation-only updates do not spend the full matrix. Swarm
+branch protection requires the normalized `Shipper Rust Small Result`, which is
+emitted by `.github/workflows/em-ci-routed-rust.yml` and still appears on
+documentation-only PRs.
+
+Every entry below is implicit required-for-merge when `ci.yml` is triggered
+unless the `Predicate` column carries a gate.
 
 | Job | Predicate | Wall clock | What it proves |
 |---|---|---|---|
