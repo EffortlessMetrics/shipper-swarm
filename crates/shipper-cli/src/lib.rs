@@ -74,7 +74,7 @@ const RICH_VERSION_DETAILS: &str = concat!(
 struct Cli {
     /// Print version information. Combine with `--verbose` for commit,
     /// build-profile, and rustc metadata.
-    #[arg(short = 'V', long = "version", global = true)]
+    #[arg(short = 'V', long = "version")]
     version: bool,
 
     /// Path to a custom configuration file (.shipper.toml)
@@ -482,7 +482,12 @@ EXAMPLES:
         crate_name: Option<String>,
         /// Version to yank (e.g., `1.2.3`). Required unless `--plan`
         /// is supplied.
-        #[arg(long, value_name = "VERSION", conflicts_with = "plan")]
+        #[arg(
+            long,
+            id = "yank-version",
+            value_name = "VERSION",
+            conflicts_with = "plan"
+        )]
         version: Option<String>,
         /// Operator-supplied reason. Required unless `--plan` is supplied.
         /// Recorded in the event log, audit trails, and any future
