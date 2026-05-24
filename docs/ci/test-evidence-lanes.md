@@ -192,8 +192,8 @@ A complete evidence picture for a release requires all of the following:
 | Evidence | Source |
 |---|---|
 | Required PR gate | `em-ci-routed-rust.yml` `Shipper Rust Small Result` |
-| Tests pass on all platforms | `ci.yml` `test` matrix (Ubuntu, Windows, macOS) on main/manual/weekly runs |
-| Multi-target builds compile | `ci.yml` `cross-platform` matrix (5 targets) on main/manual/weekly runs |
+| Workspace tests pass | `ci.yml` `test` lane on the self-hosted runner pool for main/manual/weekly runs |
+| Linux multi-target builds compile | `ci.yml` `cross-platform` lane for x86_64/aarch64 Linux on main/manual/weekly runs |
 | No known vulnerabilities | `ci.yml` `security` (`cargo audit`) on main/manual/weekly runs |
 | No architectural drift | `architecture-guard.yml` |
 | Format clean | `ci.yml` `lint` on main/manual/weekly runs |

@@ -244,7 +244,7 @@ Run this sequence:
 4. Force CPX42 route once.
 5. Force CX43 route once.
 6. Force CX53 overflow once.
-7. Saturate self-hosted and verify GitHub fallback.
+7. Saturate primary self-hosted routes and verify the self-hosted tiny fallback.
 8. Verify cleanup + disk reports healthy.
 
 Expected result behavior:
@@ -311,7 +311,7 @@ After 3–5 clean PRs:
 
 | Lane | Route | Purpose |
 |---|---|---|
-| `Shipper Rust Small Result` | CPX42 → CX43 → CX53 → GitHub | Required base gate |
+| `Shipper Rust Small Result` | CPX42 → CX43 → CX53 → self-hosted tiny fallback | Required base gate |
 | `Shipper Integration Result` | CX53 → CX43 → self-hosted tiny fallback | Fake registry, receipts, resume/reconcile |
 | `Shipper Coverage Lite` | Self-hosted/manual | Non-required initially |
 | `Shipper Fuzz Smoke` | Self-hosted/manual | Non-required initially |
@@ -327,7 +327,7 @@ After 3–5 clean PRs:
 - [x] Do **not** add crates.io/release/signing secrets.
 - [x] Seed `shipper-swarm/main` from `shipper/main`.
 - [x] Add `.github/workflows/em-ci-routed-rust.yml`.
-- [x] Route small lane CPX42 → CX43 → CX53 → GitHub.
+- [x] Route small lane CPX42 → CX43 → CX53 → self-hosted tiny fallback.
 - [x] Guard self-hosted jobs to trusted same-repo work only.
 - [x] Include a tiny fallback lane. Current policy routes it to self-hosted capacity.
 - [x] Add normalized `Shipper Rust Small Result` job.
