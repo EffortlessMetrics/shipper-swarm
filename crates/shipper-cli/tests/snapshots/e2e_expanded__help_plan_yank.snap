@@ -14,9 +14,6 @@ Options:
       --from-receipt <PATH>
           Path to the receipt to derive the plan from. Defaults to `<state_dir>/receipt.json` when omitted
 
-  -V, --version
-          Print version information. Combine with `--verbose` for commit, build-profile, and rustc metadata
-
       --compromised-only
           Restrict the plan to packages whose receipt carries a `compromised_at` marker. Without this, every `Published` package is included (full rollback). Mutually exclusive with `--starting-crate`
 
