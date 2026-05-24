@@ -418,7 +418,7 @@ and every pull request. The pipeline includes:
 | **Docs** | ubuntu | `cargo doc` with `-Dwarnings` |
 | **Coverage** | ubuntu | `cargo llvm-cov` → Codecov |
 | **Fuzz smoke** | ubuntu (PRs) | Each target for 60 seconds |
-| **Cross-target** | matrix | `cargo check` for x86_64/aarch64 Linux targets on self-hosted runners |
+| **Native target** | matrix | `cargo check` for x86_64 Linux on self-hosted runners |
 | **Release build** | ubuntu on main/dispatch | `cargo build --release` |
 
 Additional scheduled workflows:

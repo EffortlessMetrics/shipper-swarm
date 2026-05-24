@@ -94,7 +94,7 @@ column carries a gate.
 | `docs` | `push` / `workflow_dispatch` / `schedule` | ~1 min | `cargo doc --workspace --no-deps` clean under `-D warnings` (catches `rustdoc::invalid-html-tags` and friends). |
 | `bdd` | `push` / `workflow_dispatch` / `schedule` | ~3 min | Publish and resume BDD scenarios plus the synthetic interruption-resume rehearsal (`e2e_rehearse`) that proves persisted state/events let `shipper resume` complete without duplicate publishes. |
 | `fuzz-smoke` | `push` / `workflow_dispatch` | ~10 min | Five fuzz targets at low energy: load state, resolve token, schema version, release levels, and output redaction. |
-| `cross-platform` | `push` / `workflow_dispatch` / `schedule` | ~2 min per leg | Linux self-hosted multi-target checks: x86_64/aarch64 Linux compile without requiring privileged cross-linker installation. Windows/macOS release assets stay a release-authority concern. |
+| `cross-platform` | `push` / `workflow_dispatch` / `schedule` | ~2 min | Native Linux target check for x86_64 on self-hosted runners. aarch64 requires a cross C toolchain in the runner image and is not part of the current default swarm CI proof. Windows/macOS release assets stay a release-authority concern. |
 | `release-build` | `push` / `workflow_dispatch` only | ~2 min | Release-profile build (LTO + strip) remains available on main and manual runs; tag-time binaries are built by `release.yml`. |
 
 Broad full-CI remains part of the evidence story, but it is not the merge gate
@@ -193,7 +193,7 @@ A complete evidence picture for a release requires all of the following:
 |---|---|
 | Required PR gate | `em-ci-routed-rust.yml` `Shipper Rust Small Result` |
 | Workspace tests pass | `ci.yml` `test` lane on the self-hosted runner pool for main/manual/weekly runs |
-| Linux multi-target checks compile | `ci.yml` `cross-platform` lane for x86_64/aarch64 Linux on main/manual/weekly runs |
+| Native Linux target check compiles | `ci.yml` `cross-platform` lane for x86_64 Linux on main/manual/weekly runs |
 | No known vulnerabilities | `ci.yml` `security` (`cargo audit`) on main/manual/weekly runs |
 | No architectural drift | `architecture-guard.yml` |
 | Format clean | `ci.yml` `lint` on main/manual/weekly runs |
