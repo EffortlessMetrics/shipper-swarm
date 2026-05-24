@@ -130,11 +130,19 @@ jobs is expected to run on each attempt.
 
 Current routed Rust-small proof:
 
-- CPX42-first routing passed on PR #31 with `Routed Rust Small` run
-  `26244152934`.
-- Normal same-repo CPX42 routing passed again on PR #22 with run
-  `26252949412` and PR #17 with run `26256205458`.
-- GitHub-hosted fallback execution passed on PR #24 with run `26247605774`.
+- Branch protection requires only `Shipper Rust Small Result`; do not require
+  route-specific implementation jobs because exactly one route should run per
+  attempt.
+- Current same-repo CPX42 routing passed on PR #73 with `Routed Rust Small`
+  run `26350902300`; the CPX42 implementation job and normalized
+  `Shipper Rust Small Result` both succeeded.
+- Source release-authority sync PRs take the intentional GitHub-hosted tiny
+  fallback because `EffortlessMetrics/shipper` remains the release authority
+  and does not carry the swarm runner-routing secret. Source PR #388 passed
+  with run `26351871995`, and source PR #389 passed with run `26353082714`.
+- Forced CX43, CX53, and explicit `shipper-swarm` GitHub-hosted fallback proof
+  under the current routing rules remain follow-up evidence. Do not promote
+  route-specific coverage beyond the runs recorded here.
 
 ## Credential Boundary
 
