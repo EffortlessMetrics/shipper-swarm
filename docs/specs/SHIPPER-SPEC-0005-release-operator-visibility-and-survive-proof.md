@@ -114,7 +114,7 @@ Expected implementation proof:
 - `cargo test -p shipper-cli inspect_events --lib --locked`
 - `cargo test -p shipper-cli --test cli_e2e --locked`
 - `cargo test -p shipper-core drift --lib --locked`
-- `cargo test -p shipper-core state_rebuild --lib --locked`
+- `cargo test -p shipper-core rebuild --lib --locked`
 - `cargo test -p shipper-cli --test e2e_rehearse -- --nocapture`
 - `cargo xtask check-doc-contracts --mode advisory`
 - `cargo xtask policy-report`
@@ -147,21 +147,28 @@ artifact proves the specific claim.
 
 ## Promotion Rule
 
-Support-tier claims may move only when the named proof exists:
+Support-tier claims may move only when the named proof exists. Current proof
+state for this spec is:
 
-- inspect-events follow hardening can be stable after focused tests prove
+- inspect-events follow hardening is proof-backed by
+  `cargo test -p shipper-cli inspect_events --lib --locked`, which proves
   incomplete-tail and malformed-entry behavior
-- events/state/receipt drift detection stays planned until finalization checks
-  fail on inconsistent evidence
-- rebuild-from-events stays planned until tests prove a reconstructed projection
-- live-runner interruption stays planned until a real runner rehearsal artifact
-  proves artifact recovery and safe resume. Implemented proof is GitHub Actions
-  run 26051581056, with `shipper-live-interruption-seed-26051581056` and
-  `shipper-live-interruption-resume-26051581056` artifacts.
+- events/state/receipt drift detection is proof-backed by
+  `cargo test -p shipper-core drift --lib --locked`, which proves
+  finalization checks fail on inconsistent evidence
+- rebuild-from-events is proof-backed by
+  `cargo test -p shipper-core rebuild --lib --locked`, which proves a
+  reconstructed execution-state projection
+- live-runner interruption is proof-backed at the stable/internal tier by
+  GitHub Actions run 26051581056, with
+  `shipper-live-interruption-seed-26051581056` and
+  `shipper-live-interruption-resume-26051581056` artifacts proving artifact
+  recovery and safe resume against fake Cargo/mock registry proof surfaces.
 
 ## Open Questions
 
 - Should rebuild-from-events be a library-only capability first or a CLI command
   in the same lane?
-- Which live-runner rehearsal should be safe enough before crates.io dogfood
-  release proof?
+- What additional live-runner rehearsal, if any, is needed before promoting
+  crates.io dogfood release proof beyond the current fake Cargo/mock registry
+  proof surfaces?
