@@ -342,7 +342,7 @@ Proof notes:
 
 - PR #2 added the routed Rust small lane.
 - PR #3 proved same-repo PR flow through the normalized result check.
-- Earlier forced `workflow_dispatch` proof runs covered `cx43`, `cx33`, `cx53`, and
+- Earlier forced `workflow_dispatch` proof runs covered `cx43`, `cpx42`, `cx53`, and
   the pre-100%-self-hosted GitHub-hosted fallback.
 - PR #31 moved the route to CPX42-first and proved the selected CPX42 lane with
   `Routed Rust Small` run `26244152934`; `Shipper Rust Small on CPX42` and the

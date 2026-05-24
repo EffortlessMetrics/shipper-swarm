@@ -427,11 +427,11 @@ jobs:
               sys.exit(1)
 
           hard_fail_reasons = {"fork_pr", "runner_token_missing", "runner_token_unauthorized", "runner_token_forbidden", "runner_api_failed", "parse_failed"}
-          if target == "github" and reason in hard_fail_reasons and not fallback_allowed:
+          if target == "github" and reason in hard_fail_reasons:
               if reason == "fork_pr":
                   print("Fork PRs cannot run repository code on self-hosted runners.")
               else:
-                  print("Self-hosted routing unavailable and fallback was not explicitly allowed.")
+                  print("Self-hosted routing failed before a trustworthy fallback decision.")
               sys.exit(1)
 
           failures = []
