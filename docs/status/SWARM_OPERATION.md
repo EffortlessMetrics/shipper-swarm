@@ -141,6 +141,10 @@ Current routed Rust-small proof:
   `workflow_dispatch` run `26355258014`, for `CX53` with `workflow_dispatch`
   run `26356173639`, and for explicit `shipper-swarm` GitHub-hosted fallback
   with `workflow_dispatch` run `26357093195`.
+- When the runner API is reachable but no eligible self-hosted runner is idle,
+  `router_reason=no_idle_runner` is treated as capacity overflow and may use
+  the GitHub-hosted tiny fallback. Token, permission, API, and parse failures
+  remain hard unless an operator explicitly opts into fallback.
 - Source release-authority sync PRs take the intentional GitHub-hosted tiny
   fallback because `EffortlessMetrics/shipper` remains the release authority
   and does not carry the swarm runner-routing secret. Source PR #388 passed
