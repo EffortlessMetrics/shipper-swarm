@@ -138,9 +138,11 @@ Current routed Rust-small proof:
   `Shipper Rust Small Result` both succeeded. The post-backfill `main` run
   `26354268990` also passed through CPX42 and the normalized result.
 - Forced route proof before the 100% self-hosted sweep passed for `CX43` with
-  `workflow_dispatch` run `26355258014`, for `CX53` with `workflow_dispatch`
-  run `26356173639`, and for explicit `shipper-swarm` GitHub-hosted fallback
-  with `workflow_dispatch` run `26357093195`.
+  `workflow_dispatch` run `26355258014` and for `CX53` with
+  `workflow_dispatch` run `26356173639`.
+- Current self-hosted fallback proof passed on PR #87 with `Routed Rust Small`
+  run `26366937932`; `Shipper Rust Tiny Fallback (routed to self-hosted)` and
+  the normalized `Shipper Rust Small Result` both succeeded.
 - Current `shipper-swarm` policy routes all workflow jobs, including the tiny
   fallback lane, to self-hosted runners. Do not sync that policy to
   `EffortlessMetrics/shipper` until the release-authority runner and
