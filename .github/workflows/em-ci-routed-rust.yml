@@ -352,7 +352,7 @@ jobs:
           cargo run -p shipper -- preflight --help
 
   rust_small_github:
-    name: Shipper Rust Tiny Fallback on GitHub Hosted
+    name: Shipper Rust Tiny Fallback (routed to self-hosted)
     needs: [route]
     if: needs.route.outputs.target == 'github' && needs.route.outputs.fallback_allowed == 'true'
     runs-on: self-hosted
