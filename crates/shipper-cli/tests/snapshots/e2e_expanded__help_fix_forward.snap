@@ -14,9 +14,6 @@ Options:
       --from-receipt <PATH>
           Path to the compromised receipt. Defaults to `<state_dir>/receipt.json` when omitted
 
-  -V, --version
-          Print version information. Combine with `--verbose` for commit, build-profile, and rustc metadata
-
       --config <CONFIG>
           Path to a custom configuration file (.shipper.toml)
 

@@ -421,6 +421,32 @@ exit 64
     }
 }
 
+fn write_yank_plan_artifact(root: &Path) -> PathBuf {
+    let plan = serde_json::json!({
+        "plan_id": "direct-yank-plan",
+        "registry": "crates-io",
+        "filter": "all_published",
+        "entries": [
+            {
+                "name": "top-app",
+                "version": "0.4.0",
+                "reason": "reviewed containment"
+            },
+            {
+                "name": "core-lib",
+                "version": "0.2.0",
+                "reason": "reviewed containment"
+            }
+        ]
+    });
+    let path = root.join("yank-plan.json");
+    write_file(
+        &path,
+        &serde_json::to_string_pretty(&plan).expect("serialize yank plan"),
+    );
+    path
+}
+
 fn write_remediation_dry_run_artifact(
     root: &Path,
     state_dir: &Path,
@@ -1777,6 +1803,185 @@ fn plan_yank_json_format_emits_schema_version() {
         serde_json::from_slice(&output.stdout)
             .expect("plan-yank envelope remains readable as a yank plan");
     assert_eq!(parsed_plan.entries.len(), 2);
+}
+
+#[test]
+fn yank_single_command_records_package_yanked_event_with_fake_cargo() {
+    let td = tempdir().expect("tempdir");
+    create_multi_crate_workspace(td.path());
+    let state_dir = td.path().join(".shipper");
+    let fake_cargo = write_fake_yank_cargo(td.path(), false);
+    let fake_log = td.path().join("fake-cargo.log");
+
+    let output = shipper_cmd()
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .args([
+            "yank",
+            "--crate",
+            "core-lib",
+            "--version",
+            "0.2.0",
+            "--reason",
+            "operator reviewed containment",
+        ])
+        .env("SHIPPER_CARGO_BIN", &fake_cargo)
+        .env("SHIPPER_FAKE_CARGO_LOG", &fake_log)
+        .output()
+        .expect("failed to run yank");
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let calls = fs::read_to_string(&fake_log).expect("read fake cargo log");
+    assert!(
+        calls.contains("yank core-lib") && calls.contains("--version=0.2.0"),
+        "single yank should invoke cargo yank with crate and version: {calls}"
+    );
+
+    let events = read_jsonl(&state_dir.join("events.jsonl"));
+    assert_eq!(events.len(), 1, "expected one PackageYanked event");
+    assert_eq!(
+        events[0]
+            .pointer("/event_type/type")
+            .and_then(|v| v.as_str()),
+        Some("package_yanked")
+    );
+    assert_eq!(
+        events[0]
+            .pointer("/event_type/crate_name")
+            .and_then(|v| v.as_str()),
+        Some("core-lib")
+    );
+    assert_eq!(
+        events[0]
+            .pointer("/event_type/version")
+            .and_then(|v| v.as_str()),
+        Some("0.2.0")
+    );
+    assert_eq!(
+        events[0]
+            .pointer("/event_type/exit_code")
+            .and_then(|v| v.as_i64()),
+        Some(0)
+    );
+}
+
+#[test]
+fn yank_plan_execution_runs_entries_in_order_with_fake_cargo() {
+    let td = tempdir().expect("tempdir");
+    create_multi_crate_workspace(td.path());
+    let state_dir = td.path().join(".shipper");
+    let plan = write_yank_plan_artifact(td.path());
+    let fake_cargo = write_fake_yank_cargo(td.path(), false);
+    let fake_log = td.path().join("fake-cargo.log");
+
+    let output = shipper_cmd()
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .args(["yank", "--plan"])
+        .arg(&plan)
+        .env("SHIPPER_CARGO_BIN", &fake_cargo)
+        .env("SHIPPER_FAKE_CARGO_LOG", &fake_log)
+        .output()
+        .expect("failed to run yank plan");
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let calls = fs::read_to_string(&fake_log).expect("read fake cargo log");
+    assert!(
+        calls.contains("yank top-app") && calls.contains("--version=0.4.0"),
+        "first plan entry should be yanked: {calls}"
+    );
+    assert!(
+        calls.contains("yank core-lib") && calls.contains("--version=0.2.0"),
+        "second plan entry should be yanked: {calls}"
+    );
+    assert!(
+        calls.find("top-app").expect("top-app call")
+            < calls.find("core-lib").expect("core-lib call"),
+        "plan execution should preserve reviewed yank order: {calls}"
+    );
+
+    let events = read_jsonl(&state_dir.join("events.jsonl"));
+    assert_eq!(events.len(), 2, "expected one event per plan entry");
+    assert_eq!(
+        events[0]
+            .pointer("/event_type/crate_name")
+            .and_then(|v| v.as_str()),
+        Some("top-app")
+    );
+    assert_eq!(
+        events[1]
+            .pointer("/event_type/crate_name")
+            .and_then(|v| v.as_str()),
+        Some("core-lib")
+    );
+}
+
+#[test]
+fn yank_plan_execution_halts_on_failed_yank() {
+    let td = tempdir().expect("tempdir");
+    create_multi_crate_workspace(td.path());
+    let state_dir = td.path().join(".shipper");
+    let plan = write_yank_plan_artifact(td.path());
+    let fake_cargo = write_fake_yank_cargo(td.path(), true);
+    let fake_log = td.path().join("fake-cargo.log");
+
+    let output = shipper_cmd()
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .args(["yank", "--plan"])
+        .arg(&plan)
+        .env("SHIPPER_CARGO_BIN", &fake_cargo)
+        .env("SHIPPER_FAKE_CARGO_LOG", &fake_log)
+        .output()
+        .expect("failed to run yank plan");
+
+    assert!(
+        !output.status.success(),
+        "yank plan should fail on the first failed cargo yank"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("yank plan failed at top-app@0.4.0"),
+        "stderr should name failed plan entry: {stderr}"
+    );
+    let calls = fs::read_to_string(&fake_log).expect("read fake cargo log");
+    assert!(
+        calls.contains("yank top-app") && calls.contains("--version=0.4.0"),
+        "first plan entry should be attempted: {calls}"
+    );
+    assert!(
+        !calls.contains("core-lib"),
+        "plan execution should halt before later yanks: {calls}"
+    );
+
+    let events = read_jsonl(&state_dir.join("events.jsonl"));
+    assert_eq!(events.len(), 1, "expected only the failed yank event");
+    assert_eq!(
+        events[0]
+            .pointer("/event_type/crate_name")
+            .and_then(|v| v.as_str()),
+        Some("top-app")
+    );
+    assert_eq!(
+        events[0]
+            .pointer("/event_type/exit_code")
+            .and_then(|v| v.as_i64()),
+        Some(55)
+    );
 }
 
 #[test]
