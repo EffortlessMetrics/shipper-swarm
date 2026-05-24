@@ -100,6 +100,40 @@ column carries a gate.
 Broad full-CI remains part of the evidence story, but it is not the merge gate
 for ordinary PRs. The required PR signal is the routed result above.
 
+## Manual Full-CI Proof for a PR
+
+Most PRs should merge on `Shipper Rust Small Result` plus focused local or
+review evidence. Use extra full-CI proof when a PR touches release-critical
+behavior, runner policy, workflow routing, broad state/event/receipt contracts,
+or another surface where post-merge discovery would be too expensive.
+
+For same-repo branches, run the full lane before merge with:
+
+```text
+Actions -> CI -> Run workflow -> branch: <pr-branch>
+```
+
+That manual dispatch runs `ci.yml` on the selected branch. It exercises the
+broad self-hosted evidence set, including nextest, doc tests, policy, BDD,
+fuzz smoke, heavy crypto proptests, native Linux target check, and release
+build. It does not publish crates or move release authority into
+`shipper-swarm`.
+
+For PR-time advisory evidence, a maintainer can also apply labels:
+
+| Label | Effect |
+|---|---|
+| `coverage` | Runs `coverage.yml` on the PR. |
+| `mutation` | Runs the label-gated `mutants-pr` job on changed production Rust files. |
+| `full-ci` | Runs both PR coverage and label-gated mutation. It does not trigger `ci.yml`; use manual workflow dispatch for the broad full-CI lane. |
+
+Do not run same-repo self-hosted full-CI proof on untrusted fork code. Move the
+work onto a trusted same-repo branch first, or rely on the fork-safe normalized
+result behavior until a maintainer has reviewed the code.
+
+When manual full-CI proof is used as merge evidence, record the workflow run ID
+in the PR so future queue stewards can audit what was proven.
+
 ## Policy Gates (xtask-Enforced, Inside `ci.yml`'s `policy` Job)
 
 The `policy` job runs each check in blocking-allowlist mode and uploads `target/policy/` as an artifact regardless of outcome.
@@ -232,9 +266,7 @@ manual dispatch, and on the weekly schedule.
 
 Concrete follow-up candidates:
 
-1. Add an explicit `full-ci` label or manual dispatch recipe for PRs that need
-   full matrix proof before merge.
-2. Repeat forced route proof and refresh the proof ledger whenever route order,
+1. Repeat forced route proof and refresh the proof ledger whenever route order,
    runner labels, fallback policy, or the normalized-result contract changes.
-3. Revisit whether `architecture-guard.yml` should remain separately required
+2. Revisit whether `architecture-guard.yml` should remain separately required
    once the routed Rust-small lane is proven stable under the new settings.
