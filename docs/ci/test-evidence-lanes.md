@@ -48,6 +48,10 @@ fallback is blocked: `shipper-swarm` workflow jobs run on self-hosted capacity,
 including the fallback route, unless a future policy PR explicitly restores a
 GitHub-hosted emergency path.
 
+Public fork PRs are denied by the normalized result instead of running
+repository code on self-hosted runners. A maintainer can move trusted work onto
+a same-repo branch when it needs the swarm gate.
+
 Do not infer release-authority behavior from this swarm routing policy.
 `EffortlessMetrics/shipper` remains the release authority, and the broad
 `shipper-swarm` self-hosted sweep must not be synced there until release

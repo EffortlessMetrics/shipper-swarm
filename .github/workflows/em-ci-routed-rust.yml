@@ -135,7 +135,7 @@ jobs:
               sys.exit(0)
 
           if not trusted:
-              set_output("github", "fork_pr", True)
+              set_output("github", "fork_pr", False)
               sys.exit(0)
 
           if force_route == "github":
@@ -426,9 +426,12 @@ jobs:
               print("Route job did not emit a known target.")
               sys.exit(1)
 
-          hard_fail_reasons = {"runner_token_missing", "runner_token_unauthorized", "runner_token_forbidden", "runner_api_failed", "parse_failed", "no_idle_runner"}
+          hard_fail_reasons = {"fork_pr", "runner_token_missing", "runner_token_unauthorized", "runner_token_forbidden", "runner_api_failed", "parse_failed", "no_idle_runner"}
           if target == "github" and reason in hard_fail_reasons and not fallback_allowed:
-              print("Self-hosted routing unavailable and GitHub-hosted fallback was not explicitly allowed.")
+              if reason == "fork_pr":
+                  print("Fork PRs cannot run repository code on self-hosted runners.")
+              else:
+                  print("Self-hosted routing unavailable and fallback was not explicitly allowed.")
               sys.exit(1)
 
           failures = []
