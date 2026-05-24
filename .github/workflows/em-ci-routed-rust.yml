@@ -104,7 +104,7 @@ jobs:
               labels = [str(label.get("name", "")).lower() for label in event.get("pull_request", {}).get("labels", [])]
           fallback_allowed = force_route == "github" or any(label in {"allow-github-hosted", "ci-budget-ack"} for label in labels)
 
-          trusted = event_name in {"push", "workflow_dispatch"}
+          trusted = event_name in {"push", "workflow_dispatch", "merge_group"}
           if event_name == "pull_request":
               pull_request = event.get("pull_request", {})
               head = pull_request.get("head", {})

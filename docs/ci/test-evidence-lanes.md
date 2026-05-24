@@ -45,9 +45,9 @@ CPX42 -> CX43 -> CX53
 
 Fork or explicitly allowed fallback paths use the GitHub-hosted tiny fallback.
 Silent fallback is blocked: if self-hosted routing is unavailable for a trusted
-same-repo PR in `shipper-swarm`, the normalized result fails unless an operator
-has explicitly applied `allow-github-hosted` or `ci-budget-ack`, or forced the
-`github` route through `workflow_dispatch`.
+same-repo PR or merge-queue run in `shipper-swarm`, the normalized result fails
+unless an operator has explicitly applied `allow-github-hosted` or
+`ci-budget-ack`, or forced the `github` route through `workflow_dispatch`.
 
 In `EffortlessMetrics/shipper`, the same workflow intentionally takes the
 GitHub-hosted tiny fallback. The source repository remains the release authority
