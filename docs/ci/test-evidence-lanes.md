@@ -43,16 +43,19 @@ self-hosted runners in this order:
 CPX42 -> CX43 -> CX53
 ```
 
-Fork or explicitly allowed fallback paths use the GitHub-hosted tiny fallback.
-Silent fallback is blocked: if self-hosted routing is unavailable for a trusted
-same-repo PR or merge-queue run in `shipper-swarm`, the normalized result fails
-unless an operator has explicitly applied `allow-github-hosted` or
-`ci-budget-ack`, or forced the `github` route through `workflow_dispatch`.
+Fallback paths use the tiny self-hosted fallback lane. Silent GitHub-hosted
+fallback is blocked: `shipper-swarm` workflow jobs run on self-hosted capacity,
+including the fallback route, unless a future policy PR explicitly restores a
+GitHub-hosted emergency path.
 
-In `EffortlessMetrics/shipper`, the same workflow intentionally takes the
-GitHub-hosted tiny fallback. The source repository remains the release authority
-and does not carry the swarm runner-routing secret; source sync and
-release-authority PRs should not depend on `shipper-swarm` self-hosted routing.
+Public fork PRs are denied by the normalized result instead of running
+repository code on self-hosted runners. A maintainer can move trusted work onto
+a same-repo branch when it needs the swarm gate.
+
+Do not infer release-authority behavior from this swarm routing policy.
+`EffortlessMetrics/shipper` remains the release authority, and the broad
+`shipper-swarm` self-hosted sweep must not be synced there until release
+runner, binary-build, and credential boundaries are explicitly decided.
 
 The self-hosted Rust-small lane proves:
 
@@ -65,7 +68,7 @@ cargo run -p shipper -- plan --help
 cargo run -p shipper -- preflight --help
 ```
 
-The GitHub-hosted tiny fallback intentionally proves less:
+The tiny fallback intentionally proves less:
 
 ```bash
 cargo check --workspace --locked --all-targets
@@ -84,14 +87,14 @@ column carries a gate.
 |---|---|---|---|
 | `lint` | `push` / `workflow_dispatch` / `schedule` | ~1 min | `cargo fmt --check` + `cargo clippy --workspace --all-targets -- -D warnings`. |
 | `policy` | `push` / `workflow_dispatch` / `schedule` | ~1 min | All seven xtask policy checks in `--mode blocking-allowlist`, plus `policy-report`. See `docs/policy/NON_RUST_ROLLOUT.md`. |
-| `test` (nextest, 3-OS matrix) | `push` / `workflow_dispatch` / `schedule` | ~17 min (longest leg) | Unit and integration tests pass on Ubuntu, Windows, macOS. Doc-tests run alongside. |
+| `test` (nextest) | `push` / `workflow_dispatch` / `schedule` | ~17 min | Unit and integration tests pass on the self-hosted runner pool. Doc-tests run alongside. |
 | `crypto-proptests-heavy` | `schedule` / `push` / `workflow_dispatch` only | ~20 min | Full-strength `proptest` for `shipper-encrypt` round-trips. **Not** on PR — too slow. |
 | `msrv` | `push` / `workflow_dispatch` / `schedule` | ~1 min | `cargo check --workspace` on the declared MSRV (1.95). |
 | `security` | `push` / `workflow_dispatch` / `schedule` | ~1 min | `cargo audit` against the current advisory database. |
 | `docs` | `push` / `workflow_dispatch` / `schedule` | ~1 min | `cargo doc --workspace --no-deps` clean under `-D warnings` (catches `rustdoc::invalid-html-tags` and friends). |
 | `bdd` | `push` / `workflow_dispatch` / `schedule` | ~3 min | Publish and resume BDD scenarios plus the synthetic interruption-resume rehearsal (`e2e_rehearse`) that proves persisted state/events let `shipper resume` complete without duplicate publishes. |
 | `fuzz-smoke` | `push` / `workflow_dispatch` | ~10 min | Five fuzz targets at low energy: load state, resolve token, schema version, release levels, and output redaction. |
-| `cross-platform` | `push` / `workflow_dispatch` / `schedule` | ~2 min per leg | Multi-target builds: Linux x86_64/aarch64, Windows MSVC, macOS x86_64/aarch64. |
+| `cross-platform` | `push` / `workflow_dispatch` / `schedule` | ~2 min per leg | Linux self-hosted multi-target builds: x86_64/aarch64 Linux. Windows/macOS release assets stay a release-authority concern. |
 | `release-build` | `push` / `workflow_dispatch` only | ~2 min | Release-profile build (LTO + strip) remains available on main and manual runs; tag-time binaries are built by `release.yml`. |
 
 Broad full-CI remains part of the evidence story, but it is not the merge gate
@@ -189,8 +192,8 @@ A complete evidence picture for a release requires all of the following:
 | Evidence | Source |
 |---|---|
 | Required PR gate | `em-ci-routed-rust.yml` `Shipper Rust Small Result` |
-| Tests pass on all platforms | `ci.yml` `test` matrix (Ubuntu, Windows, macOS) on main/manual/weekly runs |
-| Multi-target builds compile | `ci.yml` `cross-platform` matrix (5 targets) on main/manual/weekly runs |
+| Workspace tests pass | `ci.yml` `test` lane on the self-hosted runner pool for main/manual/weekly runs |
+| Linux multi-target builds compile | `ci.yml` `cross-platform` lane for x86_64/aarch64 Linux on main/manual/weekly runs |
 | No known vulnerabilities | `ci.yml` `security` (`cargo audit`) on main/manual/weekly runs |
 | No architectural drift | `architecture-guard.yml` |
 | Format clean | `ci.yml` `lint` on main/manual/weekly runs |

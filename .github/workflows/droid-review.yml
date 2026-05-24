@@ -32,6 +32,32 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Provide constrained gh shim for Droid PR checkout
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          cat > "$RUNNER_TEMP/bin/gh" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          if [[ "${1:-}" != "pr" || "${2:-}" != "checkout" ]]; then
+            echo "This constrained gh shim only supports: gh pr checkout <number>" >&2
+            exit 127
+          fi
+
+          pr_number="${3:-}"
+          if [[ -z "$pr_number" || "$pr_number" == *[!0-9]* ]]; then
+            echo "PR number must be numeric" >&2
+            exit 2
+          fi
+
+          git fetch --no-tags --prune --depth=1 origin \
+            "+refs/pull/${pr_number}/head:refs/remotes/droid-pr-${pr_number}"
+          git checkout --force "refs/remotes/droid-pr-${pr_number}"
+          SH
+          chmod +x "$RUNNER_TEMP/bin/gh"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
       - name: Configure MiniMax BYOK for Factory Droid
         shell: bash
         run: |
