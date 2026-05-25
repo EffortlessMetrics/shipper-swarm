@@ -596,7 +596,7 @@ fn support_tier_model_values(raw: &str) -> BTreeSet<String> {
 fn markdown_table_rows(raw: &str, section: &str) -> Vec<Vec<String>> {
     let section_heading = format!("## {section}");
     let mut in_section = false;
-    let mut seen_header = false;
+    let mut in_table = false;
     let mut rows = Vec::new();
 
     for line in raw.lines() {
@@ -612,10 +612,13 @@ fn markdown_table_rows(raw: &str, section: &str) -> Vec<Vec<String>> {
             continue;
         }
         let Some(row) = markdown_table_row(trimmed) else {
+            if !is_markdown_table_separator(trimmed) {
+                in_table = false;
+            }
             continue;
         };
-        if !seen_header {
-            seen_header = true;
+        if !in_table {
+            in_table = true;
             continue;
         }
         rows.push(row);
@@ -641,6 +644,16 @@ fn markdown_table_row(line: &str) -> Option<Vec<String>> {
         return None;
     }
     Some(cells)
+}
+
+fn is_markdown_table_separator(line: &str) -> bool {
+    if !line.starts_with('|') || !line.ends_with('|') {
+        return false;
+    }
+    line.trim_matches('|')
+        .split('|')
+        .map(str::trim)
+        .all(|cell| !cell.is_empty() && cell.chars().all(|ch| matches!(ch, '-' | ':')))
 }
 
 fn workflow_inventory_findings(workflow_paths: &[String], inventory_raw: &str) -> Vec<Finding> {
@@ -1177,6 +1190,39 @@ Proof commands: cargo xtask policy-report
                 "support_tiers_invalid_claim_tier",
                 "claim `Token fallback default` uses tier `planned/advisory`, but Tier Model defines: advisory, stable"
             )]
+        );
+    }
+
+    #[test]
+    fn markdown_table_rows_skip_each_table_header_in_section() {
+        let raw = "\
+# Support Tiers
+
+## Claim Map
+
+| Claim | Tier |
+|---|---|
+| Install facade | stable |
+
+Some explanatory text between tables.
+
+| Claim | Tier |
+|---|---|
+| Token fallback | advisory |
+
+## Rules
+
+| Outside | Section |
+|---|---|
+| Ignore | this |
+";
+
+        assert_eq!(
+            markdown_table_rows(raw, "Claim Map"),
+            vec![
+                vec!["Install facade".to_string(), "stable".to_string()],
+                vec!["Token fallback".to_string(), "advisory".to_string()],
+            ]
         );
     }
 
