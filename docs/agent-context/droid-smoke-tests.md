@@ -28,7 +28,8 @@ Before any smoke test:
    - residual risk;
    - validation signal with `Observed:`, `Reported:`, `Not verified:` lines.
 6. Confirm `[skip-review]` in a PR title prevents the workflow from running.
-7. Confirm a fork PR (if one is available) does not run the auto-review workflow with secrets.
+7. Confirm a branch named `droid/security-report-<date>` does not run the auto-review workflow.
+8. Confirm a fork PR (if one is available) does not run the auto-review workflow with secrets.
 
 ## 2. Manual review
 
@@ -79,6 +80,10 @@ Expected:
 - no raw `droid-review-debug-<run_id>` artifact is uploaded.
 
 The scheduled trigger (`cron: "0 8 * * 1"`, Monday 08:00 UTC) does not need to be smoke-tested manually; it is exercised on its natural schedule.
+
+If the scan opens a `droid/security-report-<date>` PR, triage the generated
+report directly. That PR is intentionally excluded from Droid Auto Review so
+the bot allowlist can stay limited to Dependabot.
 
 ## 5. Artifact and log hygiene
 
