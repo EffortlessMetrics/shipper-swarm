@@ -305,6 +305,25 @@ Operator instruction to contributors:
 - Do not add publish/signing credentials.
 - Do not run real publish flows in swarm PR CI.
 
+Dependabot maintenance PRs stay in the swarm queue like any other PR, but their
+first bot-authored workflow run can fail before evaluation if the router or
+Droid cannot read selected repository secrets. In that case, do not broaden
+secret access and do not move release credentials into `shipper-swarm`.
+
+Use this maintainer refresh procedure instead:
+
+1. Confirm the bump is narrow and does not overlap an active human or agent PR.
+2. Run focused local validation, at minimum `cargo check --workspace --locked`
+   for Cargo dependency bumps.
+3. Push a maintainer-authored refresh commit or recreate the bump on a trusted
+   same-repo branch.
+4. Merge only after the normal `Shipper Rust Small Result` and advisory review
+   signals are clean.
+
+If the same bump also opens in `EffortlessMetrics/shipper`, close the source
+repo PR as duplicate maintenance work. Accepted dependency updates flow back to
+the release-authority repo through the normal non-squash swarm sync.
+
 ## Phase 6 — Add additional lanes after burn-in
 
 After 3–5 clean PRs:
