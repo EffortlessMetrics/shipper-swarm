@@ -4,9 +4,10 @@
 //! advisory: write deterministic reports and exit zero, matching the policy
 //! ladder used by the file-policy checks.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -15,6 +16,7 @@ const OUTPUT_DIR_REL: &str = "target/policy";
 const MD_NAME: &str = "doc-contracts-report.md";
 const JSON_NAME: &str = "doc-contracts-report.json";
 const ACTIVE_GOAL_REL: &str = ".shipper-meta/goals/active.toml";
+const WORKFLOW_INVENTORY_REL: &str = "docs/ci/test-evidence-lanes.md";
 
 const REQUIRED_HEADERS: &[&str] = &[
     "Status",
@@ -58,6 +60,7 @@ struct Report {
 struct Summary {
     documents_checked: usize,
     active_goal_checked: bool,
+    workflow_inventory_checked: bool,
     findings: usize,
     blocking_findings: usize,
 }
@@ -121,6 +124,7 @@ pub fn check(mode: Mode) -> Result<()> {
     }
 
     let active_goal_checked = check_active_goal(&workspace_root, &mut findings)?;
+    let workflow_inventory_checked = check_workflow_inventory(&workspace_root, &mut findings)?;
     let blocking_findings = findings.iter().filter(|finding| finding.blocking).count();
     let report = Report {
         tool: "cargo xtask check-doc-contracts",
@@ -128,6 +132,7 @@ pub fn check(mode: Mode) -> Result<()> {
         summary: Summary {
             documents_checked: documents.len(),
             active_goal_checked,
+            workflow_inventory_checked,
             findings: findings.len(),
             blocking_findings,
         },
@@ -425,6 +430,93 @@ fn check_active_goal(workspace_root: &Path, findings: &mut Vec<Finding>) -> Resu
     Ok(true)
 }
 
+fn check_workflow_inventory(workspace_root: &Path, findings: &mut Vec<Finding>) -> Result<bool> {
+    let path = workspace_root.join(WORKFLOW_INVENTORY_REL);
+    if !path.exists() {
+        findings.push(Finding {
+            path: WORKFLOW_INVENTORY_REL.to_string(),
+            code: "missing_workflow_inventory",
+            message: "workflow inventory document is missing".to_string(),
+            blocking: true,
+        });
+        return Ok(false);
+    }
+
+    let raw = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let workflows = tracked_workflow_files(workspace_root)?;
+    findings.extend(workflow_inventory_findings(&workflows, &raw));
+    Ok(true)
+}
+
+fn workflow_inventory_findings(workflow_paths: &[String], inventory_raw: &str) -> Vec<Finding> {
+    let tracked: BTreeSet<String> = workflow_paths
+        .iter()
+        .filter_map(|path| {
+            Path::new(path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_string)
+        })
+        .collect();
+    let listed = workflow_names_in_inventory(inventory_raw);
+    let mut findings = Vec::new();
+
+    for workflow in tracked.difference(&listed) {
+        findings.push(Finding {
+            path: WORKFLOW_INVENTORY_REL.to_string(),
+            code: "workflow_inventory_missing",
+            message: format!(
+                "tracked workflow `{workflow}` is missing from the workflow inventory"
+            ),
+            blocking: true,
+        });
+    }
+
+    for workflow in listed.difference(&tracked) {
+        findings.push(Finding {
+            path: WORKFLOW_INVENTORY_REL.to_string(),
+            code: "workflow_inventory_stale",
+            message: format!(
+                "workflow inventory lists `{workflow}`, but no tracked workflow file exists"
+            ),
+            blocking: true,
+        });
+    }
+
+    findings
+}
+
+fn workflow_names_in_inventory(raw: &str) -> BTreeSet<String> {
+    let mut in_inventory = false;
+    let mut names = BTreeSet::new();
+
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed == "## Workflow Inventory" {
+            in_inventory = true;
+            continue;
+        }
+        if in_inventory && trimmed.starts_with("## ") {
+            break;
+        }
+        if !in_inventory || !trimmed.starts_with('|') {
+            continue;
+        }
+
+        for name in backticked_segments(trimmed).filter(|segment| segment.ends_with(".yml")) {
+            names.insert(name.to_string());
+        }
+    }
+
+    names
+}
+
+fn backticked_segments(line: &str) -> impl Iterator<Item = &str> {
+    line.split('`')
+        .enumerate()
+        .filter_map(|(index, segment)| (index % 2 == 1).then_some(segment))
+}
+
 fn check_active_goal_work_item_contract(item: &WorkItem, findings: &mut Vec<Finding>) {
     let id = active_goal_work_item_id(item);
     match item.status.as_str() {
@@ -511,6 +603,10 @@ fn render_markdown(report: &Report) -> String {
         "- Active goal checked: {}\n",
         report.summary.active_goal_checked
     ));
+    out.push_str(&format!(
+        "- Workflow inventory checked: {}\n",
+        report.summary.workflow_inventory_checked
+    ));
     out.push_str(&format!("- Findings: {}\n", report.summary.findings));
     out.push_str(&format!(
         "- Blocking findings: {}\n\n",
@@ -533,10 +629,11 @@ fn render_markdown(report: &Report) -> String {
 
 fn print_stdout_summary(report: &Report) {
     println!(
-        "doc-contracts ({}): documents={} active_goal={} findings={} blocking={}",
+        "doc-contracts ({}): documents={} active_goal={} workflow_inventory={} findings={} blocking={}",
         report.mode,
         report.summary.documents_checked,
         report.summary.active_goal_checked,
+        report.summary.workflow_inventory_checked,
         report.summary.findings,
         report.summary.blocking_findings,
     );
@@ -559,6 +656,34 @@ fn workspace_root() -> Result<PathBuf> {
         .with_context(|| format!("xtask manifest dir has no parent: {}", xtask_dir.display()))?
         .to_path_buf();
     Ok(root)
+}
+
+fn tracked_workflow_files(workspace_root: &Path) -> Result<Vec<String>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(workspace_root)
+        .arg("ls-files")
+        .arg("-z")
+        .output()
+        .context("running `git ls-files -z`")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "`git ls-files -z` exited {}: {}",
+            output.status,
+            stderr.trim()
+        );
+    }
+
+    let mut paths: Vec<String> = output
+        .stdout
+        .split(|&byte| byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+        .filter(|path| path.starts_with(".github/workflows/") && path.ends_with(".yml"))
+        .collect();
+    paths.sort();
+    Ok(paths)
 }
 
 #[cfg(test)]
@@ -607,6 +732,70 @@ Status: proposed
 ";
         let headers = parse_headers(raw);
         assert_eq!(headers.get("Status").map(String::as_str), Some("accepted"));
+    }
+
+    #[test]
+    fn workflow_inventory_names_reads_backticked_yml_names() {
+        let raw = "\
+Outside the inventory, `.github/workflows/*.yml` is just prose.
+
+## Workflow Inventory
+
+| Workflow | Trigger |
+|---|---|
+| `ci.yml` | `push` |
+| `release.yml` and `ripr.yml` | `workflow_dispatch` |
+| `not-a-workflow.txt` | example |
+
+## Required PR Gate
+
+Outside the inventory, `.github/workflows/ripr.yml` is just prose.
+";
+
+        assert_eq!(
+            workflow_names_in_inventory(raw),
+            BTreeSet::from([
+                "ci.yml".to_string(),
+                "release.yml".to_string(),
+                "ripr.yml".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn workflow_inventory_findings_report_missing_and_stale_entries() {
+        let workflow_paths = vec![
+            ".github/workflows/ci.yml".to_string(),
+            ".github/workflows/release.yml".to_string(),
+        ];
+        let raw = "\
+## Workflow Inventory
+
+| Workflow | Trigger |
+|---|---|
+| `ci.yml` | `push` |
+| `old.yml` | `workflow_dispatch` |
+";
+
+        let findings = workflow_inventory_findings(&workflow_paths, raw);
+        let codes_and_messages = findings
+            .iter()
+            .map(|finding| (finding.code, finding.message.as_str()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            codes_and_messages,
+            vec![
+                (
+                    "workflow_inventory_missing",
+                    "tracked workflow `release.yml` is missing from the workflow inventory"
+                ),
+                (
+                    "workflow_inventory_stale",
+                    "workflow inventory lists `old.yml`, but no tracked workflow file exists"
+                )
+            ]
+        );
     }
 
     #[test]
