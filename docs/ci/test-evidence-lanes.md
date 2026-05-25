@@ -90,7 +90,7 @@ column carries a gate.
 | `lint` | `push` / `workflow_dispatch` / `schedule` | ~1 min | `cargo fmt --check` + `cargo clippy --workspace --all-targets -- -D warnings`. |
 | `policy` | `push` / `workflow_dispatch` / `schedule` | ~1 min | All seven xtask policy checks in `--mode blocking-allowlist`, plus `policy-report`. See `docs/policy/NON_RUST_ROLLOUT.md`. |
 | `test` (nextest) | `push` / `workflow_dispatch` / `schedule` | ~17 min | Unit and integration tests pass on the self-hosted runner pool. Doc-tests run alongside. |
-| `crypto-proptests-heavy` | `schedule` / `push` / `workflow_dispatch` only | ~20 min | Full-strength `proptest` for `shipper-encrypt` round-trips. **Not** on PR — too slow. |
+| `crypto-proptests-heavy` | `schedule` / `push` / `workflow_dispatch` only | ~60 min, capped at 90 min | Full-strength `proptest` for `shipper-encrypt` round-trips. **Not** on PR — too slow. |
 | `msrv` | `push` / `workflow_dispatch` / `schedule` | ~1 min | `cargo check --workspace` on the declared MSRV (1.95). |
 | `security` | `push` / `workflow_dispatch` / `schedule` | ~1 min | `cargo audit` against the current advisory database. |
 | `docs` | `push` / `workflow_dispatch` / `schedule` | ~1 min | `cargo doc --workspace --no-deps` clean under `-D warnings` (catches `rustdoc::invalid-html-tags` and friends). |
@@ -168,7 +168,7 @@ The `policy` job runs each check in blocking-allowlist mode and uploads `target/
 | Job | Schedule | What it proves |
 |---|---|---|
 | `fuzz` matrix (6 targets) | `fuzz.yml` — daily | Extended fuzz energy beyond the PR smoke pass. |
-| `crypto-proptests-heavy` | `ci.yml` — on `push`/`schedule`/`workflow_dispatch` | Full-strength `proptest` for `shipper-encrypt`. |
+| `crypto-proptests-heavy` | `ci.yml` — on `push`/`schedule`/`workflow_dispatch` | Full-strength `proptest` for `shipper-encrypt`, bounded by the CI job timeout. |
 | `mutants-weekly` | `mutation.yml` — Sunday 04:00 UTC | Mutation score across `shipper-duration` / `shipper-types` / `shipper-config`. Expanding to full trust-critical surface is a future rollout step (60-minute budget today). |
 | `droid-security-scan` | `droid-security-scan.yml` — Monday 08:00 UTC | Factory Droid security scan, 7-day window, medium threshold, critical blocking. |
 
