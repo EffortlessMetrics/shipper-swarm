@@ -74,6 +74,9 @@ Rules:
 - Do not use active goals as proposals, specs, ADRs, or release evidence.
 - Do not infer missing linked artifacts during implementation; create or fix
   them in a separate PR.
+- Top-level goal `status` must be `active`, `blocked`, or `complete`.
+- Work item `status` must be `ready`, `active`, `planned`, `blocked`, or
+  `complete`.
 - `blocked` work items must name `blocked_by` evidence and a concrete
   `next_action`.
 - `planned` work items must keep proof commands attached so future promotion

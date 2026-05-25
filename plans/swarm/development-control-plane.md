@@ -58,10 +58,12 @@ Keep `.shipper-meta/goals/active.toml`, `docs/status/SWARM_OPERATION.md`,
 doc-contract checker now verifies that the workflow inventory in
 `docs/ci/test-evidence-lanes.md` covers every tracked
 `.github/workflows/*.yml` file and rejects stale inventory entries. It also
-verifies that `docs/status/SUPPORT_TIERS.md` exists, has required metadata
-headers, uses a valid status, and links only to existing proposal, spec, ADR,
-and plan files. It also checks that every Claim Map tier is defined by the
-Tier Model.
+verifies that `.shipper-meta/goals/active.toml` has required handoff metadata,
+valid goal/work-item statuses, linked work-item artifacts, and explicit blocked
+or planned proof state. For support tiers, it verifies that
+`docs/status/SUPPORT_TIERS.md` exists, has required metadata headers, uses a
+valid status, links only to existing proposal, spec, ADR, and plan files, and
+defines every Claim Map tier in the Tier Model.
 
 ## Not In Scope
 
