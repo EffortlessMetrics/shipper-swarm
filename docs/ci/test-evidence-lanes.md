@@ -54,6 +54,25 @@ Public fork PRs are denied by the normalized result instead of running
 repository code on self-hosted runners. A maintainer can move trusted work onto
 a same-repo branch when it needs the swarm gate.
 
+Dependabot PRs are same-repo dependency maintenance, but their first
+bot-authored runs may not receive the selected repository secrets used by the
+router or Droid. Treat a `runner_token_missing` routed result or
+`FACTORY_API_KEY` Droid setup failure on a Dependabot PR as a trust-bootstrap
+condition, not as proof that the dependency bump is broken. The maintainer flow
+is:
+
+```text
+1. Inspect the dependency diff and confirm it is narrow.
+2. Run focused local validation such as `cargo check --workspace --locked`.
+3. Add a maintainer-authored refresh commit or recreate the bump on a trusted
+   same-repo branch.
+4. Require the normal `Shipper Rust Small Result`, Droid review, and any
+   focused dependency validation before merge.
+```
+
+This is not a fallback-policy exception. Do not add release credentials, crates.io
+tokens, signing secrets, or broad bot secret access to make dependency PRs pass.
+
 Do not infer release-authority behavior from this swarm routing policy.
 `EffortlessMetrics/shipper` remains the release authority, and the broad
 `shipper-swarm` self-hosted sweep must not be synced there until release
