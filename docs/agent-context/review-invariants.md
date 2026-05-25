@@ -34,7 +34,7 @@ These constrain how Factory Droid review is configured for shipper. A reviewer s
 - `show_full_output: false` on every Droid action step.
 - `upload_debug_artifacts: false` on every Droid action step.
 - Droid action ref is `EffortlessMetrics/droid-action-safe@7c1377ccbacddc95560d1570547a5baa51de01ec`. Do not use `Factory-AI/droid-action` directly for MiniMax BYOK workflows.
-- `actions/checkout` ref is `actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5`. Both action refs are immutable SHAs.
+- `actions/checkout` ref is `actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2`. Both action refs are immutable SHAs.
 - `automatic_review: true` and `automatic_security_review: true` on the auto-review workflow.
 - `review_depth: shallow`.
 - `cancel-in-progress: false` on the auto-review and security-scan workflows.
@@ -49,7 +49,9 @@ These constrain how Factory Droid review is configured for shipper. A reviewer s
 - Scheduled security scan has both `workflow_dispatch` and a `cron: "0 8 * * 1"` (Monday 08:00 UTC) trigger.
 - Scheduled scan uses `security_scan_schedule: true`, `security_scan_days: 7`, `security_severity_threshold: medium`, `security_block_on_critical: true`, `security_block_on_high: false`.
 - `pull_request_target` is not used anywhere.
-- Self-hosted runners are not used for Droid workflows.
+- Droid jobs run on `self-hosted` runners. PR-triggered paths must keep the
+  same-repo or trusted-actor guards so secrets never run on untrusted fork
+  code.
 - Raw Droid debug artifact upload is not enabled.
 - Raw `$HOME/.factory/**` and `droid-prompts/**` are not uploaded.
 - Wrapper-comment post-processing is not added.
@@ -68,7 +70,7 @@ Until a deliberate update PR lands, the following are explicitly out of scope an
 
 - `review_depth: deep`.
 - `pull_request_target` triggers.
-- Self-hosted runners.
+- Relaxing the Droid runner trust model or same-repo/trusted-actor guards.
 - Fork-PR secret execution.
 - Wrapper-comment post-processing to strip Factory mentions.
 - Untested global permission reductions (e.g., dropping `contents: write` on auto-review without a focused permission-test PR proving the working Factory action still functions).
