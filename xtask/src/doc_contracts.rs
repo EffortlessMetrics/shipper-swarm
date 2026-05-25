@@ -515,7 +515,112 @@ where
         }
     }
 
+    findings.extend(support_tier_claim_tier_findings(raw));
+
     findings
+}
+
+fn support_tier_claim_tier_findings(raw: &str) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let allowed = support_tier_model_values(raw);
+    if allowed.is_empty() {
+        findings.push(Finding {
+            path: SUPPORT_TIERS_REL.to_string(),
+            code: "support_tiers_missing_tier_model",
+            message: "support-tier claim map has no Tier Model values".to_string(),
+            blocking: true,
+        });
+        return findings;
+    }
+
+    let claim_rows = markdown_table_rows(raw, "Claim Map");
+    if claim_rows.is_empty() {
+        findings.push(Finding {
+            path: SUPPORT_TIERS_REL.to_string(),
+            code: "support_tiers_missing_claim_map",
+            message: "support-tier claim map has no Claim Map rows".to_string(),
+            blocking: true,
+        });
+        return findings;
+    }
+
+    for row in claim_rows {
+        if row.len() < 2 {
+            continue;
+        }
+        let claim = &row[0];
+        let tier = &row[1];
+        if !allowed.contains(tier) {
+            let allowed_values = allowed.iter().cloned().collect::<Vec<_>>().join(", ");
+            findings.push(Finding {
+                path: SUPPORT_TIERS_REL.to_string(),
+                code: "support_tiers_invalid_claim_tier",
+                message: format!(
+                    "claim `{claim}` uses tier `{tier}`, but Tier Model defines: {allowed_values}"
+                ),
+                blocking: true,
+            });
+        }
+    }
+
+    findings
+}
+
+fn support_tier_model_values(raw: &str) -> BTreeSet<String> {
+    markdown_table_rows(raw, "Tier Model")
+        .into_iter()
+        .filter_map(|row| row.first().cloned())
+        .collect()
+}
+
+fn markdown_table_rows(raw: &str, section: &str) -> Vec<Vec<String>> {
+    let section_heading = format!("## {section}");
+    let mut in_section = false;
+    let mut seen_header = false;
+    let mut rows = Vec::new();
+
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed == section_heading {
+            in_section = true;
+            continue;
+        }
+        if in_section && trimmed.starts_with("## ") {
+            break;
+        }
+        if !in_section {
+            continue;
+        }
+        let Some(row) = markdown_table_row(trimmed) else {
+            continue;
+        };
+        if !seen_header {
+            seen_header = true;
+            continue;
+        }
+        rows.push(row);
+    }
+
+    rows
+}
+
+fn markdown_table_row(line: &str) -> Option<Vec<String>> {
+    if !line.starts_with('|') || !line.ends_with('|') {
+        return None;
+    }
+    let cells = line
+        .trim_matches('|')
+        .split('|')
+        .map(|cell| cell.trim().to_string())
+        .collect::<Vec<_>>();
+    if cells.is_empty()
+        || cells
+            .iter()
+            .all(|cell| cell.chars().all(|ch| matches!(ch, '-' | ':' | ' ')))
+    {
+        return None;
+    }
+    Some(cells)
 }
 
 fn workflow_inventory_findings(workflow_paths: &[String], inventory_raw: &str) -> Vec<Finding> {
@@ -912,8 +1017,47 @@ Proof commands: cargo xtask policy-report
                 (
                     "support_tiers_missing_linked_file",
                     "`Linked specs` references missing file `docs/specs/missing.md`"
+                ),
+                (
+                    "support_tiers_missing_tier_model",
+                    "support-tier claim map has no Tier Model values"
                 )
             ]
+        );
+    }
+
+    #[test]
+    fn support_tier_claim_tier_findings_require_tiers_from_model() {
+        let raw = "\
+# Support Tiers
+
+## Tier Model
+
+| Tier | Meaning |
+|---|---|
+| stable | Implemented and tested. |
+| advisory | Useful non-blocking signal. |
+
+## Claim Map
+
+| Claim | Tier | Proof / Source | Owner |
+|---|---|---|---|
+| Install facade | stable | proof | packaging |
+| Token fallback default | planned/advisory | proof | release |
+";
+
+        let findings = support_tier_claim_tier_findings(raw);
+        let codes_and_messages = findings
+            .iter()
+            .map(|finding| (finding.code, finding.message.as_str()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            codes_and_messages,
+            vec![(
+                "support_tiers_invalid_claim_tier",
+                "claim `Token fallback default` uses tier `planned/advisory`, but Tier Model defines: advisory, stable"
+            )]
         );
     }
 

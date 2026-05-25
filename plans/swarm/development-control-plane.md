@@ -60,7 +60,8 @@ doc-contract checker now verifies that the workflow inventory in
 `.github/workflows/*.yml` file and rejects stale inventory entries. It also
 verifies that `docs/status/SUPPORT_TIERS.md` exists, has required metadata
 headers, uses a valid status, and links only to existing proposal, spec, ADR,
-and plan files.
+and plan files. It also checks that every Claim Map tier is defined by the
+Tier Model.
 
 ## Not In Scope
 
