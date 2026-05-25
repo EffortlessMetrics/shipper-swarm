@@ -17,6 +17,7 @@ const MD_NAME: &str = "doc-contracts-report.md";
 const JSON_NAME: &str = "doc-contracts-report.json";
 const ACTIVE_GOAL_REL: &str = ".shipper-meta/goals/active.toml";
 const WORKFLOW_INVENTORY_REL: &str = "docs/ci/test-evidence-lanes.md";
+const SUPPORT_TIERS_REL: &str = "docs/status/SUPPORT_TIERS.md";
 
 const REQUIRED_HEADERS: &[&str] = &[
     "Status",
@@ -61,6 +62,7 @@ struct Summary {
     documents_checked: usize,
     active_goal_checked: bool,
     workflow_inventory_checked: bool,
+    support_tiers_checked: bool,
     findings: usize,
     blocking_findings: usize,
 }
@@ -125,6 +127,7 @@ pub fn check(mode: Mode) -> Result<()> {
 
     let active_goal_checked = check_active_goal(&workspace_root, &mut findings)?;
     let workflow_inventory_checked = check_workflow_inventory(&workspace_root, &mut findings)?;
+    let support_tiers_checked = check_support_tiers(&workspace_root, &mut findings)?;
     let blocking_findings = findings.iter().filter(|finding| finding.blocking).count();
     let report = Report {
         tool: "cargo xtask check-doc-contracts",
@@ -133,6 +136,7 @@ pub fn check(mode: Mode) -> Result<()> {
             documents_checked: documents.len(),
             active_goal_checked,
             workflow_inventory_checked,
+            support_tiers_checked,
             findings: findings.len(),
             blocking_findings,
         },
@@ -448,6 +452,72 @@ fn check_workflow_inventory(workspace_root: &Path, findings: &mut Vec<Finding>) 
     Ok(true)
 }
 
+fn check_support_tiers(workspace_root: &Path, findings: &mut Vec<Finding>) -> Result<bool> {
+    let path = workspace_root.join(SUPPORT_TIERS_REL);
+    if !path.exists() {
+        findings.push(Finding {
+            path: SUPPORT_TIERS_REL.to_string(),
+            code: "missing_support_tiers",
+            message: "support-tier claim map is missing".to_string(),
+            blocking: true,
+        });
+        return Ok(false);
+    }
+
+    let raw = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    findings.extend(support_tier_metadata_findings(&raw, |linked| {
+        workspace_root.join(linked).exists()
+    }));
+    Ok(true)
+}
+
+fn support_tier_metadata_findings<F>(raw: &str, mut linked_exists: F) -> Vec<Finding>
+where
+    F: FnMut(&str) -> bool,
+{
+    let headers = parse_headers(raw);
+    let mut findings = Vec::new();
+
+    for key in REQUIRED_HEADERS {
+        if !headers.contains_key(*key) {
+            findings.push(Finding {
+                path: SUPPORT_TIERS_REL.to_string(),
+                code: "support_tiers_missing_header",
+                message: format!("missing required header `{key}`"),
+                blocking: true,
+            });
+        }
+    }
+
+    match headers.get("Status").map(String::as_str) {
+        Some(status) if valid_status(status) => {}
+        Some(status) => findings.push(Finding {
+            path: SUPPORT_TIERS_REL.to_string(),
+            code: "support_tiers_invalid_status",
+            message: format!("invalid status `{status}`"),
+            blocking: true,
+        }),
+        None => {}
+    }
+
+    for key in LINKED_FILE_HEADERS {
+        if let Some(value) = headers.get(*key) {
+            for linked in linked_paths(value) {
+                if !linked_exists(&linked) {
+                    findings.push(Finding {
+                        path: SUPPORT_TIERS_REL.to_string(),
+                        code: "support_tiers_missing_linked_file",
+                        message: format!("`{key}` references missing file `{linked}`"),
+                        blocking: true,
+                    });
+                }
+            }
+        }
+    }
+
+    findings
+}
+
 fn workflow_inventory_findings(workflow_paths: &[String], inventory_raw: &str) -> Vec<Finding> {
     let tracked: BTreeSet<String> = workflow_paths
         .iter()
@@ -607,6 +677,10 @@ fn render_markdown(report: &Report) -> String {
         "- Workflow inventory checked: {}\n",
         report.summary.workflow_inventory_checked
     ));
+    out.push_str(&format!(
+        "- Support tiers checked: {}\n",
+        report.summary.support_tiers_checked
+    ));
     out.push_str(&format!("- Findings: {}\n", report.summary.findings));
     out.push_str(&format!(
         "- Blocking findings: {}\n\n",
@@ -629,11 +703,12 @@ fn render_markdown(report: &Report) -> String {
 
 fn print_stdout_summary(report: &Report) {
     println!(
-        "doc-contracts ({}): documents={} active_goal={} workflow_inventory={} findings={} blocking={}",
+        "doc-contracts ({}): documents={} active_goal={} workflow_inventory={} support_tiers={} findings={} blocking={}",
         report.mode,
         report.summary.documents_checked,
         report.summary.active_goal_checked,
         report.summary.workflow_inventory_checked,
+        report.summary.support_tiers_checked,
         report.summary.findings,
         report.summary.blocking_findings,
     );
@@ -793,6 +868,50 @@ Outside the inventory, `.github/workflows/ripr.yml` is just prose.
                 (
                     "workflow_inventory_stale",
                     "workflow inventory lists `old.yml`, but no tracked workflow file exists"
+                )
+            ]
+        );
+    }
+
+    #[test]
+    fn support_tier_metadata_findings_report_missing_header_invalid_status_and_link() {
+        let raw = "\
+# Support Tiers
+
+Status: active
+Created: 2026-05-13
+Milestone: 0.4.0
+Linked proposal: docs/proposals/SHIPPER-PROP-0001-source-of-truth-and-release-evidence.md
+Linked specs: docs/specs/missing.md
+Linked ADRs:
+Linked plan:
+Linked issues: #109
+Linked PRs:
+Support-tier impact: source of truth
+Policy impact: policy ledgers
+Proof commands: cargo xtask policy-report
+
+## Tier Model
+";
+
+        let findings =
+            support_tier_metadata_findings(raw, |linked| linked != "docs/specs/missing.md");
+        let codes_and_messages = findings
+            .iter()
+            .map(|finding| (finding.code, finding.message.as_str()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            codes_and_messages,
+            vec![
+                (
+                    "support_tiers_missing_header",
+                    "missing required header `Owner`"
+                ),
+                ("support_tiers_invalid_status", "invalid status `active`"),
+                (
+                    "support_tiers_missing_linked_file",
+                    "`Linked specs` references missing file `docs/specs/missing.md`"
                 )
             ]
         );
