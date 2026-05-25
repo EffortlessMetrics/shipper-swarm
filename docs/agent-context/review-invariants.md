@@ -50,8 +50,8 @@ These constrain how Factory Droid review is configured for shipper. A reviewer s
 - Scheduled scan uses `security_scan_schedule: true`, `security_scan_days: 7`, `security_severity_threshold: medium`, `security_block_on_critical: true`, `security_block_on_high: false`.
 - `pull_request_target` is not used anywhere.
 - Droid jobs run on `self-hosted` runners. PR-triggered paths must keep the
-  same-repo or trusted-actor guards so secrets never run on untrusted fork
-  code.
+  same-repo guard or the manual `@droid` author-association guard so secrets
+  never run on untrusted fork code.
 - Raw Droid debug artifact upload is not enabled.
 - Raw `$HOME/.factory/**` and `droid-prompts/**` are not uploaded.
 - Wrapper-comment post-processing is not added.
@@ -70,7 +70,8 @@ Until a deliberate update PR lands, the following are explicitly out of scope an
 
 - `review_depth: deep`.
 - `pull_request_target` triggers.
-- Relaxing the Droid runner trust model or same-repo/trusted-actor guards.
+- Relaxing the Droid runner trust model, same-repo guard, or manual `@droid`
+  author-association guard.
 - Fork-PR secret execution.
 - Wrapper-comment post-processing to strip Factory mentions.
 - Untested global permission reductions (e.g., dropping `contents: write` on auto-review without a focused permission-test PR proving the working Factory action still functions).
