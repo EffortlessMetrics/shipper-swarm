@@ -93,6 +93,20 @@ enum DocumentKind {
 #[derive(Debug, Deserialize)]
 struct ActiveGoal {
     #[serde(default)]
+    id: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    owner: String,
+    #[serde(default)]
+    created: String,
+    #[serde(default)]
+    objective: String,
+    #[serde(default)]
+    end_state: Vec<String>,
+    #[serde(default)]
     work_item: Vec<WorkItem>,
 }
 
@@ -409,6 +423,8 @@ fn check_active_goal(workspace_root: &Path, findings: &mut Vec<Finding>) -> Resu
         }
     };
 
+    check_active_goal_contract(&active_goal, findings);
+
     for item in active_goal.work_item {
         check_active_goal_work_item_contract(&item, findings);
         for (field, value) in [
@@ -692,8 +708,59 @@ fn backticked_segments(line: &str) -> impl Iterator<Item = &str> {
         .filter_map(|(index, segment)| (index % 2 == 1).then_some(segment))
 }
 
+fn check_active_goal_contract(goal: &ActiveGoal, findings: &mut Vec<Finding>) {
+    for (field, value) in [
+        ("id", goal.id.as_str()),
+        ("title", goal.title.as_str()),
+        ("status", goal.status.as_str()),
+        ("owner", goal.owner.as_str()),
+        ("created", goal.created.as_str()),
+        ("objective", goal.objective.as_str()),
+    ] {
+        if value.trim().is_empty() {
+            findings.push(Finding {
+                path: ACTIVE_GOAL_REL.to_string(),
+                code: "active_goal_missing_field",
+                message: format!("missing required field `{field}`"),
+                blocking: true,
+            });
+        }
+    }
+
+    if !goal.status.trim().is_empty() && !valid_active_goal_status(&goal.status) {
+        findings.push(Finding {
+            path: ACTIVE_GOAL_REL.to_string(),
+            code: "active_goal_invalid_status",
+            message: format!("invalid status `{}`", goal.status),
+            blocking: true,
+        });
+    }
+
+    if !has_non_empty_value(&goal.end_state) {
+        findings.push(Finding {
+            path: ACTIVE_GOAL_REL.to_string(),
+            code: "active_goal_missing_field",
+            message: "missing required field `end_state`".to_string(),
+            blocking: true,
+        });
+    }
+}
+
+fn valid_active_goal_status(status: &str) -> bool {
+    matches!(status, "active" | "blocked" | "complete")
+}
+
 fn check_active_goal_work_item_contract(item: &WorkItem, findings: &mut Vec<Finding>) {
     let id = active_goal_work_item_id(item);
+    if !item.status.trim().is_empty() && !valid_active_goal_work_item_status(&item.status) {
+        findings.push(Finding {
+            path: ACTIVE_GOAL_REL.to_string(),
+            code: "active_goal_work_item_invalid_status",
+            message: format!("work_item `{id}` has invalid status `{}`", item.status),
+            blocking: true,
+        });
+    }
+
     match item.status.as_str() {
         "blocked" => {
             if !has_non_empty_value(&item.blocked_by) {
@@ -723,6 +790,13 @@ fn check_active_goal_work_item_contract(item: &WorkItem, findings: &mut Vec<Find
         }
         _ => {}
     }
+}
+
+fn valid_active_goal_work_item_status(status: &str) -> bool {
+    matches!(
+        status,
+        "ready" | "active" | "planned" | "blocked" | "complete"
+    )
 }
 
 fn active_goal_work_item_id(item: &WorkItem) -> &str {
@@ -1062,6 +1136,82 @@ Proof commands: cargo xtask policy-report
     }
 
     #[test]
+    fn active_goal_contract_requires_required_metadata() {
+        let goal = ActiveGoal {
+            id: String::new(),
+            title: String::new(),
+            status: "done".to_string(),
+            owner: String::new(),
+            created: String::new(),
+            objective: String::new(),
+            end_state: Vec::new(),
+            work_item: Vec::new(),
+        };
+
+        let mut findings = Vec::new();
+        check_active_goal_contract(&goal, &mut findings);
+
+        let codes_and_messages = findings
+            .iter()
+            .map(|finding| (finding.code, finding.message.as_str()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            codes_and_messages,
+            vec![
+                ("active_goal_missing_field", "missing required field `id`"),
+                (
+                    "active_goal_missing_field",
+                    "missing required field `title`"
+                ),
+                (
+                    "active_goal_missing_field",
+                    "missing required field `owner`"
+                ),
+                (
+                    "active_goal_missing_field",
+                    "missing required field `created`"
+                ),
+                (
+                    "active_goal_missing_field",
+                    "missing required field `objective`"
+                ),
+                ("active_goal_invalid_status", "invalid status `done`"),
+                (
+                    "active_goal_missing_field",
+                    "missing required field `end_state`"
+                )
+            ]
+        );
+    }
+
+    #[test]
+    fn active_goal_contract_accepts_current_status_values() {
+        let mut goal = ActiveGoal {
+            id: "shipper-swarm-development-control-plane".to_string(),
+            title: "shipper-swarm development control plane".to_string(),
+            status: "active".to_string(),
+            owner: "EffortlessMetrics".to_string(),
+            created: "2026-05-24".to_string(),
+            objective: "Keep the swarm queue moving.".to_string(),
+            end_state: vec!["Queue is clean.".to_string()],
+            work_item: Vec::new(),
+        };
+
+        let mut findings = Vec::new();
+        check_active_goal_contract(&goal, &mut findings);
+        assert!(findings.is_empty());
+
+        goal.status = "blocked".to_string();
+        check_active_goal_contract(&goal, &mut findings);
+        assert!(findings.is_empty());
+
+        goal.status = "complete".to_string();
+        check_active_goal_contract(&goal, &mut findings);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
     fn blocked_active_goal_items_require_blocker_and_next_action() {
         let item = WorkItem {
             id: "release-auth".to_string(),
@@ -1087,6 +1237,30 @@ Proof commands: cargo xtask policy-report
                 "active_goal_blocked_without_blocker",
                 "active_goal_blocked_without_next_action"
             ]
+        );
+    }
+
+    #[test]
+    fn active_goal_work_items_reject_unknown_statuses() {
+        let item = WorkItem {
+            id: "release-auth".to_string(),
+            status: "done".to_string(),
+            proposal: String::new(),
+            spec: String::new(),
+            plan: String::new(),
+            blocked_by: Vec::new(),
+            next_action: String::new(),
+            commands: Vec::new(),
+        };
+
+        let mut findings = Vec::new();
+        check_active_goal_work_item_contract(&item, &mut findings);
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].code, "active_goal_work_item_invalid_status");
+        assert_eq!(
+            findings[0].message,
+            "work_item `release-auth` has invalid status `done`"
         );
     }
 

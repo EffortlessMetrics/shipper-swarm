@@ -90,6 +90,8 @@ The advisory checker validates:
 - valid status values
 - linked files when non-empty
 - `.shipper-meta/goals/active.toml` TOML parsing
+- active goal required top-level metadata, end-state entries, and valid
+  top-level/work-item statuses
 - active work item references to existing specs and plans
 - `docs/ci/test-evidence-lanes.md` workflow inventory coverage for every
   tracked `.github/workflows/*.yml` file, with stale inventory entries rejected
