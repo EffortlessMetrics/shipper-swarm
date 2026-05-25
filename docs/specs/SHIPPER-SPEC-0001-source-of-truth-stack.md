@@ -94,7 +94,8 @@ The advisory checker validates:
 - `docs/ci/test-evidence-lanes.md` workflow inventory coverage for every
   tracked `.github/workflows/*.yml` file, with stale inventory entries rejected
 - `docs/status/SUPPORT_TIERS.md` presence, required metadata headers, valid
-  status, and linked proposal/spec/ADR/plan file references
+  status, linked proposal/spec/ADR/plan file references, and Claim Map tier
+  values against the Tier Model
 
 ## CI Proof
 
