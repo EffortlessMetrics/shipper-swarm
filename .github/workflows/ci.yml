@@ -224,6 +224,7 @@ jobs:
     # workflow_dispatch trigger on the PR's branch.
     if: github.event_name == 'schedule' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: self-hosted
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v6.0.2
 
