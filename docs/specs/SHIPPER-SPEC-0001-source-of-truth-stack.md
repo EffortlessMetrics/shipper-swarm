@@ -92,6 +92,7 @@ The advisory checker validates:
 - `.shipper-meta/goals/active.toml` TOML parsing
 - active goal required top-level metadata, end-state entries, and valid
   top-level/work-item statuses
+- top-level blocked-goal evidence and next-action fields
 - active goal work-item `id`/`status` fields and proof-command coverage for
   `ready`, `active`, and `planned` work
 - active work item references to existing specs and plans

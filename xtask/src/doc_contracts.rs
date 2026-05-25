@@ -105,6 +105,10 @@ struct ActiveGoal {
     #[serde(default)]
     objective: String,
     #[serde(default)]
+    blocked_by: Vec<String>,
+    #[serde(default)]
+    next_action: String,
+    #[serde(default)]
     end_state: Vec<String>,
     #[serde(default)]
     work_item: Vec<WorkItem>,
@@ -744,6 +748,25 @@ fn check_active_goal_contract(goal: &ActiveGoal, findings: &mut Vec<Finding>) {
             blocking: true,
         });
     }
+
+    if goal.status == "blocked" {
+        if !has_non_empty_value(&goal.blocked_by) {
+            findings.push(Finding {
+                path: ACTIVE_GOAL_REL.to_string(),
+                code: "active_goal_blocked_without_blocker",
+                message: "active goal is blocked but does not define blocked_by".to_string(),
+                blocking: true,
+            });
+        }
+        if goal.next_action.trim().is_empty() {
+            findings.push(Finding {
+                path: ACTIVE_GOAL_REL.to_string(),
+                code: "active_goal_blocked_without_next_action",
+                message: "active goal is blocked but does not define next_action".to_string(),
+                blocking: true,
+            });
+        }
+    }
 }
 
 fn valid_active_goal_status(status: &str) -> bool {
@@ -1166,6 +1189,8 @@ Proof commands: cargo xtask policy-report
             owner: String::new(),
             created: String::new(),
             objective: String::new(),
+            blocked_by: Vec::new(),
+            next_action: String::new(),
             end_state: Vec::new(),
             work_item: Vec::new(),
         };
@@ -1216,6 +1241,8 @@ Proof commands: cargo xtask policy-report
             owner: "EffortlessMetrics".to_string(),
             created: "2026-05-24".to_string(),
             objective: "Keep the swarm queue moving.".to_string(),
+            blocked_by: Vec::new(),
+            next_action: String::new(),
             end_state: vec!["Queue is clean.".to_string()],
             work_item: Vec::new(),
         };
@@ -1225,12 +1252,52 @@ Proof commands: cargo xtask policy-report
         assert!(findings.is_empty());
 
         goal.status = "blocked".to_string();
+        goal.blocked_by = vec!["external proof missing".to_string()];
+        goal.next_action = "collect proof".to_string();
         check_active_goal_contract(&goal, &mut findings);
         assert!(findings.is_empty());
 
         goal.status = "complete".to_string();
         check_active_goal_contract(&goal, &mut findings);
         assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn blocked_active_goals_require_blocker_and_next_action() {
+        let goal = ActiveGoal {
+            id: "shipper-trusted-publishing-default-proof".to_string(),
+            title: "Trusted Publishing default proof".to_string(),
+            status: "blocked".to_string(),
+            owner: "EffortlessMetrics".to_string(),
+            created: "2026-05-24".to_string(),
+            objective: "Prove the release auth default.".to_string(),
+            blocked_by: Vec::new(),
+            next_action: String::new(),
+            end_state: vec!["Trusted Publishing evidence is recorded.".to_string()],
+            work_item: Vec::new(),
+        };
+
+        let mut findings = Vec::new();
+        check_active_goal_contract(&goal, &mut findings);
+
+        let codes_and_messages = findings
+            .iter()
+            .map(|finding| (finding.code, finding.message.as_str()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            codes_and_messages,
+            vec![
+                (
+                    "active_goal_blocked_without_blocker",
+                    "active goal is blocked but does not define blocked_by"
+                ),
+                (
+                    "active_goal_blocked_without_next_action",
+                    "active goal is blocked but does not define next_action"
+                )
+            ]
+        );
     }
 
     #[test]
