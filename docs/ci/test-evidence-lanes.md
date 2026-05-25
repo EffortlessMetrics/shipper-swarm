@@ -270,5 +270,11 @@ Concrete follow-up candidates:
 
 1. Repeat forced route proof and refresh the proof ledger whenever route order,
    runner labels, fallback policy, or the normalized-result contract changes.
-2. Revisit whether `architecture-guard.yml` should remain separately required
-   once the routed Rust-small lane is proven stable under the new settings.
+
+Resolved follow-up:
+
+- `architecture-guard.yml` remains advisory in `shipper-swarm` branch
+  protection. On 2026-05-25, `gh api
+  repos/EffortlessMetrics/shipper-swarm/branches/main/protection/required_status_checks`
+  returned only `Shipper Rust Small Result`. The architecture guard still runs
+  as PR/push evidence, but it is not a separate required status check.
