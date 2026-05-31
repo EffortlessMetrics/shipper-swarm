@@ -15,7 +15,9 @@ jobs:
       !contains(github.event.pull_request.title, '[skip-review]') &&
       !startsWith(github.event.pull_request.head.ref, 'droid/security-report-')
 
-    runs-on: self-hosted
+    runs-on:
+      group: em-ci-small
+      labels: [self-hosted, linux, x64, em-ci, cx53, rust-large, trusted-pr]
 
     env:
       MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}

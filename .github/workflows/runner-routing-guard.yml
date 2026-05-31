@@ -1,0 +1,29 @@
+name: Runner Routing Guard
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/**"
+      - "scripts/ci/no-bare-self-hosted.sh"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/**"
+      - "scripts/ci/no-bare-self-hosted.sh"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  no-bare-self-hosted:
+    name: No bare self-hosted routing
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on:
+      group: em-ci-nano
+      labels: [self-hosted, linux, x64, em-ci, cx23, ci-nano, trusted-pr]
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - name: Check runner routing policy
+        run: scripts/ci/no-bare-self-hosted.sh

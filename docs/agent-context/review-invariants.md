@@ -51,9 +51,10 @@ These constrain how Factory Droid review is configured for shipper. A reviewer s
 - Scheduled security scan has both `workflow_dispatch` and a `cron: "0 8 * * 1"` (Monday 08:00 UTC) trigger.
 - Scheduled scan uses `security_scan_schedule: true`, `security_scan_days: 7`, `security_severity_threshold: medium`, `security_block_on_critical: true`, `security_block_on_high: false`.
 - `pull_request_target` is not used anywhere.
-- Droid jobs run on `self-hosted` runners. PR-triggered paths must keep the
-  same-repo guard or the manual `@droid` author-association guard so secrets
-  never run on untrusted fork code.
+- Droid jobs run on explicitly scoped `em-ci-small` self-hosted runners with
+  `em-ci`, `cx53`, `rust-large`, and `trusted-pr` labels. PR-triggered paths
+  must keep the same-repo guard or the manual `@droid` author-association
+  guard so secrets never run on untrusted fork code.
 - Raw Droid debug artifact upload is not enabled.
 - Raw `$HOME/.factory/**` and `droid-prompts/**` are not uploaded.
 - Wrapper-comment post-processing is not added.
