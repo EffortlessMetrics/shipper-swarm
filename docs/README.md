@@ -56,6 +56,7 @@ Design decisions and reasoning. Read these to understand *why* things are the wa
 - [Product overview](product.md)
 - [Repository structure](structure.md)
 - [Tech stack](tech.md)
+- [Tool substrate standard](ci/tool-substrate.md)
 
 ## Root-level orientation
 
