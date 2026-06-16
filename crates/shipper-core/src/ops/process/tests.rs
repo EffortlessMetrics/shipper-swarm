@@ -966,7 +966,7 @@ fn timeout_none_does_not_set_timed_out() {
 #[test]
 fn timeout_generous_does_not_trigger() {
     let tmp = tempfile::tempdir().expect("tmpdir");
-    let timeout = Some(Duration::from_secs(120));
+    let timeout = Some(Duration::from_mins(2));
     let r = run_command_with_timeout("cargo", &["--version"], tmp.path(), timeout).expect("run");
     assert!(!r.timed_out);
     assert_eq!(r.exit_code, 0);

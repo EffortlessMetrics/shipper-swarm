@@ -564,7 +564,7 @@ fn default_schema_version() -> String {
 }
 
 fn default_lock_timeout() -> Duration {
-    Duration::from_secs(3600) // 1 hour
+    Duration::from_hours(1) // 1 hour
 }
 
 fn default_max_attempts() -> u32 {
@@ -576,7 +576,7 @@ fn default_base_delay() -> Duration {
 }
 
 fn default_max_delay() -> Duration {
-    Duration::from_secs(120) // 2 minutes
+    Duration::from_mins(2) // 2 minutes
 }
 
 impl ShipperConfig {
@@ -933,7 +933,7 @@ skip_ownership_check = true
         assert_eq!(config.verify.mode, VerifyMode::None);
         assert!(!config.readiness.enabled);
         assert_eq!(config.output.lines, 100);
-        assert_eq!(config.lock.timeout, Duration::from_secs(1800));
+        assert_eq!(config.lock.timeout, Duration::from_mins(30));
         assert_eq!(config.retry.max_attempts, 3);
         assert!(config.flags.allow_dirty);
         assert!(config.flags.skip_ownership_check);
@@ -1020,7 +1020,7 @@ per_package_timeout = "1h"
         assert_eq!(config.parallel.max_concurrent, 8);
         assert_eq!(
             config.parallel.per_package_timeout,
-            Duration::from_secs(3600)
+            Duration::from_hours(1)
         );
     }
 
@@ -1035,8 +1035,8 @@ method = "both"
         assert_eq!(config.readiness.method, ReadinessMethod::Both);
         assert!(config.readiness.enabled);
         assert_eq!(config.readiness.initial_delay, Duration::from_secs(1));
-        assert_eq!(config.readiness.max_delay, Duration::from_secs(60));
-        assert_eq!(config.readiness.max_total_wait, Duration::from_secs(300));
+        assert_eq!(config.readiness.max_delay, Duration::from_mins(1));
+        assert_eq!(config.readiness.max_total_wait, Duration::from_mins(5));
         assert_eq!(config.readiness.poll_interval, Duration::from_secs(2));
         assert_eq!(config.readiness.jitter_factor, 0.5);
     }
@@ -1053,7 +1053,7 @@ enabled = true
         assert_eq!(config.parallel.max_concurrent, 4);
         assert_eq!(
             config.parallel.per_package_timeout,
-            Duration::from_secs(1800)
+            Duration::from_mins(30)
         );
     }
 
@@ -1070,7 +1070,7 @@ enabled = true
         let config: ShipperConfig = toml::from_str(toml).unwrap();
         assert_eq!(config.output.lines, 50);
         assert_eq!(config.retry.max_attempts, 6);
-        assert_eq!(config.lock.timeout, Duration::from_secs(3600));
+        assert_eq!(config.lock.timeout, Duration::from_hours(1));
         assert!(config.validate().is_ok());
     }
 
@@ -1082,7 +1082,7 @@ enabled = true
                 policy: RetryPolicy::Custom,
                 max_attempts: 10,
                 base_delay: Duration::from_secs(5),
-                max_delay: Duration::from_secs(300),
+                max_delay: Duration::from_mins(5),
                 strategy: RetryStrategyType::Exponential,
                 jitter: 0.5,
                 per_error: PerErrorConfig::default(),
@@ -1115,7 +1115,7 @@ enabled = true
                 policy: RetryPolicy::Custom,
                 max_attempts: 10,
                 base_delay: Duration::from_secs(5),
-                max_delay: Duration::from_secs(300),
+                max_delay: Duration::from_mins(5),
                 strategy: RetryStrategyType::Exponential,
                 jitter: 0.5,
                 per_error: PerErrorConfig::default(),
@@ -1128,7 +1128,7 @@ enabled = true
                 mode: VerifyMode::Package,
             },
             lock: LockConfig {
-                timeout: Duration::from_secs(1800),
+                timeout: Duration::from_mins(30),
             },
             state_dir: Some(PathBuf::from("custom-state")),
             ..Default::default()
@@ -1139,11 +1139,11 @@ enabled = true
         let opts = config.build_runtime_options(cli);
         assert_eq!(opts.max_attempts, 10, "config max_attempts should apply");
         assert_eq!(opts.base_delay, Duration::from_secs(5));
-        assert_eq!(opts.max_delay, Duration::from_secs(300));
+        assert_eq!(opts.max_delay, Duration::from_mins(5));
         assert_eq!(opts.output_lines, 100);
         assert_eq!(opts.policy, PublishPolicy::Balanced);
         assert_eq!(opts.verify_mode, VerifyMode::Package);
-        assert_eq!(opts.lock_timeout, Duration::from_secs(1800));
+        assert_eq!(opts.lock_timeout, Duration::from_mins(30));
         assert_eq!(opts.state_dir, PathBuf::from("custom-state"));
     }
 
@@ -1181,7 +1181,7 @@ enabled = true
         let opts = config.build_runtime_options(cli);
         assert_eq!(opts.max_attempts, 6);
         assert_eq!(opts.base_delay, Duration::from_secs(2));
-        assert_eq!(opts.max_delay, Duration::from_secs(120));
+        assert_eq!(opts.max_delay, Duration::from_mins(2));
         assert_eq!(opts.policy, PublishPolicy::Safe);
         assert_eq!(opts.verify_mode, VerifyMode::Workspace);
         assert_eq!(opts.output_lines, 50);
@@ -1210,7 +1210,7 @@ enabled = true
             parallel: ParallelConfig {
                 enabled: true,
                 max_concurrent: 8,
-                per_package_timeout: Duration::from_secs(7200),
+                per_package_timeout: Duration::from_hours(2),
             },
             ..Default::default()
         };
@@ -1220,7 +1220,7 @@ enabled = true
         let opts = config.build_runtime_options(cli);
         assert!(opts.parallel.enabled);
         assert_eq!(opts.parallel.max_concurrent, 8);
-        assert_eq!(opts.parallel.per_package_timeout, Duration::from_secs(7200));
+        assert_eq!(opts.parallel.per_package_timeout, Duration::from_hours(2));
 
         // CLI overrides max_concurrent
         let cli2 = CliOverrides {
@@ -1255,8 +1255,8 @@ enabled = true
                     enabled: false,
                     method: ReadinessMethod::Both,
                     initial_delay: Duration::from_secs(5),
-                    max_delay: Duration::from_secs(120),
-                    max_total_wait: Duration::from_secs(600),
+                    max_delay: Duration::from_mins(2),
+                    max_total_wait: Duration::from_mins(10),
                     poll_interval: Duration::from_secs(10),
                     jitter_factor: 0.3,
                     index_path: Some(std::path::PathBuf::from("/tmp/index")),
@@ -1264,7 +1264,7 @@ enabled = true
                 },
                 output: OutputConfig { lines: 200 },
                 lock: LockConfig {
-                    timeout: Duration::from_secs(7200),
+                    timeout: Duration::from_hours(2),
                 },
                 retry: RetryConfig {
                     policy: RetryPolicy::Aggressive,
@@ -1283,7 +1283,7 @@ enabled = true
                 parallel: ParallelConfig {
                     enabled: true,
                     max_concurrent: 8,
-                    per_package_timeout: Duration::from_secs(3600),
+                    per_package_timeout: Duration::from_hours(1),
                 },
                 state_dir: Some(std::path::PathBuf::from("/custom/state")),
                 registry: Some(RegistryConfig {
@@ -1479,19 +1479,19 @@ per_package_timeout = "15m"
                     policy: RetryPolicy::Custom,
                     max_attempts: 3,
                     base_delay: Duration::from_secs(2),
-                    max_delay: Duration::from_secs(60),
+                    max_delay: Duration::from_mins(1),
                     strategy: RetryStrategyType::Exponential,
                     jitter: 0.1,
                     per_error: PerErrorConfig::default(),
                 },
                 output: OutputConfig { lines: 50 },
                 lock: LockConfig {
-                    timeout: Duration::from_secs(1800),
+                    timeout: Duration::from_mins(30),
                 },
                 parallel: ParallelConfig {
                     enabled: false,
                     max_concurrent: 4,
-                    per_package_timeout: Duration::from_secs(600),
+                    per_package_timeout: Duration::from_mins(10),
                 },
                 ..ShipperConfig::default()
             };
@@ -1500,7 +1500,7 @@ per_package_timeout = "15m"
                 policy: Some(PublishPolicy::Fast),
                 max_attempts: Some(10),
                 output_lines: Some(200),
-                lock_timeout: Some(Duration::from_secs(7200)),
+                lock_timeout: Some(Duration::from_hours(2)),
                 parallel_enabled: true,
                 max_concurrent: Some(8),
                 allow_dirty: true,
@@ -1805,7 +1805,7 @@ per_package_timeout = "15m"
                     parallel: ParallelConfig {
                         enabled: true,
                         max_concurrent: 4,
-                        per_package_timeout: Duration::from_secs(600),
+                        per_package_timeout: Duration::from_mins(10),
                     },
                     ..Default::default()
                 };
@@ -2000,7 +2000,7 @@ lines = 999
 timeout = "10m"
 "#;
             let config: ShipperConfig = toml::from_str(toml).unwrap();
-            assert_eq!(config.lock.timeout, Duration::from_secs(600));
+            assert_eq!(config.lock.timeout, Duration::from_mins(10));
             assert!(config.validate().is_ok());
         }
 
@@ -2050,7 +2050,7 @@ per_package_timeout = "2h"
             assert_eq!(config.parallel.max_concurrent, 16);
             assert_eq!(
                 config.parallel.per_package_timeout,
-                Duration::from_secs(7200)
+                Duration::from_hours(2)
             );
             assert!(config.validate().is_ok());
         }

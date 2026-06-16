@@ -409,8 +409,8 @@ impl Default for ReadinessConfig {
             enabled: true,
             method: ReadinessMethod::Api,
             initial_delay: Duration::from_secs(1),
-            max_delay: Duration::from_secs(60),
-            max_total_wait: Duration::from_secs(300), // 5 minutes
+            max_delay: Duration::from_mins(1),
+            max_total_wait: Duration::from_mins(5), // 5 minutes
             poll_interval: Duration::from_secs(2),
             jitter_factor: 0.5,
             index_path: None,
@@ -485,7 +485,7 @@ impl Default for ParallelConfig {
         Self {
             enabled: false,
             max_concurrent: 4,
-            per_package_timeout: Duration::from_secs(1800), // 30 minutes
+            per_package_timeout: Duration::from_mins(30), // 30 minutes
         }
     }
 }
@@ -2133,8 +2133,8 @@ mod tests {
         assert!(config.enabled);
         assert_eq!(config.method, ReadinessMethod::Api);
         assert_eq!(config.initial_delay, Duration::from_secs(1));
-        assert_eq!(config.max_delay, Duration::from_secs(60));
-        assert_eq!(config.max_total_wait, Duration::from_secs(300));
+        assert_eq!(config.max_delay, Duration::from_mins(1));
+        assert_eq!(config.max_total_wait, Duration::from_mins(5));
         assert_eq!(config.poll_interval, Duration::from_secs(2));
         assert_eq!(config.jitter_factor, 0.5);
     }
@@ -2146,7 +2146,7 @@ mod tests {
             method: ReadinessMethod::Both,
             initial_delay: Duration::from_millis(500),
             max_delay: Duration::from_secs(30),
-            max_total_wait: Duration::from_secs(600),
+            max_total_wait: Duration::from_mins(10),
             poll_interval: Duration::from_secs(5),
             jitter_factor: 0.25,
             index_path: None,
@@ -2156,7 +2156,7 @@ mod tests {
         assert_eq!(config.method, ReadinessMethod::Both);
         assert_eq!(config.initial_delay, Duration::from_millis(500));
         assert_eq!(config.max_delay, Duration::from_secs(30));
-        assert_eq!(config.max_total_wait, Duration::from_secs(600));
+        assert_eq!(config.max_total_wait, Duration::from_mins(10));
         assert_eq!(config.poll_interval, Duration::from_secs(5));
         assert_eq!(config.jitter_factor, 0.25);
     }
@@ -2767,11 +2767,11 @@ mod tests {
             no_verify: false,
             max_attempts: 3,
             base_delay: Duration::from_secs(1),
-            max_delay: Duration::from_secs(60),
+            max_delay: Duration::from_mins(1),
             retry_strategy: shipper_retry::RetryStrategyType::Exponential,
             retry_jitter: 0.5,
             retry_per_error: shipper_retry::PerErrorConfig::default(),
-            verify_timeout: Duration::from_secs(600),
+            verify_timeout: Duration::from_mins(10),
             verify_poll_interval: Duration::from_secs(10),
             state_dir: PathBuf::from(".shipper"),
             force_resume: false,
@@ -2780,7 +2780,7 @@ mod tests {
             readiness: ReadinessConfig::default(),
             output_lines: 1000,
             force: false,
-            lock_timeout: Duration::from_secs(3600),
+            lock_timeout: Duration::from_hours(1),
             parallel: ParallelConfig::default(),
             webhook: WebhookConfig::default(),
             encryption: EncryptionSettings::default(),
@@ -2801,7 +2801,7 @@ mod tests {
         assert!(!opts.no_verify);
         assert_eq!(opts.max_attempts, 3);
         assert_eq!(opts.base_delay, Duration::from_secs(1));
-        assert_eq!(opts.max_delay, Duration::from_secs(60));
+        assert_eq!(opts.max_delay, Duration::from_mins(1));
         assert_eq!(opts.policy, PublishPolicy::Safe);
         assert_eq!(opts.verify_mode, VerifyMode::Workspace);
         assert_eq!(opts.output_lines, 1000);
@@ -2988,7 +2988,7 @@ mod tests {
         let config = ParallelConfig::default();
         assert!(!config.enabled);
         assert_eq!(config.max_concurrent, 4);
-        assert_eq!(config.per_package_timeout, Duration::from_secs(1800));
+        assert_eq!(config.per_package_timeout, Duration::from_mins(30));
     }
 
     #[test]
@@ -2996,13 +2996,13 @@ mod tests {
         let config = ParallelConfig {
             enabled: true,
             max_concurrent: 16,
-            per_package_timeout: Duration::from_secs(300),
+            per_package_timeout: Duration::from_mins(5),
         };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: ParallelConfig = serde_json::from_str(&json).unwrap();
         assert!(parsed.enabled);
         assert_eq!(parsed.max_concurrent, 16);
-        assert_eq!(parsed.per_package_timeout, Duration::from_secs(300));
+        assert_eq!(parsed.per_package_timeout, Duration::from_mins(5));
     }
 
     // ===== PackageState serde =====
@@ -3155,8 +3155,8 @@ mod tests {
             enabled: true,
             method: ReadinessMethod::Index,
             initial_delay: Duration::from_secs(2),
-            max_delay: Duration::from_secs(120),
-            max_total_wait: Duration::from_secs(600),
+            max_delay: Duration::from_mins(2),
+            max_total_wait: Duration::from_mins(10),
             poll_interval: Duration::from_secs(5),
             jitter_factor: 0.3,
             index_path: Some(PathBuf::from("/tmp/test-index")),
@@ -3549,7 +3549,7 @@ mod tests {
                                 stdout_tail: "Uploading core-lib v0.1.0".to_string(),
                                 stderr_tail: String::new(),
                                 timestamp: t,
-                                duration: Duration::from_millis(3000),
+                                duration: Duration::from_secs(3),
                             }],
                             readiness_checks: vec![ReadinessEvidence {
                                 attempt: 1,
@@ -3896,8 +3896,8 @@ mod tests {
                 enabled: false,
                 method: ReadinessMethod::Both,
                 initial_delay: Duration::from_millis(500),
-                max_delay: Duration::from_secs(120),
-                max_total_wait: Duration::from_secs(900),
+                max_delay: Duration::from_mins(2),
+                max_total_wait: Duration::from_mins(15),
                 poll_interval: Duration::from_secs(10),
                 jitter_factor: 0.25,
                 index_path: Some(PathBuf::from("/tmp/test-index")),
@@ -3917,7 +3917,7 @@ mod tests {
             let config = ParallelConfig {
                 enabled: true,
                 max_concurrent: 8,
-                per_package_timeout: Duration::from_secs(600),
+                per_package_timeout: Duration::from_mins(10),
             };
             insta::assert_yaml_snapshot!(config);
         }

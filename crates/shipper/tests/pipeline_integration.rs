@@ -461,7 +461,7 @@ fn lock_stale_timeout_allows_reacquire() {
     let mut lock = shipper_core::lock::LockFile::acquire_with_timeout(
         &state_dir,
         None,
-        Duration::from_secs(60),
+        Duration::from_mins(1),
     )
     .expect("acquire with timeout");
     assert!(shipper_core::lock::LockFile::is_locked(&state_dir, None).expect("locked"));

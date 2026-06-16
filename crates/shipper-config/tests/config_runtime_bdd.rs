@@ -19,7 +19,7 @@ fn sample_runtime_options(base_url: &str, registry_count: usize) -> RuntimeOptio
         retry_strategy: shipper_retry::RetryStrategyType::Linear,
         retry_jitter: 0.35,
         retry_per_error: shipper_retry::PerErrorConfig::default(),
-        verify_timeout: Duration::from_secs(120),
+        verify_timeout: Duration::from_mins(2),
         verify_poll_interval: Duration::from_secs(5),
         state_dir: PathBuf::from(".shipper"),
         force_resume: false,
@@ -38,7 +38,7 @@ fn sample_runtime_options(base_url: &str, registry_count: usize) -> RuntimeOptio
         },
         output_lines: 160,
         force: false,
-        lock_timeout: Duration::from_secs(600),
+        lock_timeout: Duration::from_mins(10),
         parallel: ParallelConfig {
             enabled: true,
             max_concurrent: 4,

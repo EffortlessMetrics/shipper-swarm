@@ -177,7 +177,7 @@ mod tests {
             },
             output_lines: 10,
             force: false,
-            lock_timeout: Duration::from_secs(60),
+            lock_timeout: Duration::from_mins(1),
             parallel: ParallelConfig::default(),
             webhook: WebhookConfig::default(),
             encryption: EncryptionConfig::default(),

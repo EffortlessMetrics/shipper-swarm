@@ -1756,7 +1756,7 @@ mod tests {
             },
             output_lines: 100,
             force: false,
-            lock_timeout: Duration::from_secs(3600),
+            lock_timeout: Duration::from_hours(1),
             parallel: crate::types::ParallelConfig::default(),
             webhook: crate::webhook::WebhookConfig::default(),
             retry_strategy: crate::retry::RetryStrategyType::Exponential,
@@ -3739,7 +3739,7 @@ mod tests {
         assert_eq!(estimate.registry_profile, "crates-io");
         assert_eq!(estimate.first_publish_count, 6);
         assert_eq!(estimate.update_count, 0);
-        assert_eq!(estimate.minimum_registry_pacing, Duration::from_secs(600));
+        assert_eq!(estimate.minimum_registry_pacing, Duration::from_mins(10));
         assert!(
             estimate
                 .notes
@@ -5050,7 +5050,7 @@ mod tests {
     #[test]
     fn backoff_delay_constant_strategy() {
         let base = Duration::from_millis(200);
-        let max = Duration::from_millis(1000);
+        let max = Duration::from_secs(1);
         let d1 = backoff_delay(base, max, 1, crate::retry::RetryStrategyType::Constant, 0.0);
         let d5 = backoff_delay(base, max, 5, crate::retry::RetryStrategyType::Constant, 0.0);
         let d10 = backoff_delay(
@@ -5069,7 +5069,7 @@ mod tests {
     #[test]
     fn backoff_delay_immediate_strategy() {
         let base = Duration::from_millis(200);
-        let max = Duration::from_millis(1000);
+        let max = Duration::from_secs(1);
         let d1 = backoff_delay(
             base,
             max,

@@ -216,7 +216,7 @@ mod tests {
             policy: RetryPolicy::Default,
             max_attempts: TEST_DEFAULT_MAX_ATTEMPTS,
             base_delay: Duration::from_secs(2),
-            max_delay: Duration::from_secs(120),
+            max_delay: Duration::from_mins(2),
             strategy: RetryStrategyType::Exponential,
             jitter: 0.5,
             per_error: per_error.clone(),

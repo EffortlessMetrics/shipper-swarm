@@ -4940,7 +4940,7 @@ mod tests {
             state_dir: state_dir.clone(),
             force_resume: false,
             force: false,
-            lock_timeout: Duration::from_secs(3600),
+            lock_timeout: Duration::from_hours(1),
             policy: shipper_core::types::PublishPolicy::Safe,
             verify_mode: shipper_core::types::VerifyMode::Workspace,
             readiness: shipper_core::types::ReadinessConfig::default(),
@@ -5012,7 +5012,7 @@ mod tests {
             state_dir: td.path().join("abs-state-2"),
             force_resume: false,
             force: false,
-            lock_timeout: Duration::from_secs(3600),
+            lock_timeout: Duration::from_hours(1),
             policy: shipper_core::types::PublishPolicy::Safe,
             verify_mode: shipper_core::types::VerifyMode::Workspace,
             readiness: shipper_core::types::ReadinessConfig::default(),
@@ -5214,7 +5214,7 @@ mode = "fast"
             readiness: shipper_core::config::ReadinessConfig::default(),
             output: shipper_core::config::OutputConfig { lines: 100 },
             lock: shipper_core::config::LockConfig {
-                timeout: Duration::from_secs(1800),
+                timeout: Duration::from_mins(30),
             },
             flags: shipper_core::config::FlagsConfig {
                 allow_dirty: false,
@@ -5225,7 +5225,7 @@ mode = "fast"
                 policy: shipper_core::retry::RetryPolicy::Custom,
                 max_attempts: 10,
                 base_delay: Duration::from_secs(5),
-                max_delay: Duration::from_secs(300),
+                max_delay: Duration::from_mins(5),
                 strategy: shipper_core::retry::RetryStrategyType::Exponential,
                 jitter: 0.5,
                 per_error: shipper_core::retry::PerErrorConfig::default(),
@@ -5275,12 +5275,12 @@ mode = "fast"
         );
         assert_eq!(
             merged.max_delay,
-            Duration::from_secs(300),
+            Duration::from_mins(5),
             "config max_delay should apply"
         );
         assert_eq!(
             merged.lock_timeout,
-            Duration::from_secs(1800),
+            Duration::from_mins(30),
             "config lock_timeout should apply"
         );
     }

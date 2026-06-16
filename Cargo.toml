@@ -47,9 +47,10 @@ unknown_lints = "deny"
 # round-trip with `unknown_lints = "deny"` in [workspace.lints.rust], which
 # rejected one fabricated name from the original #191 plan
 # (`clippy::manual_pop_if`). Fallout per real lint was measured against the
-# workspace at activation time; the eight here had zero fallout. The
-# remaining planned lint (`duration_suboptimal_units`) has 204 sites and
-# stays in [[planned]] until a focused cleanup PR lands.
+# workspace at activation time; the eight here had zero fallout.
+# `duration_suboptimal_units` was the ninth planned lint (deferred from #191
+# with 204 sites); activated after a focused `cargo clippy --fix` cleanup
+# reduced all sites to optimal units.
 same_length_and_capacity = "deny"
 manual_ilog2 = "warn"
 decimal_bitwise_operands = "warn"
@@ -58,6 +59,7 @@ manual_checked_ops = "warn"
 manual_take = "warn"
 unnecessary_trailing_comma = "warn"
 disallowed_fields = "deny"
+duration_suboptimal_units = "warn"
 
 [workspace.dependencies]
 # Intra-workspace crates (path + version for publish-readiness).

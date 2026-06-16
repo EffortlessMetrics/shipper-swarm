@@ -298,7 +298,7 @@ mod edge_case_tests {
     #[test]
     fn parse_large_hours() {
         let d = parse_duration("9999h").unwrap();
-        assert_eq!(d, Duration::from_secs(9999 * 3600));
+        assert_eq!(d, Duration::from_hours(9999));
     }
 
     #[test]
@@ -308,7 +308,7 @@ mod edge_case_tests {
             #[serde(serialize_with = "serialize_duration")]
             v: Duration,
         }
-        let large = Duration::from_secs(365 * 24 * 3600); // 1 year
+        let large = Duration::from_hours(8760); // 1 year
         let json = serde_json::to_value(H { v: large }).unwrap();
         assert_eq!(json["v"], 365 * 24 * 3600 * 1000_u64);
     }
@@ -361,7 +361,7 @@ mod edge_case_tests {
     #[test]
     fn parse_day_unit() {
         let d = parse_duration("2days").unwrap();
-        assert_eq!(d, Duration::from_secs(2 * 86400));
+        assert_eq!(d, Duration::from_hours(48));
     }
 
     // -- Comparison / ordering --
@@ -383,7 +383,7 @@ mod edge_case_tests {
     fn parsed_durations_support_addition() {
         let a = parse_duration("30s").unwrap();
         let b = parse_duration("30s").unwrap();
-        assert_eq!(a + b, Duration::from_secs(60));
+        assert_eq!(a + b, Duration::from_mins(1));
     }
 
     #[test]
@@ -405,7 +405,7 @@ mod edge_case_tests {
     fn parse_combined_no_spaces() {
         assert_eq!(
             parse_duration("1h30m").unwrap(),
-            Duration::from_secs(3600 + 30 * 60)
+            Duration::from_mins(90)
         );
         assert_eq!(
             parse_duration("2m30s").unwrap(),
@@ -469,7 +469,7 @@ mod edge_case_tests {
     #[test]
     fn parse_days_hours_minutes_combined() {
         let d = parse_duration("1day 2h 30m").unwrap();
-        assert_eq!(d, Duration::from_secs(86400 + 2 * 3600 + 30 * 60));
+        assert_eq!(d, Duration::from_mins(1590));
     }
 }
 
@@ -557,7 +557,7 @@ mod coverage_gaps {
     #[test]
     fn serialize_500us_truncates_to_zero() {
         let h = Holder {
-            value: Duration::from_nanos(500_000),
+            value: Duration::from_micros(500),
         };
         let json = serde_json::to_value(&h).unwrap();
         assert_eq!(json["value"], 0);
@@ -741,9 +741,9 @@ mod snapshot_tests {
         let formatted: Vec<(&str, String)> = vec![
             ("zero", Duration::ZERO),
             ("half_second", Duration::from_millis(500)),
-            ("one_minute", Duration::from_secs(60)),
+            ("one_minute", Duration::from_mins(1)),
             ("one_hour_one_min_one_sec", Duration::from_secs(3661)),
-            ("one_day", Duration::from_secs(86400)),
+            ("one_day", Duration::from_hours(24)),
         ]
         .into_iter()
         .map(|(name, d)| (name, humantime::format_duration(d).to_string()))

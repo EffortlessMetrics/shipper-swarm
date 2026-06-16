@@ -29,7 +29,7 @@ pub(crate) fn build(config: &ShipperConfig, cli: CliOverrides) -> RuntimeOptions
         retry_strategy: retry.strategy,
         retry_jitter: retry.jitter,
         retry_per_error: retry.per_error,
-        verify_timeout: cli.verify_timeout.unwrap_or(Duration::from_secs(120)),
+        verify_timeout: cli.verify_timeout.unwrap_or(Duration::from_mins(2)),
         verify_poll_interval: cli.verify_poll_interval.unwrap_or(Duration::from_secs(5)),
         state_dir: cli
             .state_dir

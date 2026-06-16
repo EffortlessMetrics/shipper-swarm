@@ -49,7 +49,7 @@ mod tests {
         assert_eq!(config.verify.mode, VerifyMode::Workspace);
         assert!(config.readiness.enabled);
         assert_eq!(config.output.lines, 50);
-        assert_eq!(config.lock.timeout, Duration::from_secs(3600));
+        assert_eq!(config.lock.timeout, Duration::from_hours(1));
         assert_eq!(config.retry.max_attempts, 6);
         assert!(!config.flags.allow_dirty);
         assert!(!config.parallel.enabled);
@@ -257,14 +257,14 @@ lines = 123
                 policy: RetryPolicy::Custom,
                 max_attempts: 3,
                 base_delay: Duration::from_secs(1),
-                max_delay: Duration::from_secs(60),
+                max_delay: Duration::from_mins(1),
                 strategy: RetryStrategyType::Linear,
                 jitter: 0.2,
                 per_error: PerErrorConfig::default(),
             },
             output: OutputConfig { lines: 25 },
             lock: LockConfig {
-                timeout: Duration::from_secs(600),
+                timeout: Duration::from_mins(10),
             },
             readiness: ReadinessConfig {
                 method: ReadinessMethod::Api,
@@ -283,7 +283,7 @@ lines = 123
             retry_strategy: Some(RetryStrategyType::Constant),
             retry_jitter: Some(0.9),
             output_lines: Some(500),
-            lock_timeout: Some(Duration::from_secs(7200)),
+            lock_timeout: Some(Duration::from_hours(2)),
             state_dir: Some(PathBuf::from("cli-state")),
             readiness_method: Some(ReadinessMethod::Both),
             readiness_timeout: Some(Duration::from_secs(999)),
@@ -300,7 +300,7 @@ lines = 123
         assert_eq!(opts.retry_strategy, RetryStrategyType::Constant);
         assert!((opts.retry_jitter - 0.9).abs() < f64::EPSILON);
         assert_eq!(opts.output_lines, 500);
-        assert_eq!(opts.lock_timeout, Duration::from_secs(7200));
+        assert_eq!(opts.lock_timeout, Duration::from_hours(2));
         assert_eq!(opts.state_dir, PathBuf::from("cli-state"));
         assert_eq!(opts.readiness.method, ReadinessMethod::Both);
         assert_eq!(opts.readiness.max_total_wait, Duration::from_secs(999));
@@ -502,7 +502,7 @@ lines = 123
             readiness: ReadinessConfig {
                 enabled: true,
                 initial_delay: Duration::from_secs(10),
-                max_delay: Duration::from_secs(120),
+                max_delay: Duration::from_mins(2),
                 jitter_factor: 0.75,
                 index_path: Some(PathBuf::from("/custom/index")),
                 prefer_index: true,
@@ -513,7 +513,7 @@ lines = 123
         let opts = config.build_runtime_options(CliOverrides::default());
         // These fields are config-only (no CLI override)
         assert_eq!(opts.readiness.initial_delay, Duration::from_secs(10));
-        assert_eq!(opts.readiness.max_delay, Duration::from_secs(120));
+        assert_eq!(opts.readiness.max_delay, Duration::from_mins(2));
         assert!((opts.readiness.jitter_factor - 0.75).abs() < f64::EPSILON);
         assert_eq!(
             opts.readiness.index_path,
@@ -721,16 +721,16 @@ lines = 123
             parallel: ParallelConfig {
                 enabled: true,
                 max_concurrent: 4,
-                per_package_timeout: Duration::from_secs(1800),
+                per_package_timeout: Duration::from_mins(30),
             },
             ..ShipperConfig::default()
         };
         let cli = CliOverrides {
-            per_package_timeout: Some(Duration::from_secs(60)),
+            per_package_timeout: Some(Duration::from_mins(1)),
             ..Default::default()
         };
         let opts = config.build_runtime_options(cli);
-        assert_eq!(opts.parallel.per_package_timeout, Duration::from_secs(60));
+        assert_eq!(opts.parallel.per_package_timeout, Duration::from_mins(1));
     }
 
     // ── Encryption env_key passthrough ──────────────────────────────
@@ -827,11 +827,11 @@ base_path = "artifacts/"
         assert_eq!(config.readiness.method, ReadinessMethod::Both);
         assert_eq!(config.readiness.initial_delay, Duration::from_secs(3));
         assert_eq!(config.readiness.max_delay, Duration::from_secs(90));
-        assert_eq!(config.readiness.max_total_wait, Duration::from_secs(600));
+        assert_eq!(config.readiness.max_total_wait, Duration::from_mins(10));
         assert_eq!(config.readiness.poll_interval, Duration::from_secs(5));
         assert!((config.readiness.jitter_factor - 0.3).abs() < f64::EPSILON);
         assert_eq!(config.output.lines, 75);
-        assert_eq!(config.lock.timeout, Duration::from_secs(7200));
+        assert_eq!(config.lock.timeout, Duration::from_hours(2));
         assert_eq!(config.retry.policy, RetryPolicy::Custom);
         assert_eq!(config.retry.max_attempts, 8);
         assert_eq!(config.retry.base_delay, Duration::from_secs(3));
@@ -845,7 +845,7 @@ base_path = "artifacts/"
         assert_eq!(config.parallel.max_concurrent, 6);
         assert_eq!(
             config.parallel.per_package_timeout,
-            Duration::from_secs(2700)
+            Duration::from_mins(45)
         );
         let reg = config.registry.as_ref().unwrap();
         assert_eq!(reg.name, "my-reg");
@@ -909,7 +909,7 @@ timeout_secs = 15
     fn verify_timeout_defaults_when_not_set() {
         let config = ShipperConfig::default();
         let opts = config.build_runtime_options(CliOverrides::default());
-        assert_eq!(opts.verify_timeout, Duration::from_secs(120));
+        assert_eq!(opts.verify_timeout, Duration::from_mins(2));
         assert_eq!(opts.verify_poll_interval, Duration::from_secs(5));
     }
 
@@ -917,12 +917,12 @@ timeout_secs = 15
     fn verify_timeout_cli_override() {
         let config = ShipperConfig::default();
         let cli = CliOverrides {
-            verify_timeout: Some(Duration::from_secs(300)),
+            verify_timeout: Some(Duration::from_mins(5)),
             verify_poll_interval: Some(Duration::from_secs(10)),
             ..Default::default()
         };
         let opts = config.build_runtime_options(cli);
-        assert_eq!(opts.verify_timeout, Duration::from_secs(300));
+        assert_eq!(opts.verify_timeout, Duration::from_mins(5));
         assert_eq!(opts.verify_poll_interval, Duration::from_secs(10));
     }
 
@@ -988,7 +988,7 @@ timeout_secs = 15
                 method: ReadinessMethod::Index,
                 initial_delay: Duration::from_secs(7),
                 max_delay: Duration::from_secs(45),
-                max_total_wait: Duration::from_secs(180),
+                max_total_wait: Duration::from_mins(3),
                 poll_interval: Duration::from_secs(3),
                 jitter_factor: 0.8,
                 index_path: None,
@@ -996,13 +996,13 @@ timeout_secs = 15
             },
             output: OutputConfig { lines: 42 },
             lock: LockConfig {
-                timeout: Duration::from_secs(900),
+                timeout: Duration::from_mins(15),
             },
             retry: RetryConfig {
                 policy: RetryPolicy::Conservative,
                 max_attempts: 2,
                 base_delay: Duration::from_secs(5),
-                max_delay: Duration::from_secs(60),
+                max_delay: Duration::from_mins(1),
                 strategy: RetryStrategyType::Linear,
                 jitter: 0.15,
                 per_error: PerErrorConfig::default(),
@@ -1015,7 +1015,7 @@ timeout_secs = 15
             parallel: ParallelConfig {
                 enabled: true,
                 max_concurrent: 12,
-                per_package_timeout: Duration::from_secs(600),
+                per_package_timeout: Duration::from_mins(10),
             },
             state_dir: Some(PathBuf::from("custom-state")),
             registry: None,
@@ -1034,7 +1034,7 @@ timeout_secs = 15
         assert!(!deserialized.readiness.enabled);
         assert_eq!(deserialized.readiness.method, ReadinessMethod::Index);
         assert_eq!(deserialized.output.lines, 42);
-        assert_eq!(deserialized.lock.timeout, Duration::from_secs(900));
+        assert_eq!(deserialized.lock.timeout, Duration::from_mins(15));
         assert_eq!(deserialized.retry.policy, RetryPolicy::Conservative);
         assert_eq!(deserialized.retry.max_attempts, 2);
         assert!(deserialized.flags.allow_dirty);
@@ -1065,7 +1065,7 @@ max_delay = "1h"
 "#;
         let config2: ShipperConfig = toml::from_str(toml_str2).unwrap();
         assert_eq!(config2.retry.base_delay, Duration::from_millis(100));
-        assert_eq!(config2.retry.max_delay, Duration::from_secs(3600));
+        assert_eq!(config2.retry.max_delay, Duration::from_hours(1));
     }
 
     // ── Verify mode all variants via TOML ───────────────────────────
@@ -1229,14 +1229,14 @@ bucket = "bucket"
                 policy: RetryPolicy::Custom,
                 max_attempts: 15,
                 base_delay: Duration::from_secs(3),
-                max_delay: Duration::from_secs(180),
+                max_delay: Duration::from_mins(3),
                 strategy: RetryStrategyType::Exponential,
                 jitter: 0.6,
                 per_error: PerErrorConfig::default(),
             },
             output: OutputConfig { lines: 200 },
             lock: LockConfig {
-                timeout: Duration::from_secs(1800),
+                timeout: Duration::from_mins(30),
             },
             flags: FlagsConfig {
                 allow_dirty: true,
@@ -1260,9 +1260,9 @@ bucket = "bucket"
         // Preserved config values
         assert_eq!(opts.verify_mode, VerifyMode::Package);
         assert_eq!(opts.base_delay, Duration::from_secs(3));
-        assert_eq!(opts.max_delay, Duration::from_secs(180));
+        assert_eq!(opts.max_delay, Duration::from_mins(3));
         assert_eq!(opts.output_lines, 200);
-        assert_eq!(opts.lock_timeout, Duration::from_secs(1800));
+        assert_eq!(opts.lock_timeout, Duration::from_mins(30));
         assert!(opts.allow_dirty);
         assert!(!opts.skip_ownership_check);
         assert!(opts.strict_ownership);

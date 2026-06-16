@@ -38,7 +38,7 @@ fn custom_config() -> ShipperConfig {
         },
         output: shipper_config::OutputConfig { lines: 300 },
         lock: shipper_config::LockConfig {
-            timeout: Duration::from_secs(1_800),
+            timeout: Duration::from_mins(30),
         },
         retry: shipper_config::RetryConfig {
             policy: shipper_retry::RetryPolicy::Aggressive,
@@ -52,7 +52,7 @@ fn custom_config() -> ShipperConfig {
         parallel: ParallelConfig {
             enabled: true,
             max_concurrent: 8,
-            per_package_timeout: Duration::from_secs(60),
+            per_package_timeout: Duration::from_mins(1),
         },
         state_dir: Some(PathBuf::from("custom-state")),
         registry: None,
@@ -88,7 +88,7 @@ fn converts_config_to_runtime_contract_with_registry_overrides() {
             method: ReadinessMethod::Both,
             initial_delay: Duration::from_secs(1),
             max_delay: Duration::from_secs(45),
-            max_total_wait: Duration::from_secs(360),
+            max_total_wait: Duration::from_mins(6),
             poll_interval: Duration::from_secs(2),
             jitter_factor: 0.3,
             index_path: Some(PathBuf::from("/tmp/index")),
@@ -96,7 +96,7 @@ fn converts_config_to_runtime_contract_with_registry_overrides() {
         },
         output: shipper_config::OutputConfig { lines: 101 },
         lock: shipper_config::LockConfig {
-            timeout: Duration::from_secs(900),
+            timeout: Duration::from_mins(15),
         },
         retry: shipper_config::RetryConfig::default(),
         flags: shipper_config::FlagsConfig {
@@ -148,7 +148,7 @@ fn converts_config_to_runtime_contract_with_registry_overrides() {
     assert_eq!(runtime.webhook.url, "https://override.example/webhook");
     assert_eq!(runtime.webhook.secret.as_deref(), Some("secret2"));
     assert_eq!(runtime.webhook.timeout_secs, 20);
-    assert_eq!(runtime.lock_timeout, Duration::from_secs(900));
+    assert_eq!(runtime.lock_timeout, Duration::from_mins(15));
 }
 
 // ---------------------------------------------------------------------------
@@ -163,7 +163,7 @@ fn empty_cli_overrides_yields_all_config_file_values() {
     assert_eq!(rt.policy, PublishPolicy::Fast);
     assert_eq!(rt.verify_mode, VerifyMode::None);
     assert_eq!(rt.output_lines, 300);
-    assert_eq!(rt.lock_timeout, Duration::from_secs(1_800));
+    assert_eq!(rt.lock_timeout, Duration::from_mins(30));
     assert_eq!(rt.readiness.method, ReadinessMethod::Index);
     assert_eq!(rt.readiness.poll_interval, Duration::from_secs(7));
     assert_eq!(rt.readiness.max_total_wait, Duration::from_secs(200));
@@ -183,10 +183,10 @@ fn default_config_with_empty_overrides_yields_all_defaults() {
     assert_eq!(rt.policy, PublishPolicy::Safe);
     assert_eq!(rt.verify_mode, VerifyMode::Workspace);
     assert_eq!(rt.output_lines, 50);
-    assert_eq!(rt.lock_timeout, Duration::from_secs(3_600));
+    assert_eq!(rt.lock_timeout, Duration::from_hours(1));
     assert_eq!(rt.max_attempts, 6);
     assert_eq!(rt.base_delay, Duration::from_secs(2));
-    assert_eq!(rt.max_delay, Duration::from_secs(120));
+    assert_eq!(rt.max_delay, Duration::from_mins(2));
     assert_eq!(rt.state_dir, PathBuf::from(".shipper"));
     assert!(!rt.allow_dirty);
     assert!(!rt.skip_ownership_check);
@@ -427,10 +427,10 @@ fn parallel_max_concurrent_override() {
 #[test]
 fn parallel_per_package_timeout_override() {
     let rt = into_runtime_options(custom_config().build_runtime_options(CliOverrides {
-        per_package_timeout: Some(Duration::from_secs(300)),
+        per_package_timeout: Some(Duration::from_mins(5)),
         ..Default::default()
     }));
-    assert_eq!(rt.parallel.per_package_timeout, Duration::from_secs(300));
+    assert_eq!(rt.parallel.per_package_timeout, Duration::from_mins(5));
 }
 
 // ---------------------------------------------------------------------------
@@ -719,7 +719,7 @@ fn conservative_retry_policy_defaults_without_cli_overrides() {
 
     assert_eq!(rt.max_attempts, 3);
     assert_eq!(rt.base_delay, Duration::from_secs(5));
-    assert_eq!(rt.max_delay, Duration::from_secs(60));
+    assert_eq!(rt.max_delay, Duration::from_mins(1));
     assert_eq!(rt.retry_strategy, RetryStrategyType::Linear);
 }
 
@@ -752,18 +752,18 @@ fn custom_retry_policy_uses_explicit_config_fields() {
 #[test]
 fn verify_timeout_defaults_when_no_cli_override() {
     let rt = into_runtime_options(default_config().build_runtime_options(CliOverrides::default()));
-    assert_eq!(rt.verify_timeout, Duration::from_secs(120));
+    assert_eq!(rt.verify_timeout, Duration::from_mins(2));
     assert_eq!(rt.verify_poll_interval, Duration::from_secs(5));
 }
 
 #[test]
 fn verify_timeout_cli_override() {
     let rt = into_runtime_options(default_config().build_runtime_options(CliOverrides {
-        verify_timeout: Some(Duration::from_secs(60)),
+        verify_timeout: Some(Duration::from_mins(1)),
         verify_poll_interval: Some(Duration::from_secs(1)),
         ..Default::default()
     }));
-    assert_eq!(rt.verify_timeout, Duration::from_secs(60));
+    assert_eq!(rt.verify_timeout, Duration::from_mins(1));
     assert_eq!(rt.verify_poll_interval, Duration::from_secs(1));
 }
 
