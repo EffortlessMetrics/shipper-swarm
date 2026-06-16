@@ -577,7 +577,7 @@ proptest! {
         prop_assert_eq!(rt.policy, PublishPolicy::Safe);
         prop_assert_eq!(rt.verify_mode, VerifyMode::Workspace);
         prop_assert_eq!(rt.output_lines, 50);
-        prop_assert_eq!(rt.lock_timeout, Duration::from_secs(3_600));
+        prop_assert_eq!(rt.lock_timeout, Duration::from_hours(1));
         prop_assert_eq!(rt.max_attempts, 6);
         prop_assert!(!rt.allow_dirty);
         prop_assert!(!rt.skip_ownership_check);

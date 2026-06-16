@@ -79,7 +79,7 @@ impl RetryPolicy {
                 strategy: RetryStrategyType::Exponential,
                 max_attempts: 6,
                 base_delay: Duration::from_secs(2),
-                max_delay: Duration::from_secs(120),
+                max_delay: Duration::from_mins(2),
                 jitter: 0.5,
             },
             RetryPolicy::Aggressive => RetryStrategyConfig {
@@ -93,7 +93,7 @@ impl RetryPolicy {
                 strategy: RetryStrategyType::Linear,
                 max_attempts: 3,
                 base_delay: Duration::from_secs(5),
-                max_delay: Duration::from_secs(60),
+                max_delay: Duration::from_mins(1),
                 jitter: 0.1,
             },
             RetryPolicy::Custom => {
@@ -131,7 +131,7 @@ fn default_base_delay() -> Duration {
 }
 
 fn default_max_delay() -> Duration {
-    Duration::from_secs(120)
+    Duration::from_mins(2)
 }
 
 fn default_jitter() -> f64 {
@@ -144,7 +144,7 @@ impl Default for RetryStrategyConfig {
             strategy: RetryStrategyType::Exponential,
             max_attempts: 6,
             base_delay: Duration::from_secs(2),
-            max_delay: Duration::from_secs(120),
+            max_delay: Duration::from_mins(2),
             jitter: 0.5,
         }
     }
@@ -400,7 +400,7 @@ mod tests {
         assert_eq!(config.strategy, RetryStrategyType::Exponential);
         assert_eq!(config.max_attempts, 6);
         assert_eq!(config.base_delay, Duration::from_secs(2));
-        assert_eq!(config.max_delay, Duration::from_secs(120));
+        assert_eq!(config.max_delay, Duration::from_mins(2));
     }
 
     #[test]
@@ -418,7 +418,7 @@ mod tests {
         assert_eq!(config.strategy, RetryStrategyType::Linear);
         assert_eq!(config.max_attempts, 3);
         assert_eq!(config.base_delay, Duration::from_secs(5));
-        assert_eq!(config.max_delay, Duration::from_secs(60));
+        assert_eq!(config.max_delay, Duration::from_mins(1));
     }
 
     #[test]
@@ -426,7 +426,7 @@ mod tests {
         let config = RetryStrategyConfig {
             strategy: RetryStrategyType::Immediate,
             base_delay: Duration::from_secs(1),
-            max_delay: Duration::from_secs(60),
+            max_delay: Duration::from_mins(1),
             jitter: 0.0,
             max_attempts: 3,
         };
@@ -440,7 +440,7 @@ mod tests {
         let config = RetryStrategyConfig {
             strategy: RetryStrategyType::Exponential,
             base_delay: Duration::from_secs(1),
-            max_delay: Duration::from_secs(60),
+            max_delay: Duration::from_mins(1),
             jitter: 0.0,
             max_attempts: 10,
         };
@@ -455,7 +455,7 @@ mod tests {
         assert_eq!(calculate_delay(&config, 3), Duration::from_secs(4));
 
         // Attempt 10: should be capped at max_delay
-        assert_eq!(calculate_delay(&config, 10), Duration::from_secs(60));
+        assert_eq!(calculate_delay(&config, 10), Duration::from_mins(1));
     }
 
     #[test]
@@ -597,7 +597,7 @@ mod tests {
         let config = RetryStrategyConfig {
             strategy: RetryStrategyType::Constant,
             base_delay: Duration::from_secs(10),
-            max_delay: Duration::from_secs(60),
+            max_delay: Duration::from_mins(1),
             jitter: 0.5,
             max_attempts: 10,
         };
@@ -605,8 +605,8 @@ mod tests {
         // With jitter of 0.5, delay should be between 5s and 15s
         for _ in 0..100 {
             let delay = calculate_delay(&config, 1);
-            assert!(delay >= Duration::from_millis(5000));
-            assert!(delay <= Duration::from_millis(15000));
+            assert!(delay >= Duration::from_secs(5));
+            assert!(delay <= Duration::from_secs(15));
         }
     }
 
@@ -639,7 +639,7 @@ mod tests {
             strategy: RetryStrategyType::Exponential,
             max_attempts: 0,
             base_delay: Duration::from_secs(1),
-            max_delay: Duration::from_secs(60),
+            max_delay: Duration::from_mins(1),
             jitter: 0.0,
         });
 
@@ -652,8 +652,8 @@ mod tests {
         let executor = RetryExecutor::new(RetryStrategyConfig {
             strategy: RetryStrategyType::Exponential,
             max_attempts: 100,
-            base_delay: Duration::from_secs(60),
-            max_delay: Duration::from_secs(3600),
+            base_delay: Duration::from_mins(1),
+            max_delay: Duration::from_hours(1),
             jitter: 0.5,
         });
 
@@ -703,7 +703,7 @@ mod tests {
         let config = RetryStrategyConfig {
             strategy: RetryStrategyType::Exponential,
             base_delay: Duration::from_millis(100),
-            max_delay: Duration::from_secs(60),
+            max_delay: Duration::from_mins(1),
             jitter: 0.0,
             max_attempts: 10,
         };
@@ -722,7 +722,7 @@ mod tests {
         let config = RetryStrategyConfig {
             strategy: RetryStrategyType::Constant,
             base_delay: Duration::from_secs(10),
-            max_delay: Duration::from_secs(60),
+            max_delay: Duration::from_mins(1),
             jitter: 1.0,
             max_attempts: 10,
         };
@@ -731,7 +731,7 @@ mod tests {
         // So delay should be in [0ms, 20_000ms]
         for _ in 0..200 {
             let delay = calculate_delay(&config, 1);
-            assert!(delay <= Duration::from_millis(20_000));
+            assert!(delay <= Duration::from_secs(20));
         }
     }
 
@@ -747,7 +747,7 @@ mod tests {
             let config = RetryStrategyConfig {
                 strategy,
                 base_delay: Duration::ZERO,
-                max_delay: Duration::from_secs(60),
+                max_delay: Duration::from_mins(1),
                 jitter: 0.0,
                 max_attempts: 10,
             };
@@ -825,7 +825,7 @@ mod tests {
         let config = RetryStrategyConfig {
             strategy: RetryStrategyType::Exponential,
             base_delay: Duration::from_millis(100),
-            max_delay: Duration::from_secs(3600),
+            max_delay: Duration::from_hours(1),
             jitter: 0.0,
             max_attempts: 20,
         };
@@ -849,7 +849,7 @@ mod tests {
         let config = RetryStrategyConfig {
             strategy: RetryStrategyType::Exponential,
             base_delay: Duration::from_millis(1),
-            max_delay: Duration::from_secs(3600),
+            max_delay: Duration::from_hours(1),
             jitter: 0.0,
             max_attempts: 30,
         };
@@ -867,7 +867,7 @@ mod tests {
     #[test]
     fn test_strategy_selection_produces_distinct_delays() {
         let base = Duration::from_secs(2);
-        let max = Duration::from_secs(3600);
+        let max = Duration::from_hours(1);
         let make = |s| RetryStrategyConfig {
             strategy: s,
             base_delay: base,
@@ -914,7 +914,7 @@ mod tests {
         let config = RetryStrategyConfig {
             strategy: RetryStrategyType::Constant,
             base_delay: Duration::from_millis(750),
-            max_delay: Duration::from_secs(60),
+            max_delay: Duration::from_mins(1),
             jitter: 0.0,
             max_attempts: 100,
         };
@@ -941,7 +941,7 @@ mod tests {
             let config = RetryStrategyConfig {
                 strategy,
                 base_delay: Duration::from_secs(1),
-                max_delay: Duration::from_secs(60),
+                max_delay: Duration::from_mins(1),
                 jitter: 0.0,
                 max_attempts: 10,
             };
@@ -1051,7 +1051,7 @@ mod tests {
         let config = RetryStrategyConfig {
             strategy: RetryStrategyType::Exponential,
             base_delay: Duration::from_secs(1),
-            max_delay: Duration::from_secs(3600),
+            max_delay: Duration::from_hours(1),
             jitter: 0.3,
             max_attempts: 10,
         };
@@ -1084,7 +1084,7 @@ mod tests {
             let config = RetryStrategyConfig {
                 strategy,
                 base_delay: Duration::from_millis(500),
-                max_delay: Duration::from_secs(120),
+                max_delay: Duration::from_mins(2),
                 jitter: 0.0,
                 max_attempts: 20,
             };
@@ -1104,7 +1104,7 @@ mod tests {
         assert_eq!(cfg.strategy, RetryStrategyType::Exponential);
         assert_eq!(cfg.max_attempts, 6);
         assert_eq!(cfg.base_delay, Duration::from_secs(2));
-        assert_eq!(cfg.max_delay, Duration::from_secs(120));
+        assert_eq!(cfg.max_delay, Duration::from_mins(2));
         assert_eq!(cfg.jitter, 0.5);
     }
 
@@ -1153,7 +1153,7 @@ mod tests {
         let config = RetryStrategyConfig {
             strategy: RetryStrategyType::Exponential,
             base_delay: Duration::from_secs(1),
-            max_delay: Duration::from_secs(120),
+            max_delay: Duration::from_mins(2),
             jitter: 0.0,
             max_attempts: 200,
         };
@@ -1176,7 +1176,7 @@ mod tests {
         let config = RetryStrategyConfig {
             strategy: RetryStrategyType::Constant,
             base_delay: Duration::from_millis(100),
-            max_delay: Duration::from_secs(60),
+            max_delay: Duration::from_mins(1),
             jitter: 1.5,
             max_attempts: 10,
         };
@@ -1199,7 +1199,7 @@ mod tests {
         let config = RetryStrategyConfig {
             strategy: RetryStrategyType::Constant,
             base_delay: Duration::from_millis(100),
-            max_delay: Duration::from_secs(60),
+            max_delay: Duration::from_mins(1),
             jitter: -0.5,
             max_attempts: 10,
         };
@@ -1236,8 +1236,8 @@ mod tests {
         let executor = RetryExecutor::new(RetryStrategyConfig {
             strategy: RetryStrategyType::Constant,
             max_attempts: 100,
-            base_delay: Duration::from_secs(3600),
-            max_delay: Duration::from_secs(3600),
+            base_delay: Duration::from_hours(1),
+            max_delay: Duration::from_hours(1),
             jitter: 0.0,
         });
 
@@ -1440,7 +1440,7 @@ mod property_tests {
         ) {
             let jitter = (jitter_pct as f64) / 100.0;
             let base_delay = Duration::from_millis(base_ms);
-            let max_delay = Duration::from_secs(3600);
+            let max_delay = Duration::from_hours(1);
 
             let config = RetryStrategyConfig {
                 strategy: RetryStrategyType::Constant,
@@ -1580,7 +1580,7 @@ mod snapshot_tests {
         let config = RetryStrategyConfig {
             strategy: RetryStrategyType::Exponential,
             base_delay: Duration::from_secs(1),
-            max_delay: Duration::from_secs(60),
+            max_delay: Duration::from_mins(1),
             jitter: 0.0,
             max_attempts: 10,
         };
@@ -1640,7 +1640,7 @@ mod snapshot_tests {
         let config = RetryStrategyConfig {
             strategy: RetryStrategyType::Constant,
             base_delay: Duration::from_millis(500),
-            max_delay: Duration::from_secs(60),
+            max_delay: Duration::from_mins(1),
             jitter: 0.0,
             max_attempts: 10,
         };
@@ -1655,7 +1655,7 @@ mod snapshot_tests {
         let make = |s| RetryStrategyConfig {
             strategy: s,
             base_delay: Duration::from_secs(1),
-            max_delay: Duration::from_secs(120),
+            max_delay: Duration::from_mins(2),
             jitter: 0.0,
             max_attempts: 10,
         };

@@ -399,7 +399,7 @@ mod tests {
                 let result = LockFile::acquire_with_timeout(
                     td.path(),
                     None,
-                    Duration::from_secs(3600),
+                    Duration::from_hours(1),
                 );
                 prop_assert!(result.is_err());
                 prop_assert!(result.unwrap_err().to_string().contains("lock already held"));
@@ -486,7 +486,7 @@ mod tests {
                 let lock = LockFile::acquire_with_timeout(
                     td.path(),
                     None,
-                    Duration::from_secs(3600),
+                    Duration::from_hours(1),
                 ).expect("should replace stale lock with plan_id");
 
                 let new_info = LockFile::read_lock_info(td.path(), None).expect("read");
@@ -611,7 +611,7 @@ mod tests {
         .expect("write stale lock");
 
         // Acquire with 1 hour timeout - should succeed and remove stale lock
-        let _lock = LockFile::acquire_with_timeout(td.path(), None, Duration::from_secs(3600))
+        let _lock = LockFile::acquire_with_timeout(td.path(), None, Duration::from_hours(1))
             .expect("acquire with timeout");
 
         let info = LockFile::read_lock_info(td.path(), None).expect("read info");
@@ -627,7 +627,7 @@ mod tests {
         let _lock1 = LockFile::acquire(td.path(), None).expect("first acquire");
 
         // Try to acquire with timeout - should fail
-        let result = LockFile::acquire_with_timeout(td.path(), None, Duration::from_secs(3600));
+        let result = LockFile::acquire_with_timeout(td.path(), None, Duration::from_hours(1));
         assert!(result.is_err());
         assert!(
             result
@@ -782,7 +782,7 @@ mod tests {
         let lp = lock_path(td.path(), None);
         fs::write(&lp, "not-valid-json").expect("write corrupt");
 
-        let lock = LockFile::acquire_with_timeout(td.path(), None, Duration::from_secs(3600))
+        let lock = LockFile::acquire_with_timeout(td.path(), None, Duration::from_hours(1))
             .expect("acquire after corrupt");
         let info = LockFile::read_lock_info(td.path(), None).expect("read");
         assert_eq!(info.pid, std::process::id());
@@ -814,7 +814,7 @@ mod tests {
         };
         fs::write(&lp, serde_json::to_string(&info).expect("ser")).expect("write");
 
-        let result = LockFile::acquire_with_timeout(td.path(), None, Duration::from_secs(3600));
+        let result = LockFile::acquire_with_timeout(td.path(), None, Duration::from_hours(1));
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("lock already held"));
@@ -836,7 +836,7 @@ mod tests {
         fs::write(&lp, serde_json::to_string(&old_info).expect("ser")).expect("write");
 
         let lock =
-            LockFile::acquire_with_timeout(td.path(), Some(&root), Duration::from_secs(3600))
+            LockFile::acquire_with_timeout(td.path(), Some(&root), Duration::from_hours(1))
                 .expect("acquire stale with root");
         let info = LockFile::read_lock_info(td.path(), Some(&root)).expect("read");
         assert_eq!(info.pid, std::process::id());
@@ -959,7 +959,7 @@ mod snapshot_tests {
         // Use a real lock so the file definitely exists on disk
         let _existing = LockFile::acquire(td.path(), None).expect("seed lock");
 
-        let err = LockFile::acquire_with_timeout(td.path(), None, Duration::from_secs(86400 * 365))
+        let err = LockFile::acquire_with_timeout(td.path(), None, Duration::from_hours(8760))
             .unwrap_err();
         let msg = err.to_string();
         // The message contains the dynamic current PID/host/age, so snapshot only the stable prefix
@@ -1127,7 +1127,7 @@ mod edge_case_tests {
         };
         fs::write(&lp, serde_json::to_string(&info).unwrap()).unwrap();
 
-        let lock = LockFile::acquire_with_timeout(&nested, None, Duration::from_secs(60)).unwrap();
+        let lock = LockFile::acquire_with_timeout(&nested, None, Duration::from_mins(1)).unwrap();
         assert!(nested.exists());
         drop(lock);
     }
@@ -1181,7 +1181,7 @@ mod edge_case_tests {
                 let b = Arc::clone(&barrier);
                 std::thread::spawn(move || {
                     b.wait();
-                    LockFile::acquire_with_timeout(&dir, None, Duration::from_secs(60)).ok()
+                    LockFile::acquire_with_timeout(&dir, None, Duration::from_mins(1)).ok()
                 })
             })
             .collect();
@@ -1312,7 +1312,7 @@ mod edge_case_tests {
 
         // acquire_with_timeout should remove corrupt lock and succeed
         let lock =
-            LockFile::acquire_with_timeout(td.path(), None, Duration::from_secs(3600)).unwrap();
+            LockFile::acquire_with_timeout(td.path(), None, Duration::from_hours(1)).unwrap();
         let info = LockFile::read_lock_info(td.path(), None).unwrap();
         assert_eq!(info.pid, std::process::id());
         drop(lock);
@@ -1676,7 +1676,7 @@ mod proptest_edge_cases {
             let lock = LockFile::acquire_with_timeout(
                 &state_dir,
                 None,
-                Duration::from_secs(3600),
+                Duration::from_hours(1),
             ).expect("should recover from corrupt lock");
 
             let info = LockFile::read_lock_info(&state_dir, None).expect("read");
@@ -1839,7 +1839,7 @@ mod hardened_tests {
         fs::write(&lp, serde_json::to_string(&old).unwrap()).unwrap();
 
         let _lock =
-            LockFile::acquire_with_timeout(td.path(), None, Duration::from_secs(60)).unwrap();
+            LockFile::acquire_with_timeout(td.path(), None, Duration::from_mins(1)).unwrap();
         let info = LockFile::read_lock_info(td.path(), None).unwrap();
         assert_ne!(info.pid, 65432);
         assert_ne!(info.hostname, "old-machine");
@@ -1979,7 +1979,7 @@ mod lock_edge_case_tests {
         };
         std::fs::write(&lp, serde_json::to_string(&info).expect("ser")).expect("write");
 
-        let lock = LockFile::acquire_with_timeout(td.path(), None, Duration::from_secs(3600))
+        let lock = LockFile::acquire_with_timeout(td.path(), None, Duration::from_hours(1))
             .expect("should replace stale lock with wrong PID");
         let new_info = LockFile::read_lock_info(td.path(), None).expect("read");
         assert_eq!(new_info.pid, std::process::id());
@@ -1995,7 +1995,7 @@ mod lock_edge_case_tests {
         let lp = lock_path(td.path(), None);
         std::fs::write(&lp, r#"{"pid": 42, "hostname":"#).expect("write");
 
-        let lock = LockFile::acquire_with_timeout(td.path(), None, Duration::from_secs(3600))
+        let lock = LockFile::acquire_with_timeout(td.path(), None, Duration::from_hours(1))
             .expect("should replace corrupt lock");
         let info = LockFile::read_lock_info(td.path(), None).expect("read");
         assert_eq!(info.pid, std::process::id());
@@ -2010,7 +2010,7 @@ mod lock_edge_case_tests {
         let lp = lock_path(td.path(), None);
         std::fs::write(&lp, "").expect("write");
 
-        let lock = LockFile::acquire_with_timeout(td.path(), None, Duration::from_secs(3600))
+        let lock = LockFile::acquire_with_timeout(td.path(), None, Duration::from_hours(1))
             .expect("should replace empty lock");
         let info = LockFile::read_lock_info(td.path(), None).expect("read");
         assert_eq!(info.pid, std::process::id());

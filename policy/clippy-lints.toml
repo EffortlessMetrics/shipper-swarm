@@ -116,13 +116,14 @@ class = "boundary"
 reason = "Ban direct field access across protected seams (pending seam configuration; see docs/CLIPPY_POLICY.md)"
 since = "1.95"
 
-# ─── Planned lints (MSRV-gated) ─────────────────────────────────────────────
-
-[[planned]]
+[[active]]
 name = "clippy::duration_suboptimal_units"
 level = "warn"
-min_msrv = "1.95"
-reason = "Make durations legible. Activation deferred from #191: 204 fallout sites across 20 files (config/runtime/retry/types/lock APIs that accept user-supplied millisecond values); needs a focused cleanup PR rather than a debt entry."
+class = "style"
+reason = "Make durations legible by using the largest available unit. Activated after a focused cleanup PR reduced all 204 fallout sites (config/runtime/retry/types/lock APIs) to optimal units via `cargo clippy --fix`."
+since = "1.95"
+
+# ─── Planned lints (MSRV-gated) ─────────────────────────────────────────────
 
 # ─── Fabricated names rejected by the activation audit ──────────────────────
 #

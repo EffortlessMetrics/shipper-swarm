@@ -305,11 +305,11 @@ fn default_opts(state_dir: PathBuf) -> RuntimeOptions {
         },
         output_lines: 100,
         force: false,
-        lock_timeout: Duration::from_secs(3600),
+        lock_timeout: Duration::from_hours(1),
         parallel: shipper_types::ParallelConfig {
             enabled: true,
             max_concurrent: 4,
-            per_package_timeout: Duration::from_secs(60),
+            per_package_timeout: Duration::from_mins(1),
         },
         retry_strategy: shipper_retry::RetryStrategyType::Exponential,
         retry_jitter: 0.0,

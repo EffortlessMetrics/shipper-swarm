@@ -53,5 +53,5 @@ fn integration_executor_respects_classic_policy_defaults() {
     assert_eq!(cfg.strategy, RetryStrategyType::Exponential);
     assert_eq!(cfg.max_attempts, 6);
     assert_eq!(cfg.base_delay, Duration::from_secs(2));
-    assert_eq!(cfg.max_delay, Duration::from_secs(120));
+    assert_eq!(cfg.max_delay, Duration::from_mins(2));
 }

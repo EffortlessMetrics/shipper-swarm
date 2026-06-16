@@ -122,7 +122,7 @@ pub fn backoff_delay(
 /// After the 5-crate account burst is consumed, new crates are admitted at
 /// most once per `CRATES_IO_NEW_CRATE_WINDOW`. Source:
 /// <https://crates.io/docs/rate-limits>.
-pub const CRATES_IO_NEW_CRATE_WINDOW: Duration = Duration::from_secs(10 * 60);
+pub const CRATES_IO_NEW_CRATE_WINDOW: Duration = Duration::from_mins(10);
 
 /// How Shipper expects a registry to propagate newly published packages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -404,7 +404,7 @@ mod tests {
     fn registry_profile_aware_backoff_uses_profile_floor() {
         let d = registry_profile_aware_backoff(
             Duration::from_secs(10),
-            Duration::from_secs(120),
+            Duration::from_mins(2),
             1,
             RetryStrategyType::Exponential,
             0.0,
@@ -424,7 +424,7 @@ mod tests {
         );
         assert_eq!(
             retry_after_delay("< retry-after: \"120\""),
-            Some(Duration::from_secs(120))
+            Some(Duration::from_mins(2))
         );
     }
 
@@ -436,7 +436,7 @@ mod tests {
 
         assert_eq!(
             retry_after_delay_at("Retry-After: Wed, 21 Oct 2015 07:28:00 GMT", now),
-            Some(Duration::from_secs(60))
+            Some(Duration::from_mins(1))
         );
     }
 
@@ -464,7 +464,7 @@ mod tests {
     fn registry_profile_aware_backoff_honors_retry_after_floor() {
         let d = registry_profile_aware_backoff(
             Duration::from_secs(10),
-            Duration::from_secs(120),
+            Duration::from_mins(2),
             1,
             RetryStrategyType::Exponential,
             0.0,
@@ -480,7 +480,7 @@ mod tests {
     fn registry_profile_aware_backoff_uses_larger_floor() {
         let d = registry_profile_aware_backoff(
             Duration::from_secs(10),
-            Duration::from_secs(120),
+            Duration::from_mins(2),
             1,
             RetryStrategyType::Exponential,
             0.0,
@@ -496,7 +496,7 @@ mod tests {
     fn unknown_registry_profile_keeps_generic_backoff() {
         let d = registry_profile_aware_backoff(
             Duration::from_secs(10),
-            Duration::from_secs(120),
+            Duration::from_mins(2),
             1,
             RetryStrategyType::Exponential,
             0.0,
@@ -513,7 +513,7 @@ mod tests {
         let short = Duration::from_secs(10);
         let d = registry_aware_backoff(
             short,
-            Duration::from_secs(120),
+            Duration::from_mins(2),
             1,
             RetryStrategyType::Exponential,
             0.0,
@@ -532,7 +532,7 @@ mod tests {
         // Existing crate hitting a 429 uses the higher per-minute budget;
         // Shipper should NOT over-extend to the 10-min new-crate window.
         let base = Duration::from_secs(2);
-        let max = Duration::from_secs(120);
+        let max = Duration::from_mins(2);
         let d = registry_aware_backoff(
             base,
             max,
@@ -554,7 +554,7 @@ mod tests {
         // New crate hit a non-rate-limit retryable (network blip); we should
         // NOT wait 10 min for a transient network issue.
         let base = Duration::from_secs(2);
-        let max = Duration::from_secs(120);
+        let max = Duration::from_mins(2);
         let d = registry_aware_backoff(
             base,
             max,
@@ -575,8 +575,8 @@ mod tests {
     fn registry_aware_backoff_respects_longer_generic_when_it_exceeds_window() {
         // If the generic exponential delay is already >= 10 min, don't floor
         // downward — use whichever is larger.
-        let base = Duration::from_secs(60 * 20); // 20 min
-        let max = Duration::from_secs(60 * 30);
+        let base = Duration::from_mins(20); // 20 min
+        let max = Duration::from_mins(30);
         let d = registry_aware_backoff(base, max, 1, RetryStrategyType::Constant, 0.0, true, "429");
         assert!(
             d >= base,
@@ -1038,7 +1038,7 @@ mod tests {
     #[test]
     fn backoff_exponential_without_jitter_doubles() {
         let base = Duration::from_millis(100);
-        let max = Duration::from_secs(60);
+        let max = Duration::from_mins(1);
         let d1 = backoff_delay(
             base,
             max,
@@ -1103,7 +1103,7 @@ mod tests {
     #[test]
     fn backoff_high_attempt_does_not_overflow() {
         let base = Duration::from_millis(100);
-        let max = Duration::from_secs(60);
+        let max = Duration::from_mins(1);
         // Very high attempt number should not panic
         let d = backoff_delay(
             base,
@@ -1551,7 +1551,7 @@ mod tests {
                 _ => shipper_retry::RetryStrategyType::Constant,
             };
             let base = Duration::from_millis(100);
-            let max = Duration::from_secs(60);
+            let max = Duration::from_mins(1);
             let d = backoff_delay(base, max, attempt, strategy, 0.5);
             let upper = max + max.mul_f64(0.5);
             prop_assert!(d <= upper, "large attempt overflow: {d:?} > {upper:?}");
@@ -1731,7 +1731,7 @@ mod tests {
                 strategy: shipper_retry::RetryStrategyType::Exponential,
                 max_attempts: 5,
                 base_delay: Duration::from_secs(2),
-                max_delay: Duration::from_secs(120),
+                max_delay: Duration::from_mins(2),
                 jitter: 0.5,
             };
             insta::assert_yaml_snapshot!(config);

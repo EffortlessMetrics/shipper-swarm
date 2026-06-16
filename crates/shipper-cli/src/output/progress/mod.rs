@@ -204,7 +204,7 @@ impl ProgressReporter {
 
         if self.is_tty {
             let start = Instant::now();
-            let tick = Duration::from_millis(1000);
+            let tick = Duration::from_secs(1);
             // Tick down once per second. `remaining == 0` ends the loop; we
             // still call `set_status` once on exit to show "retrying now".
             loop {

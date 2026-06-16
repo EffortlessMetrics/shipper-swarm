@@ -69,7 +69,7 @@ mod tests {
             retry_strategy: shipper_retry::RetryStrategyType::Exponential,
             retry_jitter: 0.25,
             retry_per_error: shipper_retry::PerErrorConfig::default(),
-            verify_timeout: Duration::from_secs(120),
+            verify_timeout: Duration::from_mins(2),
             verify_poll_interval: Duration::from_secs(3),
             state_dir: PathBuf::from("target/.shipper-tests"),
             force_resume: false,
@@ -80,7 +80,7 @@ mod tests {
                 method: ReadinessMethod::Both,
                 initial_delay: Duration::from_millis(150),
                 max_delay: Duration::from_secs(30),
-                max_total_wait: Duration::from_secs(300),
+                max_total_wait: Duration::from_mins(5),
                 poll_interval: Duration::from_secs(3),
                 jitter_factor: 0.4,
                 index_path: Some(PathBuf::from("ci-index")),
@@ -88,11 +88,11 @@ mod tests {
             },
             output_lines: 777,
             force: true,
-            lock_timeout: Duration::from_secs(4_800),
+            lock_timeout: Duration::from_mins(80),
             parallel: ParallelConfig {
                 enabled: true,
                 max_concurrent: 6,
-                per_package_timeout: Duration::from_secs(180),
+                per_package_timeout: Duration::from_mins(3),
             },
             webhook: WebhookConfig {
                 url: "https://example.internal/webhook".to_string(),
@@ -172,7 +172,7 @@ mod tests {
 
         assert!(converted.enabled);
         assert_eq!(converted.max_concurrent, 6);
-        assert_eq!(converted.per_package_timeout, Duration::from_secs(180));
+        assert_eq!(converted.per_package_timeout, Duration::from_mins(3));
     }
 
     #[test]
@@ -264,7 +264,7 @@ mod tests {
                     method: readiness_method,
                     initial_delay: Duration::from_millis(10),
                     max_delay: Duration::from_secs(1),
-                    max_total_wait: Duration::from_secs(60),
+                    max_total_wait: Duration::from_mins(1),
                     poll_interval: Duration::from_millis(250),
                     jitter_factor: 0.4,
                     index_path: None,
@@ -272,11 +272,11 @@ mod tests {
                 },
                 output_lines,
                 force: false,
-                lock_timeout: Duration::from_secs(300),
+                lock_timeout: Duration::from_mins(5),
                 parallel: ParallelConfig {
                     enabled: true,
                     max_concurrent: 4,
-                    per_package_timeout: Duration::from_secs(120),
+                    per_package_timeout: Duration::from_mins(2),
                 },
                 webhook,
                 encryption,
@@ -876,11 +876,11 @@ mod tests {
                 no_verify: false,
                 max_attempts: 3,
                 base_delay: Duration::from_secs(5),
-                max_delay: Duration::from_secs(300),
+                max_delay: Duration::from_mins(5),
                 retry_strategy: shipper_retry::RetryStrategyType::Exponential,
                 retry_jitter: 0.25,
                 retry_per_error: shipper_retry::PerErrorConfig::default(),
-                verify_timeout: Duration::from_secs(60),
+                verify_timeout: Duration::from_mins(1),
                 verify_poll_interval: Duration::from_secs(5),
                 state_dir: PathBuf::from(".shipper"),
                 force_resume: false,
@@ -890,8 +890,8 @@ mod tests {
                     enabled: false,
                     method: ReadinessMethod::Api,
                     initial_delay: Duration::from_millis(100),
-                    max_delay: Duration::from_secs(60),
-                    max_total_wait: Duration::from_secs(300),
+                    max_delay: Duration::from_mins(1),
+                    max_total_wait: Duration::from_mins(5),
                     poll_interval: Duration::from_secs(5),
                     jitter_factor: 0.25,
                     prefer_index: false,
@@ -903,7 +903,7 @@ mod tests {
                 parallel: ParallelConfig {
                     enabled: false,
                     max_concurrent: 4,
-                    per_package_timeout: Duration::from_secs(120),
+                    per_package_timeout: Duration::from_mins(2),
                 },
                 webhook: WebhookConfig {
                     url: String::new(),
@@ -985,8 +985,8 @@ mod tests {
                 enabled: true,
                 method: ReadinessMethod::Both,
                 initial_delay: Duration::from_millis(500),
-                max_delay: Duration::from_secs(120),
-                max_total_wait: Duration::from_secs(600),
+                max_delay: Duration::from_mins(2),
+                max_total_wait: Duration::from_mins(10),
                 poll_interval: Duration::from_secs(10),
                 jitter_factor: 0.5,
                 prefer_index: true,
@@ -1002,9 +1002,9 @@ mod tests {
             cfg.parallel = ParallelConfig {
                 enabled: true,
                 max_concurrent: 16,
-                per_package_timeout: Duration::from_secs(3600),
+                per_package_timeout: Duration::from_hours(1),
             };
-            cfg.lock_timeout = Duration::from_secs(7200);
+            cfg.lock_timeout = Duration::from_hours(2);
             let converted = into_runtime_options(cfg);
             assert_debug_snapshot!(converted);
         }
@@ -1077,8 +1077,8 @@ mod tests {
                 enabled: true,
                 method: ReadinessMethod::Both,
                 initial_delay: Duration::from_secs(1),
-                max_delay: Duration::from_secs(120),
-                max_total_wait: Duration::from_secs(600),
+                max_delay: Duration::from_mins(2),
+                max_total_wait: Duration::from_mins(10),
                 poll_interval: Duration::from_secs(5),
                 jitter_factor: 0.5,
                 prefer_index: true,
@@ -1217,11 +1217,11 @@ mod tests {
                 no_verify: false,
                 max_attempts: 3,
                 base_delay: Duration::from_secs(1),
-                max_delay: Duration::from_secs(60),
+                max_delay: Duration::from_mins(1),
                 retry_strategy: shipper_retry::RetryStrategyType::Exponential,
                 retry_jitter: 0.25,
                 retry_per_error: shipper_retry::PerErrorConfig::default(),
-                verify_timeout: Duration::from_secs(60),
+                verify_timeout: Duration::from_mins(1),
                 verify_poll_interval: Duration::from_secs(5),
                 state_dir: PathBuf::from(".shipper"),
                 force_resume: false,
@@ -1230,7 +1230,7 @@ mod tests {
                 readiness: ReadinessConfig::default(),
                 output_lines: 50,
                 force: false,
-                lock_timeout: Duration::from_secs(3600),
+                lock_timeout: Duration::from_hours(1),
                 parallel: ParallelConfig::default(),
                 webhook: WebhookConfig::default(),
                 encryption: EncryptionConfig::default(),
@@ -1323,7 +1323,7 @@ mod tests {
                 method: ReadinessMethod::Index,
                 initial_delay: Duration::from_millis(200),
                 max_delay: Duration::from_secs(15),
-                max_total_wait: Duration::from_secs(120),
+                max_total_wait: Duration::from_mins(2),
                 poll_interval: Duration::from_secs(2),
                 jitter_factor: 0.1,
                 index_path: None,
@@ -1347,14 +1347,14 @@ mod tests {
             opts.parallel = ParallelConfig {
                 enabled: true,
                 max_concurrent: 12,
-                per_package_timeout: Duration::from_secs(600),
+                per_package_timeout: Duration::from_mins(10),
             };
             let converted = into_runtime_options(opts);
             assert!(converted.parallel.enabled);
             assert_eq!(converted.parallel.max_concurrent, 12);
             assert_eq!(
                 converted.parallel.per_package_timeout,
-                Duration::from_secs(600)
+                Duration::from_mins(10)
             );
         }
 
@@ -1404,11 +1404,11 @@ mod tests {
                 no_verify: false,
                 max_attempts: 5,
                 base_delay: Duration::from_secs(2),
-                max_delay: Duration::from_secs(60),
+                max_delay: Duration::from_mins(1),
                 retry_strategy: shipper_retry::RetryStrategyType::Exponential,
                 retry_jitter: 0.25,
                 retry_per_error: shipper_retry::PerErrorConfig::default(),
-                verify_timeout: Duration::from_secs(120),
+                verify_timeout: Duration::from_mins(2),
                 verify_poll_interval: Duration::from_secs(5),
                 state_dir: PathBuf::from(".shipper"),
                 force_resume: false,
@@ -1417,7 +1417,7 @@ mod tests {
                 readiness: ReadinessConfig::default(),
                 output_lines: 50,
                 force: false,
-                lock_timeout: Duration::from_secs(3600),
+                lock_timeout: Duration::from_hours(1),
                 parallel: ParallelConfig::default(),
                 webhook: WebhookConfig::default(),
                 encryption: EncryptionConfig::default(),

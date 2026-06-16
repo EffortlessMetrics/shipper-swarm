@@ -489,7 +489,7 @@ mod tests {
         let handle = thread::spawn(move || {
             let mut workers: Vec<thread::JoinHandle<()>> = Vec::with_capacity(request_count);
             for _ in 0..request_count {
-                match server.recv_timeout(Duration::from_secs(60)) {
+                match server.recv_timeout(Duration::from_mins(1)) {
                     Ok(Some(req)) => {
                         let handler = handler.clone();
                         workers.push(thread::spawn(move || handler(req)));
@@ -695,8 +695,8 @@ mod tests {
             enabled: false,
             method: ReadinessMethod::Api,
             initial_delay: Duration::from_secs(10),
-            max_delay: Duration::from_secs(60),
-            max_total_wait: Duration::from_secs(300),
+            max_delay: Duration::from_mins(1),
+            max_total_wait: Duration::from_mins(5),
             poll_interval: Duration::from_secs(2),
             jitter_factor: 0.5,
             index_path: None,
@@ -3138,11 +3138,11 @@ mod tests {
         // u32::MAX attempt should not panic due to saturating arithmetic
         let delay = cli.calculate_backoff_delay(
             Duration::from_millis(100),
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             u32::MAX,
             0.0,
         );
-        assert!(delay <= Duration::from_secs(60));
+        assert!(delay <= Duration::from_mins(1));
     }
 
     #[test]
