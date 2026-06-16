@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Post-0.4.0 release cleanup. Resolves carry-over items flagged in the
+Post-0.4.0 release cleanup. Resolves the carry-over items flagged in the
 0.4.0 readiness evidence packet and CHANGELOG.
 
 ### Fixed
@@ -23,6 +23,13 @@ Post-0.4.0 release cleanup. Resolves carry-over items flagged in the
   carries `#[serial]`, bringing it into the same serialization group as the
   engine integration tests that share the `SHIPPER_GIT_BIN` environment
   variable.
+- **No-panic baseline at zero.** The final 8 production panic sites (inline
+  `.lock().unwrap()` in `publish.rs`, `receipt["k"]` JSON indexing in
+  `execution_state/mod.rs`, `.expect()` invariants in `plan/graph.rs` and
+  `plan/assembly.rs`) converted to panic-free idioms (`let-else`/`map_err`,
+  `Map::insert`, `ok_or_else`). The no-panic baseline is now empty
+  (`production_sites=0`), achieving the policy goal in
+  `docs/NO_PANIC_POLICY.md`.
 
 ### Changed
 
@@ -31,6 +38,16 @@ Post-0.4.0 release cleanup. Resolves carry-over items flagged in the
   (behavior-preserving exact aliases), and the lint moved from `[[planned]]` →
   `[[active]]` in `policy/clippy-lints.toml`. Closes the last planned lint from
   the #191 Clippy ratchet rollout and the 0.4.0 readiness carry-over.
+
+### Resolved carry-over
+
+- **CI lane routing.** The readiness doc's "CI lane routing cleanup remains
+  carry-over" referred to the pre-routing state. The routed Rust-small PR gate
+  (`em-ci-routed-rust.yml`, with self-hosted `CPX42 → CX43 → CX53` runner
+  ordering and explicit GitHub-hosted fallback control) shipped during the 0.4.0
+  cycle. The remaining work is "further CI cost routing" — optimization
+  candidates documented as "Routing Follow-Ups" in
+  `docs/ci/test-evidence-lanes.md`, not unresolved cleanup.
 
 ## [0.4.0] - 2026-05-20
 
