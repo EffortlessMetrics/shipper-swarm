@@ -188,6 +188,31 @@ for the migration history.
 
 If a release is interrupted, manually trigger the resume workflow (a `workflow_dispatch` with `mode: resume` and `artifact_run_id: <failed run id>`) — or copy the resume job from this repo's `.github/workflows/release.yml`.
 
+### Exit codes
+
+`shipper publish` and `shipper resume` use a structured exit-code vocabulary so CI can distinguish outcomes:
+
+| Code | Meaning | CI action |
+|-----:|---------|-----------|
+| 0 | All packages published/skipped | Proceed |
+| 1 | General failure (config error, preflight failure, complete publish failure) | Alert / investigate |
+| 2 | Partial publish failure — some packages published, some failed | Trigger resume automatically |
+
+To auto-resume on partial failure:
+
+```yaml
+- name: Publish
+  run: shipper publish
+  continue-on-error: true
+  id: publish
+
+- name: Auto-resume on partial failure
+  if: steps.publish.outputs.exit-code == '2'
+  run: shipper resume
+```
+
+The `--format json` envelope also carries `execution_result` (`"success"`, `"partial_failure"`, `"complete_failure"`) for programmatic gating without parsing exit codes.
+
 ## Generate a template
 
 ```bash

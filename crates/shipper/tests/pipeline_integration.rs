@@ -1,6 +1,6 @@
 //! Pipeline integration tests for cross-module flows.
 //!
-//! Covers: config → plan → engine pipeline, state persistence → resume →
+//! Covers: config â†’ plan â†’ engine pipeline, state persistence â†’ resume â†’
 //! completion, error propagation across module boundaries, lock contention
 //! scenarios, event logging through the full publish pipeline, and receipt
 //! generation validation.
@@ -135,11 +135,12 @@ fn make_receipt(plan_id: &str, pkgs: &[(&str, &str, PackageState)]) -> shipper::
             arch: "x86_64".to_string(),
         },
         auth_evidence: None,
+        execution_result: ExecutionResult::Success,
     }
 }
 
 // ===========================================================================
-// 1. Config → Plan → State → Receipt end-to-end pipeline
+// 1. Config â†’ Plan â†’ State â†’ Receipt end-to-end pipeline
 // ===========================================================================
 
 #[test]
@@ -236,7 +237,7 @@ fn config_plan_state_receipt_end_to_end_pipeline() {
 }
 
 // ===========================================================================
-// 2. State persistence → Resume with failed → Re-publish → Completion
+// 2. State persistence â†’ Resume with failed â†’ Re-publish â†’ Completion
 // ===========================================================================
 
 #[test]
@@ -307,7 +308,7 @@ fn state_resume_from_partial_failure_to_completion() {
 }
 
 // ===========================================================================
-// 3. Error propagation: registry timeout → state reflects failure
+// 3. Error propagation: registry timeout â†’ state reflects failure
 // ===========================================================================
 
 #[test]
@@ -438,7 +439,7 @@ fn lock_stale_timeout_allows_reacquire() {
     {
         let mut lock = shipper_core::lock::LockFile::acquire(&state_dir, None).expect("acquire");
         lock.set_plan_id("stale-plan").expect("set plan_id");
-        // Intentionally don't release — lock file remains but process holds it
+        // Intentionally don't release â€” lock file remains but process holds it
         // For testing, we manually write a stale lock file
         lock.release().expect("release");
     }
@@ -608,13 +609,13 @@ fn event_log_complete_pipeline_with_all_phases() {
 
     // Verify per-package filtering
     let core_events = loaded.events_for_package("core@0.1.0");
-    assert_eq!(core_events.len(), 7); // ownership + started + attempted + published + readiness×3
+    assert_eq!(core_events.len(), 7); // ownership + started + attempted + published + readinessÃ—3
 
     let app_events = loaded.events_for_package("app@0.1.0");
     assert_eq!(app_events.len(), 2); // started + failed
 
     let global = loaded.events_for_package("all");
-    assert_eq!(global.len(), 6); // preflight×3 + plan + exec_start + exec_finish
+    assert_eq!(global.len(), 6); // preflightÃ—3 + plan + exec_start + exec_finish
 }
 
 // ===========================================================================
@@ -690,6 +691,7 @@ fn receipt_with_full_evidence_roundtrips() {
             arch: "x86_64".to_string(),
         },
         auth_evidence: None,
+        execution_result: ExecutionResult::Success,
     };
 
     state::write_receipt(&state_dir, &receipt).expect("write receipt");
@@ -742,6 +744,7 @@ fn receipt_with_git_context_roundtrips() {
             arch: "x86_64".to_string(),
         },
         auth_evidence: None,
+        execution_result: ExecutionResult::Success,
     };
 
     state::write_receipt(&state_dir, &receipt).expect("write receipt");
@@ -757,7 +760,7 @@ fn receipt_with_git_context_roundtrips() {
 }
 
 // ===========================================================================
-// 9. Lock → state → events → receipt: full publish simulation
+// 9. Lock â†’ state â†’ events â†’ receipt: full publish simulation
 // ===========================================================================
 
 #[test]
@@ -867,7 +870,7 @@ fn lock_state_events_receipt_full_simulation() {
 }
 
 // ===========================================================================
-// 10. Config → Plan → Registry check pipeline with mock
+// 10. Config â†’ Plan â†’ Registry check pipeline with mock
 // ===========================================================================
 
 #[test]
@@ -1020,7 +1023,7 @@ fn file_store_state_events_receipt_lifecycle() {
 }
 
 // ===========================================================================
-// 12. Ambiguous package state → Resume → Resolution
+// 12. Ambiguous package state â†’ Resume â†’ Resolution
 // ===========================================================================
 
 #[test]
@@ -1058,7 +1061,7 @@ fn ambiguous_state_resume_and_resolution() {
         "app should be Ambiguous"
     );
 
-    // Mock registry says it's actually published → resolve as Published
+    // Mock registry says it's actually published â†’ resolve as Published
     let server = tiny_http::Server::http("127.0.0.1:0").expect("start server");
     let addr = server.server_addr().to_ip().expect("addr");
     let api_base = format!("http://{}:{}", addr.ip(), addr.port());
@@ -1081,7 +1084,7 @@ fn ambiguous_state_resume_and_resolution() {
     let exists = client.version_exists("app", "0.1.0").expect("check");
     assert!(exists, "registry says app is published");
 
-    // Resolve ambiguous → published in state
+    // Resolve ambiguous â†’ published in state
     let mut resolved = loaded;
     if let Some(app) = resolved.packages.get_mut("app@0.1.0") {
         app.state = PackageState::Published;
@@ -1190,7 +1193,7 @@ core = { path = "../core", version = "0.2.0" }
 }
 
 // ===========================================================================
-// 15. Full pipeline: plan → preflight events → publish → verify → receipt
+// 15. Full pipeline: plan â†’ preflight events â†’ publish â†’ verify â†’ receipt
 // ===========================================================================
 
 #[test]
@@ -1308,7 +1311,7 @@ fn full_pipeline_plan_preflight_publish_verify_receipt() {
     let events_path = shipper::state::events::events_path(&state_dir);
     log.write_to_file(&events_path).expect("write events");
 
-    // Update state → all published
+    // Update state â†’ all published
     let mut loaded = state::load_state(&state_dir)
         .expect("load")
         .expect("exists");
@@ -1376,6 +1379,7 @@ fn full_pipeline_plan_preflight_publish_verify_receipt() {
             arch: "x86_64".to_string(),
         },
         auth_evidence: None,
+        execution_result: ExecutionResult::Success,
     };
     state::write_receipt(&state_dir, &receipt).expect("write receipt");
 
@@ -1500,7 +1504,7 @@ fn resume_from_uploaded_state_after_interruption() {
     let plan_id = "interrupt-resume";
 
     // Simulate: core fully published, app uploaded (cargo publish succeeded
-    // but readiness not yet verified — simulates interruption after upload)
+    // but readiness not yet verified â€” simulates interruption after upload)
     let initial = make_state(
         plan_id,
         &[
@@ -1780,6 +1784,7 @@ fn receipt_fields_populated_for_mixed_outcomes() {
             arch: "x86_64".to_string(),
         },
         auth_evidence: None,
+        execution_result: ExecutionResult::Success,
     };
 
     state::write_receipt(&state_dir, &receipt).expect("write receipt");
@@ -1811,7 +1816,7 @@ fn receipt_fields_populated_for_mixed_outcomes() {
 }
 
 // ===========================================================================
-// 21. Lock acquire → publish state → release lifecycle
+// 21. Lock acquire â†’ publish state â†’ release lifecycle
 // ===========================================================================
 
 #[test]
@@ -1975,7 +1980,7 @@ fn file_store_clear_removes_all_artifacts() {
 }
 
 // ===========================================================================
-// 25. Plan → levels grouping for parallel engine
+// 25. Plan â†’ levels grouping for parallel engine
 // ===========================================================================
 
 #[test]
@@ -2095,7 +2100,7 @@ fn event_log_package_filtering_is_exact() {
 }
 
 // ===========================================================================
-// 28. Registry 404 → mark as new crate (not published)
+// 28. Registry 404 â†’ mark as new crate (not published)
 // ===========================================================================
 
 #[test]

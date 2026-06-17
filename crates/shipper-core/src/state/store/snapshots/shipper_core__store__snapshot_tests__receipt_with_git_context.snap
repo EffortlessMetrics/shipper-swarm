@@ -1,5 +1,5 @@
 ---
-source: crates/shipper-store/src/lib.rs
+source: crates/shipper-core/src/state/store/snapshot_tests.rs
 expression: json
 ---
 {
@@ -42,5 +42,6 @@ expression: json
     "rust_version": "1.82.0",
     "os": "linux",
     "arch": "x86_64"
-  }
+  },
+  "execution_result": "success"
 }

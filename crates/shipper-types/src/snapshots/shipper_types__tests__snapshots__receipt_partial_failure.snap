@@ -91,3 +91,4 @@ environment:
   rust_version: 1.82.0
   os: linux
   arch: x86_64
+execution_result: success

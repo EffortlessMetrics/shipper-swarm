@@ -70,6 +70,7 @@ fn sample_receipt() -> Receipt {
             arch: "x86_64".to_string(),
         },
         auth_evidence: None,
+        execution_result: crate::types::ExecutionResult::Success,
     }
 }
 
@@ -527,7 +528,7 @@ fn clear_state_does_not_remove_receipt_file() {
     assert!(receipt_path(&dir).exists());
 }
 
-// ── Persistence double-roundtrip ────────────────────────────────
+// â”€â”€ Persistence double-roundtrip â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[test]
 fn state_double_save_produces_identical_json() {
@@ -542,7 +543,10 @@ fn state_double_save_produces_identical_json() {
 
     let json1 = fs::read_to_string(state_path(&dir1)).expect("read first");
     let json2 = fs::read_to_string(state_path(&dir2)).expect("read second");
-    assert_eq!(json1, json2, "save→load→save must produce identical JSON");
+    assert_eq!(
+        json1, json2,
+        "saveâ†’loadâ†’save must produce identical JSON"
+    );
 }
 
 #[test]
@@ -595,10 +599,13 @@ fn receipt_double_save_produces_identical_json() {
 
     let json1 = fs::read_to_string(receipt_path(&dir1)).expect("read first");
     let json2 = fs::read_to_string(receipt_path(&dir2)).expect("read second");
-    assert_eq!(json1, json2, "write→load→write must produce identical JSON");
+    assert_eq!(
+        json1, json2,
+        "writeâ†’loadâ†’write must produce identical JSON"
+    );
 }
 
-// ── State lifecycle transitions ─────────────────────────────────
+// â”€â”€ State lifecycle transitions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[test]
 fn state_lifecycle_pending_uploaded_published() {
@@ -635,7 +642,7 @@ fn state_lifecycle_pending_uploaded_published() {
         PackageState::Pending
     ));
 
-    // Pending → Uploaded
+    // Pending â†’ Uploaded
     state.packages.get_mut("crate-a@1.0.0").unwrap().state = PackageState::Uploaded;
     state.packages.get_mut("crate-a@1.0.0").unwrap().attempts = 1;
     save_state(&dir, &state).expect("save uploaded");
@@ -645,7 +652,7 @@ fn state_lifecycle_pending_uploaded_published() {
         PackageState::Uploaded
     ));
 
-    // Uploaded → Published
+    // Uploaded â†’ Published
     state.packages.get_mut("crate-a@1.0.0").unwrap().state = PackageState::Published;
     save_state(&dir, &state).expect("save published");
     let loaded = load_state(&dir).expect("load").expect("exists");
@@ -717,7 +724,7 @@ fn state_all_error_classes_persist() {
     }
 }
 
-// ── Edge cases ──────────────────────────────────────────────────
+// â”€â”€ Edge cases â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[test]
 fn state_empty_packages_roundtrip() {
@@ -840,7 +847,7 @@ fn state_with_special_chars_in_plan_id() {
         "plan with spaces",
         "plan/with/slashes",
         "plan\"with\"quotes",
-        "план-юникод",
+        "Ð¿Ð»Ð°Ð½-ÑŽÐ½Ð¸ÐºÐ¾Ð´",
         "\u{1f680}release-v1",
     ];
 
@@ -914,7 +921,7 @@ fn receipt_with_high_attempt_count() {
     assert_eq!(loaded.packages[0].duration_ms, 999_999);
 }
 
-// ── Insta snapshot helpers ──────────────────────────────────────
+// â”€â”€ Insta snapshot helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 use chrono::TimeZone;
 
@@ -1013,10 +1020,11 @@ fn deterministic_receipt() -> Receipt {
             arch: "x86_64".to_string(),
         },
         auth_evidence: None,
+        execution_result: crate::types::ExecutionResult::Success,
     }
 }
 
-// ── Snapshot: state JSON format ─────────────────────────────────
+// â”€â”€ Snapshot: state JSON format â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[test]
 fn snapshot_state_json_format() {
@@ -1025,7 +1033,7 @@ fn snapshot_state_json_format() {
     insta::assert_snapshot!("state_json_format", json);
 }
 
-// ── Snapshot: receipt JSON format ────────────────────────────────
+// â”€â”€ Snapshot: receipt JSON format â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[test]
 fn snapshot_receipt_json_format() {
@@ -1034,14 +1042,14 @@ fn snapshot_receipt_json_format() {
     insta::assert_snapshot!("receipt_json_format", json);
 }
 
-// ── Snapshot: state transitions ─────────────────────────────────
+// â”€â”€ Snapshot: state transitions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[test]
 fn snapshot_state_transition_pending_to_published() {
     let fixed = Utc.with_ymd_and_hms(2025, 1, 15, 12, 0, 0).unwrap();
     let mut state = deterministic_state();
 
-    // Transition alpha from Pending → Published
+    // Transition alpha from Pending â†’ Published
     if let Some(pkg) = state.packages.get_mut("alpha@0.1.0") {
         pkg.state = PackageState::Published;
         pkg.attempts = 1;
@@ -1058,7 +1066,7 @@ fn snapshot_state_transition_pending_to_failed() {
     let fixed = Utc.with_ymd_and_hms(2025, 1, 15, 12, 0, 0).unwrap();
     let mut state = deterministic_state();
 
-    // Transition alpha from Pending → Failed
+    // Transition alpha from Pending â†’ Failed
     if let Some(pkg) = state.packages.get_mut("alpha@0.1.0") {
         pkg.state = PackageState::Failed {
             class: shipper_types::ErrorClass::Permanent,
@@ -1078,7 +1086,7 @@ fn snapshot_state_transition_pending_to_skipped() {
     let fixed = Utc.with_ymd_and_hms(2025, 1, 15, 12, 0, 0).unwrap();
     let mut state = deterministic_state();
 
-    // Transition alpha from Pending → Skipped
+    // Transition alpha from Pending â†’ Skipped
     if let Some(pkg) = state.packages.get_mut("alpha@0.1.0") {
         pkg.state = PackageState::Skipped {
             reason: "already published".to_string(),
@@ -1092,7 +1100,7 @@ fn snapshot_state_transition_pending_to_skipped() {
     insta::assert_snapshot!("state_transition_pending_to_skipped", json);
 }
 
-// ── Snapshot: state with all PackageState variants ─────────────
+// â”€â”€ Snapshot: state with all PackageState variants â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[test]
 fn snapshot_state_all_lifecycle_variants() {
@@ -1180,7 +1188,7 @@ fn snapshot_state_all_lifecycle_variants() {
     insta::assert_snapshot!("state_all_lifecycle_variants", json);
 }
 
-// ── Snapshot: receipt with all packages failed ───────────────────
+// â”€â”€ Snapshot: receipt with all packages failed â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[test]
 fn snapshot_receipt_all_failed() {
@@ -1243,13 +1251,14 @@ fn snapshot_receipt_all_failed() {
             arch: "x86_64".to_string(),
         },
         auth_evidence: None,
+        execution_result: crate::types::ExecutionResult::Success,
     };
 
     let json = serde_json::to_string_pretty(&receipt).expect("serialize");
     insta::assert_snapshot!("receipt_all_failed", json);
 }
 
-// ── Property-based tests (proptest) ─────────────────────────────
+// â”€â”€ Property-based tests (proptest) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 mod proptests {
     use super::*;
@@ -1360,6 +1369,7 @@ mod proptests {
                     arch: "x86_64".to_string(),
                 },
                 auth_evidence: None,
+                execution_result: crate::types::ExecutionResult::Success,
             })
     }
 
@@ -1393,7 +1403,7 @@ mod proptests {
             })
     }
 
-    // ── State serialization roundtrip ───────────────────────────
+    // â”€â”€ State serialization roundtrip â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     proptest! {
         #[test]
@@ -1423,7 +1433,7 @@ mod proptests {
         }
     }
 
-    // ── Plan ID with arbitrary inputs ───────────────────────────
+    // â”€â”€ Plan ID with arbitrary inputs â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     proptest! {
         #[test]
@@ -1445,7 +1455,7 @@ mod proptests {
         }
     }
 
-    // ── Package state transitions ───────────────────────────────
+    // â”€â”€ Package state transitions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     proptest! {
         #[test]
@@ -1489,7 +1499,7 @@ mod proptests {
         }
     }
 
-    // ── Atomic write/read consistency ───────────────────────────
+    // â”€â”€ Atomic write/read consistency â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(20))]
@@ -1535,7 +1545,7 @@ mod proptests {
         }
     }
 
-    // ── Double-roundtrip idempotency ────────────────────────────
+    // â”€â”€ Double-roundtrip idempotency â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(20))]
@@ -1572,7 +1582,7 @@ mod proptests {
     }
 }
 
-// ── Atomic write crash-safety ───────────────────────────────────
+// â”€â”€ Atomic write crash-safety â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[test]
 fn atomic_write_orphaned_tmp_does_not_affect_load() {
@@ -1648,7 +1658,7 @@ fn atomic_write_no_partial_state_on_serialization_error_path() {
     assert_eq!(loaded.plan_id, "updated");
 }
 
-// ── Receipt generation completeness ─────────────────────────────
+// â”€â”€ Receipt generation completeness â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[test]
 fn receipt_all_fields_individually_verified_after_roundtrip() {
@@ -1699,6 +1709,7 @@ fn receipt_all_fields_individually_verified_after_roundtrip() {
             arch: "x86_64".to_string(),
         },
         auth_evidence: None,
+        execution_result: crate::types::ExecutionResult::Success,
     };
 
     write_receipt(&dir, &receipt).expect("write");
@@ -1837,7 +1848,7 @@ fn receipt_with_evidence_data_roundtrip() {
     assert_eq!(pkg.evidence.readiness_checks[0].attempt, 1);
 }
 
-// ── State migration / versioning ────────────────────────────────
+// â”€â”€ State migration / versioning â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[test]
 fn migrate_v1_receipt_with_packages_populated() {
@@ -1936,7 +1947,7 @@ fn receipt_v0_rejected_by_validation() {
     assert!(msg.contains("too old"), "unexpected error: {msg}");
 }
 
-// ── Concurrent state access patterns ────────────────────────────
+// â”€â”€ Concurrent state access patterns â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[test]
 fn concurrent_readers_all_see_consistent_state() {
@@ -1986,7 +1997,7 @@ fn concurrent_readers_all_see_consistent_state() {
 
 #[test]
 fn sequential_writer_reader_pattern() {
-    // Simulates a writer-lock pattern: write → verify → write → verify.
+    // Simulates a writer-lock pattern: write â†’ verify â†’ write â†’ verify.
     let td = tempdir().expect("tempdir");
     let dir = td.path().join("seq-wr");
 
@@ -2063,7 +2074,7 @@ fn concurrent_writer_then_readers() {
     }
 }
 
-// ── PackageState variant roundtrip through disk ─────────────────
+// â”€â”€ PackageState variant roundtrip through disk â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[test]
 fn each_package_state_variant_disk_roundtrip() {
@@ -2140,7 +2151,7 @@ fn each_package_state_variant_disk_roundtrip() {
     }
 }
 
-// ── Snapshot tests: receipt with git_context ─────────────────────
+// â”€â”€ Snapshot tests: receipt with git_context â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[test]
 fn snapshot_receipt_with_git_context() {
@@ -2184,6 +2195,7 @@ fn snapshot_receipt_with_git_context() {
             arch: "x86_64".to_string(),
         },
         auth_evidence: None,
+        execution_result: crate::types::ExecutionResult::Success,
     };
 
     let json = serde_json::to_string_pretty(&receipt).expect("serialize");
@@ -2251,6 +2263,7 @@ fn snapshot_receipt_with_evidence() {
             arch: "x86_64".to_string(),
         },
         auth_evidence: None,
+        execution_result: crate::types::ExecutionResult::Success,
     };
 
     let json = serde_json::to_string_pretty(&receipt).expect("serialize");
@@ -2273,7 +2286,7 @@ fn snapshot_state_empty_packages() {
     insta::assert_snapshot!("state_empty_packages", json);
 }
 
-// ── error message quality snapshots ──────────────────────────────────
+// â”€â”€ error message quality snapshots â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 fn normalize_error(err: &str, state_dir: &std::path::Path) -> String {
     err.replace(&state_dir.display().to_string(), "<STATE_DIR>")
@@ -2344,7 +2357,7 @@ fn snapshot_error_message_corrupted_receipt_json() {
     );
 }
 
-// ── Proptest additions ──────────────────────────────────────────
+// â”€â”€ Proptest additions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 mod proptests_extended {
     use super::*;
@@ -2462,6 +2475,7 @@ mod proptests_extended {
                     arch: "x86_64".to_string(),
                 },
                 auth_evidence: None,
+            execution_result: crate::types::ExecutionResult::Success,
             };
 
             write_receipt(&dir, &receipt).expect("write");
@@ -2475,7 +2489,7 @@ mod proptests_extended {
     }
 }
 
-// ── Reconciliation-report persistence ────────────────────────────────────
+// â”€â”€ Reconciliation-report persistence â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[test]
 fn reconciliation_path_appends_expected_filename() {
@@ -2556,7 +2570,7 @@ fn write_reconciliation_report_overwrites_existing_atomically() {
     assert_eq!(parsed.plan_id, "p2", "second write must replace contents");
 }
 
-// ── Encrypted state I/O ──────────────────────────────────────────────────
+// â”€â”€ Encrypted state I/O â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 fn sample_encryption_config() -> shipper_encrypt::EncryptionConfig {
     shipper_encrypt::EncryptionConfig::new("test-passphrase".to_string())
@@ -2620,7 +2634,7 @@ fn load_state_encrypted_fails_with_wrong_passphrase() {
     );
 }
 
-// ── Encrypted receipt I/O ────────────────────────────────────────────────
+// â”€â”€ Encrypted receipt I/O â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[test]
 fn load_receipt_encrypted_returns_none_when_file_missing() {

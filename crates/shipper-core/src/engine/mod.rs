@@ -54,7 +54,7 @@ pub trait Reporter {
     /// implementation preserves the pre-#103 behavior (a single `warn()` line
     /// then `thread::sleep(delay)`); richer UIs (e.g., the CLI) override it to
     /// render a live countdown during the wait window. Overrides MUST block
-    /// for the full `delay` before returning — the engine relies on this
+    /// for the full `delay` before returning â€” the engine relies on this
     /// method to own the retry sleep. See #103 and #91.
     #[allow(clippy::too_many_arguments)]
     fn retry_wait(
@@ -1141,7 +1141,7 @@ pub fn run_rehearsal(
     let started_at = Utc::now();
 
     reporter.info(&format!(
-        "rehearsal starting — {} packages against '{}'",
+        "rehearsal starting â€” {} packages against '{}'",
         ws.plan.packages.len(),
         rehearsal_name
     ));
@@ -1165,7 +1165,7 @@ pub fn run_rehearsal(
 
     for p in &ws.plan.packages {
         let pkg_label = format!("{}@{}", p.name, p.version);
-        reporter.info(&format!("rehearsing {pkg_label} → {rehearsal_name}"));
+        reporter.info(&format!("rehearsing {pkg_label} â†’ {rehearsal_name}"));
         let start = Instant::now();
 
         let out = cargo::cargo_publish(
@@ -1201,7 +1201,7 @@ pub fn run_rehearsal(
         }
 
         // Post-publish visibility check on the rehearsal registry. Reuse
-        // `version_exists` — same mechanism live publish trusts.
+        // `version_exists` â€” same mechanism live publish trusts.
         if !rehearsal_client.version_exists(&p.name, &p.version)? {
             let msg = format!(
                 "rehearsal: cargo publish succeeded but {pkg_label} is not visible on '{rehearsal_name}'"
@@ -1238,7 +1238,7 @@ pub fn run_rehearsal(
         packages_published += 1;
     }
 
-    // #97 PR 4 — smoke-install. Opt-in. Runs only if:
+    // #97 PR 4 â€” smoke-install. Opt-in. Runs only if:
     //   (a) all packages in the plan were published successfully AND
     //   (b) the operator named a crate via --smoke-install / config.
     // The named crate must be in the plan; resolves its planned version
@@ -1318,7 +1318,7 @@ pub fn run_rehearsal(
             }
             None => {
                 // Operator named a crate that isn't in the plan. Warn,
-                // don't fail — their intent is clear but the workspace
+                // don't fail â€” their intent is clear but the workspace
                 // shape disagrees, and failing the whole rehearsal over
                 // a typo would be overkill.
                 reporter.warn(&format!(
@@ -1361,7 +1361,7 @@ pub fn run_rehearsal(
     event_log.write_to_file(&events_path)?;
 
     // Persist the sidecar receipt so the hard gate in `run_publish`
-    // can consult it without parsing events.jsonl. Best-effort — a
+    // can consult it without parsing events.jsonl. Best-effort â€” a
     // write failure here doesn't invalidate the events log, which is
     // the authoritative source; the gate will just act as if no
     // rehearsal happened and block, which is the safe default.
@@ -1382,7 +1382,7 @@ pub fn run_rehearsal(
     ) {
         reporter.warn(&format!(
             "rehearsal outcome event was written, but sidecar receipt could not be persisted: {err:#}. \
-             The hard gate may not recognize this rehearsal — check {}.",
+             The hard gate may not recognize this rehearsal â€” check {}.",
             crate::state::rehearsal::rehearsal_path(&state_dir).display()
         ));
     }
@@ -2384,7 +2384,7 @@ mod tests {
         });
     }
 
-    // #100 — fresh-audit mode must not read or append the authoritative
+    // #100 â€” fresh-audit mode must not read or append the authoritative
     // `events.jsonl`. We seed a pre-existing `events.jsonl` with a bogus
     // event that would fail deserialization, run preflight in
     // `fresh_audit` mode, and assert: (a) the authoritative log is
@@ -2425,7 +2425,7 @@ mod tests {
             let sentinel = "{\"sentinel\":\"do not touch\"}\n";
             std::fs::write(&authoritative_events, sentinel).expect("seed events");
 
-            // Seed a state.json too — fresh-audit must not produce or
+            // Seed a state.json too â€” fresh-audit must not produce or
             // overwrite a publish state file as a side-effect.
             let state_json = td.path().join(".shipper").join("state.json");
             std::fs::write(&state_json, "{\"sentinel\":\"state\"}").expect("seed state");
@@ -2482,11 +2482,11 @@ mod tests {
         });
     }
 
-    // #100 — fresh-audit reflects *current* workspace state, not a
+    // #100 â€” fresh-audit reflects *current* workspace state, not a
     // cached prior result. We run preflight twice in fresh_audit mode:
     // first against a registry that treats the crate as new (NotProven),
     // then against the same workspace but with a server that returns
-    // 200 + owners — ownership verified, so Proven. If fresh_audit were
+    // 200 + owners â€” ownership verified, so Proven. If fresh_audit were
     // cached/reused, the second run would incorrectly still report
     // NotProven; it must reflect the changed registry reality.
     //
@@ -2509,7 +2509,7 @@ mod tests {
             ("CARGO_REGISTRY_TOKEN", Some("token-abc".to_string())),
         ]);
         temp_env::with_vars(env_vars, || {
-            // Run 1: new crate (404 on crate lookup) → NotProven (no
+            // Run 1: new crate (404 on crate lookup) â†’ NotProven (no
             // ownership possible for new crates when strict=false and
             // token present).
             let server1 = spawn_registry_server(
@@ -2553,7 +2553,7 @@ mod tests {
                 authoritative_events.display()
             );
 
-            // Run 2: established crate with confirmed owners → Proven.
+            // Run 2: established crate with confirmed owners â†’ Proven.
             // Same workspace, different registry reality. Fresh audit
             // must pick up the new state, not cache the previous run.
             let server2 = spawn_registry_server(
@@ -2891,7 +2891,7 @@ mod tests {
             let state_dir = td.path().join(".shipper");
 
             // Seed: existing state says demo@0.1.0 is Published. Resume
-            // should recognize it and skip — but crucially, emit the event.
+            // should recognize it and skip â€” but crucially, emit the event.
             let mut packages = BTreeMap::new();
             packages.insert(
                 "demo@0.1.0".to_string(),
@@ -2947,7 +2947,7 @@ mod tests {
         write_fake_tools(&bin);
         let env_vars = fake_program_env_vars(&bin);
         temp_env::with_vars(env_vars, || {
-            // Registry returns 200 for the version check — the crate IS
+            // Registry returns 200 for the version check â€” the crate IS
             // visible, even though run 1 left us with Failed/Ambiguous.
             let server = spawn_registry_server(
                 std::collections::BTreeMap::from([(
@@ -4161,7 +4161,7 @@ mod tests {
         let td = tempdir().expect("tempdir");
         let bin = td.path().join("bin");
         write_fake_tools(&bin);
-        // Deliberately set cargo to fail — if dry-run runs, it would fail
+        // Deliberately set cargo to fail â€” if dry-run runs, it would fail
         with_test_env(
             &bin,
             vec![("SHIPPER_CARGO_EXIT", Some("1".to_string()))],
@@ -4302,7 +4302,7 @@ mod tests {
         let td = tempdir().expect("tempdir");
         let bin = td.path().join("bin");
         write_fake_tools(&bin);
-        // Set cargo to fail — if dry-run ran, it would fail
+        // Set cargo to fail â€” if dry-run ran, it would fail
         with_test_env(
             &bin,
             vec![("SHIPPER_CARGO_EXIT", Some("1".to_string()))],
@@ -4446,7 +4446,7 @@ mod tests {
             );
 
             // Cargo publish should NOT have been invoked
-            // (args_log should not exist or be empty — no cargo publish calls)
+            // (args_log should not exist or be empty â€” no cargo publish calls)
             let cargo_invoked = args_log.exists()
                 && fs::read_to_string(&args_log)
                     .unwrap_or_default()
@@ -4549,7 +4549,7 @@ mod tests {
         });
     }
 
-    // ── Additional coverage tests ──────────────────────────────────────
+    // â”€â”€ Additional coverage tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[test]
     fn init_state_creates_pending_entries_for_all_packages() {
@@ -5586,6 +5586,7 @@ mod tests {
             git_context: None,
             environment: environment::collect_environment_fingerprint(),
             auth_evidence: None,
+            execution_result: crate::types::ExecutionResult::Success,
         };
 
         let json = serde_json::to_string_pretty(&receipt).expect("serialize");
@@ -5766,7 +5767,7 @@ mod tests {
         assert!(effects.run_dry_run);
     }
 
-    // ── Retry logic edge-case tests ────────────────────────────────────
+    // â”€â”€ Retry logic edge-case tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[test]
     #[serial]
@@ -5779,7 +5780,7 @@ mod tests {
             vec![("SHIPPER_CARGO_EXIT", Some("0".to_string()))],
             || {
                 // Registry says version doesn't exist, so engine enters the publish loop
-                // with max_attempts=0 → loop body never executes → package stays Pending
+                // with max_attempts=0 â†’ loop body never executes â†’ package stays Pending
                 let server = spawn_registry_server(
                     std::collections::BTreeMap::from([(
                         "/api/v1/crates/demo/0.1.0".to_string(),
@@ -5897,7 +5898,7 @@ mod tests {
         );
     }
 
-    // ── State persistence: Uploaded vs Published transitions ──────────
+    // â”€â”€ State persistence: Uploaded vs Published transitions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[test]
     fn state_transition_pending_to_uploaded_persists() {
@@ -5995,7 +5996,7 @@ mod tests {
         assert!(pkg.last_updated_at >= initial_updated);
     }
 
-    // ── Error classification tests ─────────────────────────────────────
+    // â”€â”€ Error classification tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[test]
     fn classify_cargo_failure_connection_refused_is_retryable() {
@@ -6040,7 +6041,7 @@ mod tests {
         );
     }
 
-    // ── State machine transition tests ────────────────────────────────
+    // â”€â”€ State machine transition tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Helper: build a multi-package workspace for state machine tests.
     fn multi_package_workspace(
@@ -6074,7 +6075,7 @@ mod tests {
         }
     }
 
-    // 1. Pending → Published (happy path, single crate)
+    // 1. Pending â†’ Published (happy path, single crate)
     #[test]
     #[serial]
     fn sm_pending_to_published_happy_path() {
@@ -6113,7 +6114,7 @@ mod tests {
         );
     }
 
-    // 2. Pending → Uploaded → Verified (two-phase with readiness check)
+    // 2. Pending â†’ Uploaded â†’ Verified (two-phase with readiness check)
     #[test]
     #[serial]
     fn sm_pending_uploaded_verified_two_phase() {
@@ -6152,7 +6153,7 @@ mod tests {
         );
     }
 
-    // 3. Pending → Failed (permanent error, no retry)
+    // 3. Pending â†’ Failed (permanent error, no retry)
     #[test]
     #[serial]
     fn sm_pending_to_failed_permanent_no_retry() {
@@ -6204,7 +6205,7 @@ mod tests {
         );
     }
 
-    // 4. Pending → Uploaded → Failed (upload ok, verify failed)
+    // 4. Pending â†’ Uploaded â†’ Failed (upload ok, verify failed)
     #[test]
     #[serial]
     fn sm_uploaded_then_verify_failed() {
@@ -6246,7 +6247,7 @@ mod tests {
         );
     }
 
-    // 5. Multiple packages: first succeeds, second fails → partial progress saved
+    // 5. Multiple packages: first succeeds, second fails â†’ partial progress saved
     #[test]
     #[serial]
     fn sm_multi_package_partial_progress() {
@@ -6310,7 +6311,7 @@ mod tests {
         );
     }
 
-    // 6. Resume from partial state — only remaining packages are attempted
+    // 6. Resume from partial state â€” only remaining packages are attempted
     #[test]
     #[serial]
     fn sm_resume_from_partial_state() {
@@ -6406,7 +6407,7 @@ mod tests {
         );
     }
 
-    // 7. Plan ID mismatch on resume — verify rejection
+    // 7. Plan ID mismatch on resume â€” verify rejection
     #[test]
     fn sm_plan_id_mismatch_rejected() {
         let td = tempdir().expect("tempdir");
@@ -6446,7 +6447,7 @@ mod tests {
         assert!(msg.contains("does not match current plan_id"), "got: {msg}");
     }
 
-    // 8. Empty package list — verify graceful handling
+    // 8. Empty package list â€” verify graceful handling
     #[test]
     fn sm_empty_package_list_graceful() {
         let td = tempdir().expect("tempdir");
@@ -6509,7 +6510,7 @@ mod tests {
         );
     }
 
-    // 10. Max retries exceeded — verify proper error with attempt count
+    // 10. Max retries exceeded â€” verify proper error with attempt count
     #[test]
     #[serial]
     fn sm_max_retries_exceeded_attempt_count() {
@@ -6575,7 +6576,7 @@ mod tests {
         );
     }
 
-    // 11. Timeout during publish — verify state preservation
+    // 11. Timeout during publish â€” verify state preservation
     #[test]
     #[serial]
     fn sm_timeout_preserves_state() {
@@ -6626,7 +6627,7 @@ mod tests {
         );
     }
 
-    // 12. Concurrent package independence — parallel packages don't affect each other
+    // 12. Concurrent package independence â€” parallel packages don't affect each other
     //     (sequential mode: verify each package state is independent)
     #[test]
     #[serial]
@@ -6849,11 +6850,11 @@ mod tests {
             crate::state::execution_state::CURRENT_STATE_VERSION
         );
 
-        // Transition alpha: Pending → Uploaded → Published
+        // Transition alpha: Pending â†’ Uploaded â†’ Published
         update_state(&mut st, &state_dir, "alpha@1.0.0", PackageState::Uploaded).expect("update");
         update_state(&mut st, &state_dir, "alpha@1.0.0", PackageState::Published).expect("update");
 
-        // Transition beta: Pending → Failed
+        // Transition beta: Pending â†’ Failed
         update_state(
             &mut st,
             &state_dir,
@@ -7016,7 +7017,7 @@ mod tests {
         );
     }
 
-    // ── Snapshot tests with insta for engine state ─────────────────────
+    // â”€â”€ Snapshot tests with insta for engine state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[test]
     fn snapshot_init_state_single_package() {
@@ -7167,7 +7168,7 @@ mod tests {
         insta::assert_debug_snapshot!("error_classification_matrix", snapshot);
     }
 
-    // ── Proptest: state transition invariants ──────────────────────────
+    // â”€â”€ Proptest: state transition invariants â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     mod engine_proptests {
         use super::*;
@@ -7306,9 +7307,9 @@ mod tests {
         }
     }
 
-    // ───────────────────────────────────────────────────────────────────
-    // run_rehearsal (#97 PR 2) — phase-2 preflight against an alt registry
-    // ───────────────────────────────────────────────────────────────────
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // run_rehearsal (#97 PR 2) â€” phase-2 preflight against an alt registry
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fn read_events_raw(state_dir: &Path) -> Vec<serde_json::Value> {
         let path = events::events_path(state_dir);
@@ -7384,7 +7385,7 @@ mod tests {
             let ws = planned_workspace(td.path(), "http://127.0.0.1:1".into());
             let mut opts = default_opts(PathBuf::from(".shipper"));
             opts.rehearsal_registry = Some("bogus-registry".to_string());
-            // opts.registries is empty — bogus-registry won't resolve.
+            // opts.registries is empty â€” bogus-registry won't resolve.
 
             let mut reporter = CollectingReporter::default();
             let err = run_rehearsal(&ws, &opts, &mut reporter).expect_err("must fail");
@@ -7412,7 +7413,7 @@ mod tests {
             assert!(!outcome.passed, "skip should not claim a pass");
             assert_eq!(outcome.packages_published, 0);
             assert!(outcome.summary.contains("skipped"));
-            // Skip path must not write events — nothing to audit.
+            // Skip path must not write events â€” nothing to audit.
             let events_path = events::events_path(&td.path().join(".shipper"));
             assert!(
                 !events_path.exists(),
@@ -7483,9 +7484,9 @@ mod tests {
         });
     }
 
-    // ───────────────────────────────────────────────────────────────────
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // enforce_rehearsal_gate (#97 PR 3)
-    // ───────────────────────────────────────────────────────────────────
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fn write_rehearsal_receipt(
         state_dir: &Path,
@@ -7612,7 +7613,7 @@ mod tests {
     }
 
     /// End-to-end: `run_publish` refuses to run when rehearsal is required
-    /// but no receipt exists. This is the gate's actual contract — the
+    /// but no receipt exists. This is the gate's actual contract â€” the
     /// finer-grained tests above exercise the gate helper in isolation;
     /// this one confirms run_publish wires it in correctly.
     #[test]
@@ -7638,7 +7639,7 @@ mod tests {
         });
     }
 
-    /// #97 PR 4 — smoke-install happy path. --smoke-install names a
+    /// #97 PR 4 â€” smoke-install happy path. --smoke-install names a
     /// crate in the plan; fake cargo returns 0 for the install call;
     /// rehearsal emits smoke-check events and passes.
     #[test]
@@ -7685,7 +7686,7 @@ mod tests {
         });
     }
 
-    /// #97 PR 4 — smoke-install named a crate not in the plan. Warn-only
+    /// #97 PR 4 â€” smoke-install named a crate not in the plan. Warn-only
     /// path: rehearsal itself still passes (publish was fine) but the
     /// reporter surfaces the misconfiguration so the operator can fix it.
     #[test]

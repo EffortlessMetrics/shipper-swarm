@@ -3,10 +3,10 @@
 //! When a published release turns out to be compromised (CVE, leaked
 //! secret, broken artifact), the remediation options are:
 //!
-//! 1. **Yank** — containment. Prevents NEW resolves but leaves
+//! 1. **Yank** â€” containment. Prevents NEW resolves but leaves
 //!    existing lockfiles unchanged. Covered by `shipper yank` (PR 1)
 //!    and `shipper plan-yank` (PR 2).
-//! 2. **Fix-forward** — ship a successor release that replaces the
+//! 2. **Fix-forward** â€” ship a successor release that replaces the
 //!    compromised one. Downstream consumers pick it up on
 //!    `cargo update`. **This module plans that.**
 //!
@@ -27,18 +27,18 @@
 //! ## What this module does NOT do (yet)
 //!
 //! - **Edit Cargo.toml files** to bump versions. That's workspace-edit
-//!   territory — invasive enough to deserve its own PR with dry-run /
+//!   territory â€” invasive enough to deserve its own PR with dry-run /
 //!   --apply / git-guard semantics.
 //! - **Run the bumped publish**. Once the operator has bumped versions
 //!   and committed them, `shipper publish` handles the actual train
 //!   exactly as for any release. Fix-forward's job is the planning
 //!   layer, not the execution.
-//! - **Chain successor → receipt** via the `superseded_by` field.
+//! - **Chain successor â†’ receipt** via the `superseded_by` field.
 //!   Wiring that requires post-publish receipt amendment from the
 //!   successor run; another follow-on.
 //!
 //! Keeping the first PR to *planning only* matches the scope pattern
-//! of `plan-yank` (PR 2) — give operators a text blueprint, let them
+//! of `plan-yank` (PR 2) â€” give operators a text blueprint, let them
 //! apply it, leave execution orchestration for a later pass once the
 //! shape is validated in the field.
 
@@ -94,7 +94,7 @@ fn suggest_next(current: &str, strategy: SuccessorStrategy) -> String {
 
 /// Build a fix-forward plan from a receipt.
 ///
-/// Topological order — same direction as `publish`, **opposite** of
+/// Topological order â€” same direction as `publish`, **opposite** of
 /// `plan-yank`. Rationale: for fix-forward you're *publishing*
 /// replacements, so dependencies go first (downstream fixes can pull
 /// updated deps); for yank you're *removing* reachability, so
@@ -126,7 +126,7 @@ pub fn build_plan(receipt: &Receipt, strategy: SuccessorStrategy) -> FixForwardP
 pub fn render_text(plan: &FixForwardPlan) -> String {
     let mut out = String::new();
     out.push_str(&format!(
-        "# fix-forward plan — registry={}, plan_id={}\n",
+        "# fix-forward plan â€” registry={}, plan_id={}\n",
         plan.registry, plan.plan_id
     ));
     out.push_str(&format!(
@@ -225,6 +225,7 @@ mod tests {
                 arch: "x86_64".into(),
             },
             auth_evidence: None,
+            execution_result: crate::types::ExecutionResult::Success,
         }
     }
 

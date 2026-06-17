@@ -55,3 +55,4 @@ environment:
   rust_version: 1.82.0
   os: macos
   arch: aarch64
+execution_result: success

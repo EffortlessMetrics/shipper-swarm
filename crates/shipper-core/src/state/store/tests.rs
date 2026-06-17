@@ -66,6 +66,7 @@ fn sample_receipt() -> Receipt {
             arch: "x86_64".to_string(),
         },
         auth_evidence: None,
+        execution_result: crate::types::ExecutionResult::Success,
     }
 }
 
@@ -900,6 +901,7 @@ mod proptests {
                     arch: "x86_64".to_string(),
                 },
                 auth_evidence: None,
+            execution_result: crate::types::ExecutionResult::Success,
             };
 
             store.save_receipt(&receipt).expect("save receipt");
@@ -960,6 +962,7 @@ mod proptests {
                     arch: "test".to_string(),
                 },
                 auth_evidence: None,
+            execution_result: crate::types::ExecutionResult::Success,
             };
 
             let json = serde_json::to_string(&receipt).expect("serialize");
@@ -1039,7 +1042,7 @@ fn file_store_load_receipt_truncated_json_returns_error() {
     );
 }
 
-// --- State transition: retry cycle (Pending → Failed → Pending) ---
+// --- State transition: retry cycle (Pending â†’ Failed â†’ Pending) ---
 
 #[test]
 fn file_store_state_retry_cycle_pending_failed_pending() {
@@ -1158,7 +1161,7 @@ fn file_store_state_empty_plan_id() {
 #[test]
 fn file_store_unicode_directory_path() {
     let td = tempdir().expect("tempdir");
-    let unicode_dir = td.path().join("données").join("日本語");
+    let unicode_dir = td.path().join("donnÃ©es").join("æ—¥æœ¬èªž");
     let store = FileStore::new(unicode_dir);
 
     store.save_state(&sample_state()).expect("save");
@@ -1250,6 +1253,7 @@ fn file_store_receipt_all_published() {
             arch: "x86_64".to_string(),
         },
         auth_evidence: None,
+        execution_result: crate::types::ExecutionResult::Success,
     };
 
     store.save_receipt(&receipt).expect("save");
@@ -1324,6 +1328,7 @@ fn file_store_receipt_some_failed() {
             arch: "x86_64".to_string(),
         },
         auth_evidence: None,
+        execution_result: crate::types::ExecutionResult::Success,
     };
 
     store.save_receipt(&receipt).expect("save");
@@ -1583,6 +1588,7 @@ fn file_store_receipt_empty_strings_roundtrip() {
             arch: String::new(),
         },
         auth_evidence: None,
+        execution_result: crate::types::ExecutionResult::Success,
     };
 
     store.save_receipt(&receipt).expect("save");
@@ -1618,10 +1624,10 @@ fn file_store_load_receipt_wrong_json_shape_returns_error() {
 
     let receipt_file = crate::state::execution_state::receipt_path(td.path());
     std::fs::create_dir_all(receipt_file.parent().unwrap_or(td.path())).ok();
-    // Valid JSON but completely wrong shape — no receipt_version, no packages, etc.
+    // Valid JSON but completely wrong shape â€” no receipt_version, no packages, etc.
     std::fs::write(&receipt_file, r#"{"unexpected_key": true, "number": 42}"#).expect("write");
 
-    // Either returns an error or migrates/fails gracefully — must not panic
+    // Either returns an error or migrates/fails gracefully â€” must not panic
     let result = store.load_receipt();
     // The implementation attempts migration which may also fail; either Err or Ok is fine
     // but it must never panic
@@ -1698,7 +1704,7 @@ mod proptests_hardened {
             std::fs::create_dir_all(state_file.parent().unwrap_or(td.path())).ok();
             std::fs::write(&state_file, &data).expect("write");
 
-            // Must not panic — may return Ok(None) or Err, both acceptable
+            // Must not panic â€” may return Ok(None) or Err, both acceptable
             let _ = store.load_state();
         }
 
@@ -1711,7 +1717,7 @@ mod proptests_hardened {
             std::fs::create_dir_all(receipt_file.parent().unwrap_or(td.path())).ok();
             std::fs::write(&receipt_file, &data).expect("write");
 
-            // Must not panic — may return Ok(None) or Err, both acceptable
+            // Must not panic â€” may return Ok(None) or Err, both acceptable
             let _ = store.load_receipt();
         }
 

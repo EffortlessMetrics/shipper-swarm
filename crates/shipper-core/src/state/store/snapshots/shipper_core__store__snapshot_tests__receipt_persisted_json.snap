@@ -1,5 +1,5 @@
 ---
-source: crates/shipper-store/src/lib.rs
+source: crates/shipper-core/src/state/store/snapshot_tests.rs
 expression: pretty
 ---
 {
@@ -11,6 +11,7 @@ expression: pretty
     "shipper_version": "0.3.0"
   },
   "event_log_path": ".shipper/events.jsonl",
+  "execution_result": "success",
   "finished_at": "2025-01-15T12:00:00Z",
   "git_context": null,
   "packages": [

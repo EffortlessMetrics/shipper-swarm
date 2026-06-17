@@ -19,7 +19,7 @@ fn fixed_time() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2025, 1, 15, 12, 0, 0).unwrap()
 }
 
-// ── ExecutionState snapshots ────────────────────────────────────
+// â”€â”€ ExecutionState snapshots â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[test]
 fn snapshot_execution_state_single_pending() {
@@ -154,7 +154,7 @@ fn snapshot_execution_state_empty_packages() {
     insta::assert_snapshot!("execution_state_empty_packages", json);
 }
 
-// ── Receipt snapshots ───────────────────────────────────────────
+// â”€â”€ Receipt snapshots â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[test]
 fn snapshot_receipt_minimal() {
@@ -191,6 +191,7 @@ fn snapshot_receipt_minimal() {
             arch: "x86_64".to_string(),
         },
         auth_evidence: None,
+        execution_result: crate::types::ExecutionResult::Success,
     };
 
     let json = serde_json::to_string_pretty(&receipt).expect("serialize");
@@ -237,6 +238,7 @@ fn snapshot_receipt_with_git_context() {
             arch: "x86_64".to_string(),
         },
         auth_evidence: None,
+        execution_result: crate::types::ExecutionResult::Success,
     };
 
     let json = serde_json::to_string_pretty(&receipt).expect("serialize");
@@ -317,13 +319,14 @@ fn snapshot_receipt_mixed_outcomes() {
             arch: "aarch64".to_string(),
         },
         auth_evidence: None,
+        execution_result: crate::types::ExecutionResult::Success,
     };
 
     let json = serde_json::to_string_pretty(&receipt).expect("serialize");
     insta::assert_snapshot!("receipt_mixed_outcomes", json);
 }
 
-// ── FileStore persistence format snapshots ──────────────────────
+// â”€â”€ FileStore persistence format snapshots â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[test]
 fn snapshot_state_persisted_json() {
@@ -409,6 +412,7 @@ fn snapshot_receipt_persisted_json() {
             arch: "x86_64".to_string(),
         },
         auth_evidence: None,
+        execution_result: crate::types::ExecutionResult::Success,
     };
 
     store.save_receipt(&receipt).expect("save");
@@ -419,7 +423,7 @@ fn snapshot_receipt_persisted_json() {
     insta::assert_snapshot!("receipt_persisted_json", pretty);
 }
 
-// ── Event serialization snapshots ───────────────────────────────
+// â”€â”€ Event serialization snapshots â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[test]
 fn snapshot_event_execution_started() {
@@ -517,7 +521,7 @@ fn snapshot_event_execution_finished_partial_failure() {
     insta::assert_snapshot!("event_execution_finished_partial_failure", json);
 }
 
-// ── Schema version error message snapshots ──────────────────────
+// â”€â”€ Schema version error message snapshots â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[test]
 fn snapshot_error_version_too_old() {
@@ -557,7 +561,7 @@ fn snapshot_error_non_numeric_version() {
     insta::assert_snapshot!("error_non_numeric_version", err);
 }
 
-// ── Events JSONL persisted format ───────────────────────────────
+// â”€â”€ Events JSONL persisted format â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[test]
 fn snapshot_events_persisted_jsonl() {
@@ -607,7 +611,7 @@ fn snapshot_events_persisted_jsonl() {
     insta::assert_snapshot!("events_persisted_jsonl", snapshot);
 }
 
-// ── Registry serialization snapshot ─────────────────────────────
+// â”€â”€ Registry serialization snapshot â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[test]
 fn snapshot_registry_crates_io() {
@@ -627,7 +631,7 @@ fn snapshot_registry_custom() {
     insta::assert_snapshot!("registry_custom", json);
 }
 
-// ── Edge case snapshot: retry cycle state ───────────────────────
+// â”€â”€ Edge case snapshot: retry cycle state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[test]
 fn snapshot_state_retry_cycle() {
@@ -658,7 +662,7 @@ fn snapshot_state_retry_cycle() {
     insta::assert_snapshot!("state_retry_cycle", json);
 }
 
-// ── Edge case snapshot: receipt all published ────────────────────
+// â”€â”€ Edge case snapshot: receipt all published â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[test]
 fn snapshot_receipt_all_published() {
@@ -713,13 +717,14 @@ fn snapshot_receipt_all_published() {
             arch: "x86_64".to_string(),
         },
         auth_evidence: None,
+        execution_result: crate::types::ExecutionResult::Success,
     };
 
     let json = serde_json::to_string_pretty(&receipt).expect("serialize");
     insta::assert_snapshot!("receipt_all_published", json);
 }
 
-// ── Edge case snapshot: receipt some failed ──────────────────────
+// â”€â”€ Edge case snapshot: receipt some failed â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[test]
 fn snapshot_receipt_some_failed() {
@@ -777,13 +782,14 @@ fn snapshot_receipt_some_failed() {
             arch: "x86_64".to_string(),
         },
         auth_evidence: None,
+        execution_result: crate::types::ExecutionResult::Success,
     };
 
     let json = serde_json::to_string_pretty(&receipt).expect("serialize");
     insta::assert_snapshot!("receipt_some_failed", json);
 }
 
-// ── Directory layout snapshot ───────────────────────────────────
+// â”€â”€ Directory layout snapshot â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[test]
 fn snapshot_directory_layout_after_full_save() {
@@ -845,6 +851,7 @@ fn snapshot_directory_layout_after_full_save() {
             arch: "x86_64".to_string(),
         },
         auth_evidence: None,
+        execution_result: crate::types::ExecutionResult::Success,
     };
     store.save_receipt(&receipt).expect("save receipt");
 
@@ -871,7 +878,7 @@ fn snapshot_directory_layout_after_full_save() {
     insta::assert_snapshot!("directory_layout_after_full_save", layout);
 }
 
-// ── Custom registry state snapshot ──────────────────────────────
+// â”€â”€ Custom registry state snapshot â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[test]
 fn snapshot_state_with_custom_registry() {

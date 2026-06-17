@@ -234,6 +234,7 @@ mod tests {
                 arch: std::env::consts::ARCH.to_string(),
             },
             auth_evidence: None,
+            execution_result: crate::types::ExecutionResult::Success,
         };
 
         // Serialize large receipt

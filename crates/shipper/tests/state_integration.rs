@@ -10,6 +10,7 @@ use shipper::state::execution_state::{
     has_incomplete_state, load_receipt, load_state, receipt_path, save_state, state_path,
     write_receipt,
 };
+use shipper::types::ExecutionResult;
 use shipper_types::{
     EnvironmentFingerprint, ErrorClass, ExecutionState, PackageEvidence, PackageProgress,
     PackageReceipt, PackageState, Receipt, Registry,
@@ -63,6 +64,7 @@ fn make_receipt(plan_id: &str, packages: Vec<PackageReceipt>) -> Receipt {
             arch: "x86_64".to_string(),
         },
         auth_evidence: None,
+        execution_result: ExecutionResult::Success,
     }
 }
 
@@ -517,18 +519,18 @@ fn has_incomplete_state_lifecycle() {
     let dir = td.path().join("lifecycle");
     fs::create_dir_all(&dir).unwrap();
 
-    // Empty dir — no incomplete state
+    // Empty dir â€” no incomplete state
     assert!(!has_incomplete_state(&dir));
 
-    // State only — incomplete
+    // State only â€” incomplete
     save_state(&dir, &make_state("lc", BTreeMap::new())).unwrap();
     assert!(has_incomplete_state(&dir));
 
-    // Add receipt — no longer incomplete
+    // Add receipt â€” no longer incomplete
     write_receipt(&dir, &make_receipt("lc", vec![])).unwrap();
     assert!(!has_incomplete_state(&dir));
 
-    // Clear state — receipt still present, not incomplete
+    // Clear state â€” receipt still present, not incomplete
     clear_state(&dir).unwrap();
     assert!(!has_incomplete_state(&dir));
 }
@@ -676,7 +678,7 @@ fn load_receipt_errors_on_truncated_json() {
 }
 
 // ---------------------------------------------------------------------------
-// State transitions: Pending → Failed → Pending (retry cycle)
+// State transitions: Pending â†’ Failed â†’ Pending (retry cycle)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -921,7 +923,7 @@ fn state_with_empty_plan_id() {
 #[test]
 fn state_save_load_unicode_directory() {
     let td = tempdir().unwrap();
-    let dir = td.path().join("données").join("日本語");
+    let dir = td.path().join("donnÃ©es").join("æ—¥æœ¬èªž");
 
     let state = make_state("unicode-plan", BTreeMap::new());
     save_state(&dir, &state).unwrap();
@@ -1045,6 +1047,7 @@ fn make_deterministic_receipt(plan_id: &str, packages: Vec<PackageReceipt>) -> R
             arch: "x86_64".to_string(),
         },
         auth_evidence: None,
+        execution_result: ExecutionResult::Success,
     }
 }
 
