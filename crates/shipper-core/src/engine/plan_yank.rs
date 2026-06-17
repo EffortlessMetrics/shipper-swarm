@@ -3,12 +3,12 @@
 //! Given a receipt.json from a prior publish run, produce an ordered list of
 //! `<crate>@<version>` entries describing the yank order for containment:
 //! dependents first, dependencies last. This is the opposite of publish
-//! order — we want downstream consumers of the bad version to stop being
+//! order â€” we want downstream consumers of the bad version to stop being
 //! resolvable against it *before* we yank the bad version itself.
 //!
 //! ## Example
 //!
-//! For a workspace A → B → C (A is a leaf, B depends on A, C depends on B):
+//! For a workspace A â†’ B â†’ C (A is a leaf, B depends on A, C depends on B):
 //!
 //! - Publish order (receipt.packages): `[A, B, C]`
 //! - Yank order (reverse topological): `[C, B, A]`
@@ -23,13 +23,13 @@
 //! - Provide both a structured `YankPlan` API and a text renderer
 //!
 //! **Does not (yet):**
-//! - Execute the plan — that's `shipper yank` (already landed) running
+//! - Execute the plan â€” that's `shipper yank` (already landed) running
 //!   one entry at a time. Plan execution wrapping is #98 PR 3.
-//! - Mark a package compromised — that's `--mark-compromised`, landing
+//! - Mark a package compromised â€” that's `--mark-compromised`, landing
 //!   in #98 PR 3 alongside fix-forward.
 //!
 //! Keeping this PR to **planning only** matches the staged rollout agreed
-//! in the #98 scope: primitive → plan → execute / fix-forward.
+//! in the #98 scope: primitive â†’ plan â†’ execute / fix-forward.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -94,7 +94,7 @@ fn include(receipt: &PackageReceipt, filter: PlanYankFilter) -> bool {
 ///
 /// The receipt's `packages` vector is in publish (topological) order, so
 /// we filter then reverse. Failing and skipped packages are excluded by
-/// default — yanking a version that was never published is a no-op on
+/// default â€” yanking a version that was never published is a no-op on
 /// the registry and would just produce noise.
 pub fn build_plan(receipt: &Receipt, filter: PlanYankFilter) -> YankPlan {
     let mut entries: Vec<YankEntry> = receipt
@@ -128,10 +128,10 @@ pub fn build_plan(receipt: &Receipt, filter: PlanYankFilter) -> YankPlan {
 /// This is the **graph mode** complement to `build_plan`'s receipt-filter
 /// modes. Use when you know exactly which crate is broken (e.g. CVE
 /// targeting `my-lib`) and want containment of only the affected
-/// dependency chain — not a full-release rollback.
+/// dependency chain â€” not a full-release rollback.
 ///
 /// `dependency_graph` is `plan.dependencies` from the original
-/// `ReleasePlan` (crate → list of its intra-workspace deps). Not
+/// `ReleasePlan` (crate â†’ list of its intra-workspace deps). Not
 /// embedded in `Receipt` because receipts are summaries, not graphs.
 ///
 /// Errors if `starting_crate` is not in the receipt.
@@ -224,7 +224,7 @@ pub fn load_receipt_from_path(path: &std::path::Path) -> Result<Receipt> {
 pub fn render_text(plan: &YankPlan) -> String {
     let mut out = String::new();
     out.push_str(&format!(
-        "# yank plan (reverse topological) — registry={}, plan_id={}, filter={}\n",
+        "# yank plan (reverse topological) â€” registry={}, plan_id={}, filter={}\n",
         plan.registry, plan.plan_id, plan.filter
     ));
     out.push_str(&format!("# {} entries\n", plan.entries.len()));
@@ -294,6 +294,7 @@ mod tests {
                 arch: "x86_64".into(),
             },
             auth_evidence: None,
+            execution_result: crate::types::ExecutionResult::Success,
         }
     }
 
@@ -372,9 +373,9 @@ mod tests {
         assert!(out.starts_with("# yank plan"));
     }
 
-    // ── build_plan_from_starting_crate tests (#98 PR 4) ─────────────────
+    // â”€â”€ build_plan_from_starting_crate tests (#98 PR 4) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-    /// Graph: a (leaf) ← b ← c. Dep map says: b depends on a, c depends
+    /// Graph: a (leaf) â† b â† c. Dep map says: b depends on a, c depends
     /// on b and a. Starting from "a" (the leaf), all three should be in
     /// the plan, with c yanked first, then b, then a.
     #[test]
@@ -395,7 +396,7 @@ mod tests {
         assert_eq!(plan.filter, "starting_crate");
     }
 
-    /// Graph: a ← b (b depends on a), plus an unrelated crate z. Starting
+    /// Graph: a â† b (b depends on a), plus an unrelated crate z. Starting
     /// from "a" should yank a and b but NOT z (no dependency edge).
     #[test]
     fn starting_crate_ignores_unrelated_crates() {
@@ -432,8 +433,8 @@ mod tests {
         deps.insert("b".to_string(), vec!["a".to_string()]);
 
         let plan = build_plan_from_starting_crate(&r, &deps, "a", None).expect("plan");
-        // b is a dependent of a but it Failed to publish — never on
-        // registry — so it's excluded from the yank plan. Only a remains.
+        // b is a dependent of a but it Failed to publish â€” never on
+        // registry â€” so it's excluded from the yank plan. Only a remains.
         let names: Vec<_> = plan.entries.iter().map(|e| e.name.clone()).collect();
         assert_eq!(names, vec!["a"]);
     }
@@ -466,7 +467,7 @@ mod tests {
         assert!(msg.contains("not in this receipt"), "err: {msg}");
     }
 
-    // ── load_plan_from_path (#98 PR 5) roundtrip ──────────────────────────
+    // â”€â”€ load_plan_from_path (#98 PR 5) roundtrip â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[test]
     fn yank_plan_json_roundtrips_via_load_plan_from_path() {

@@ -69,6 +69,7 @@ pub(in crate::engine) fn finish_sequential_run(
         environment,
         auth_evidence,
         events_path,
+        exec_result,
     )
 }
 
@@ -108,6 +109,7 @@ pub(in crate::engine) fn finish_parallel_run(
         environment,
         auth_evidence,
         events_path,
+        exec_result,
     )
 }
 
@@ -122,6 +124,7 @@ fn write_receipt(
     environment: EnvironmentFingerprint,
     auth_evidence: AuthEvidence,
     events_path: &Path,
+    execution_result: ExecutionResult,
 ) -> Result<Receipt> {
     let receipt = Receipt {
         receipt_version: "shipper.receipt.v2".to_string(),
@@ -134,6 +137,7 @@ fn write_receipt(
         git_context,
         environment,
         auth_evidence: Some(auth_evidence),
+        execution_result,
     };
 
     let reconciliation_report = crate::state::reconciliation::write_report_from_events(

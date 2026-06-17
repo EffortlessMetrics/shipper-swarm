@@ -433,6 +433,7 @@ mod tests {
                 arch: "test".to_string(),
             },
             auth_evidence: None,
+            execution_result: crate::types::ExecutionResult::Success,
         }
     }
 
@@ -523,7 +524,7 @@ mod tests {
 
     #[test]
     fn detects_in_events_only() {
-        // events says published, state says pending → resume would duplicate
+        // events says published, state says pending â†’ resume would duplicate
         let td = tempdir().expect("tempdir");
         write_events(td.path(), vec![published_event("a", "1.0.0")]);
 
@@ -538,7 +539,7 @@ mod tests {
 
     #[test]
     fn detects_in_state_only() {
-        // state says published but no event recorded it → event log bypassed
+        // state says published but no event recorded it â†’ event log bypassed
         let td = tempdir().expect("tempdir");
         write_events(td.path(), vec![]);
 
@@ -691,7 +692,7 @@ mod tests {
     #[test]
     fn empty_state_and_empty_events_are_consistent() {
         let td = tempdir().expect("tempdir");
-        // No events file written at all — read_from_file treats missing as empty.
+        // No events file written at all â€” read_from_file treats missing as empty.
         let state = make_state(vec![]);
 
         let drift = verify_events_state_consistency(&td.path().join(EVENTS_FILE), &state)

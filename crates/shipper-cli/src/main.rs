@@ -9,6 +9,12 @@
 //!    wired into their pipelines on the old name.
 //! 2. Local workspace development: `cargo run -p shipper-cli -- <args>`
 //!    is still a reasonable way to exercise the CLI without installing.
-fn main() -> anyhow::Result<()> {
-    shipper_cli::run()
+fn main() -> std::process::ExitCode {
+    match shipper_cli::run() {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("{e:#}");
+            std::process::ExitCode::FAILURE
+        }
+    }
 }

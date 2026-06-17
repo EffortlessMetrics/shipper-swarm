@@ -1,6 +1,5 @@
 ---
 source: crates/shipper-types/src/lib.rs
-assertion_line: 1608
 expression: receipt
 ---
 receipt_version: shipper.receipt.v1
@@ -46,3 +45,4 @@ environment:
   rust_version: 1.82.0
   os: linux
   arch: x86_64
+execution_result: success

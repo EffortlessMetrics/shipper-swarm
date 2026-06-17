@@ -41,8 +41,9 @@ use shipper_core::engine::{self, Reporter};
 use shipper_core::plan;
 use shipper_core::runtime::execution::pkg_key;
 use shipper_core::types::{
-    EventType, ExecutionState, Finishability, PackageState, PlannedPackage, PreflightPackage,
-    PreflightReport, PublishEvent, Registry, ReleasePlan, ReleaseSpec, RuntimeOptions,
+    EventType, ExecutionResult, ExecutionState, Finishability, PackageState, PlannedPackage,
+    PreflightPackage, PreflightReport, PublishEvent, Registry, ReleasePlan, ReleaseSpec,
+    RuntimeOptions,
 };
 
 mod doctor;
@@ -779,22 +780,24 @@ impl Reporter for CliReporter {
 /// and for the `shipper-cli` crate's own `shipper-cli` binary — both
 /// are three-line `fn main() { shipper_cli::run() }` wrappers over
 /// this function.
-pub fn run() -> Result<()> {
+pub fn run() -> Result<std::process::ExitCode> {
     let cli = Cli::parse();
 
     if cli.version {
         print_version(cli.verbose);
-        return Ok(());
+        return Ok(std::process::ExitCode::SUCCESS);
     }
 
     // Handle Config commands early (they don't need workspace plan)
     if let Some(Commands::Config(config_cmd)) = &cli.cmd {
-        return run_config(config_cmd.clone());
+        run_config(config_cmd.clone())?;
+        return Ok(std::process::ExitCode::SUCCESS);
     }
 
     // Handle Completion commands early (they don't need workspace plan)
     if let Some(Commands::Completion { shell }) = &cli.cmd {
-        return run_completion(shell);
+        run_completion(shell)?;
+        return Ok(std::process::ExitCode::SUCCESS);
     }
 
     if cli.cmd.is_none() {
@@ -982,6 +985,7 @@ pub fn run() -> Result<()> {
                 opts.registries.clone()
             };
 
+            let mut last_exit_code = std::process::ExitCode::SUCCESS;
             for reg in target_registries {
                 if opts.registries.len() > 1 {
                     if cli.format == "json" {
@@ -1038,7 +1042,11 @@ pub fn run() -> Result<()> {
                     &current_opts.state_dir,
                     &cli.format,
                 )?;
+
+                last_exit_code = exit_code_for_result(&receipt.execution_result);
             }
+
+            return Ok(last_exit_code);
         }
         Commands::Resume => {
             let target_registries = if opts.registries.is_empty() {
@@ -1047,6 +1055,7 @@ pub fn run() -> Result<()> {
                 opts.registries.clone()
             };
 
+            let mut last_exit_code = std::process::ExitCode::SUCCESS;
             for reg in target_registries {
                 if opts.registries.len() > 1 {
                     if cli.format == "json" {
@@ -1102,7 +1111,11 @@ pub fn run() -> Result<()> {
                     &current_opts.state_dir,
                     &cli.format,
                 )?;
+
+                last_exit_code = exit_code_for_result(&receipt.execution_result);
             }
+
+            return Ok(last_exit_code);
         }
         Commands::Rehearse => {
             let outcome = engine::run_rehearsal(&planned, &opts, &mut reporter)?;
@@ -1144,7 +1157,7 @@ pub fn run() -> Result<()> {
                     );
                 }
                 run_status_watch(&planned, &opts, &cli.format)?;
-                return Ok(());
+                return Ok(std::process::ExitCode::SUCCESS);
             }
 
             let mut registry_reports = Vec::new();
@@ -1325,7 +1338,7 @@ pub fn run() -> Result<()> {
                         "yank plan complete: {succeeded}/{} entries yanked successfully",
                         yank_plan.entries.len()
                     ));
-                    return Ok(());
+                    return Ok(std::process::ExitCode::SUCCESS);
                 }
             }
 
@@ -1684,7 +1697,7 @@ pub fn run() -> Result<()> {
                     "remediation containment complete: {succeeded}/{} yanks executed successfully",
                     plan.yank_order.len()
                 ));
-                return Ok(());
+                return Ok(std::process::ExitCode::SUCCESS);
             }
 
             if !dry_run {
@@ -1749,7 +1762,32 @@ pub fn run() -> Result<()> {
         }
     }
 
-    Ok(())
+    Ok(std::process::ExitCode::SUCCESS)
+}
+
+/// Map an [`ExecutionResult`] to a process exit code.
+///
+/// This gives CI systems a machine-readable way to distinguish publish
+/// outcomes without parsing stderr or the JSON envelope:
+///
+/// | Code | Meaning |
+/// |-----:|---------|
+/// | 0 | All packages published/skipped (`Success`) |
+/// | 1 | All packages failed / general error (`CompleteFailure`) |
+/// | 2 | Some packages published, some failed — resume is safe (`PartialFailure`) |
+///
+/// The `PartialFailure → 2` mapping is the key integration improvement: a CI
+/// pipeline can check `if exit_code == 2` to trigger a `shipper resume` step
+/// rather than treating the run as a hard failure.
+fn exit_code_for_result(result: &ExecutionResult) -> std::process::ExitCode {
+    use std::process::ExitCode;
+    match result {
+        ExecutionResult::Success => ExitCode::SUCCESS,
+        // Partial failure: some packages published, some didn't. Resume is
+        // the intended next step — distinguish from a hard error (exit 1).
+        ExecutionResult::PartialFailure => ExitCode::from(2),
+        ExecutionResult::CompleteFailure => ExitCode::FAILURE,
+    }
 }
 
 /// Operator-facing hint attached to a failed `preflight` run.
@@ -2738,6 +2776,7 @@ fn package_noun(count: usize) -> &'static str {
 struct PublishJsonReport<'a> {
     schema_version: &'static str,
     command: &'static str,
+    execution_result: &'a ExecutionResult,
     safe_to_rerun: bool,
     registry: String,
     plan_id: &'a str,
@@ -2757,6 +2796,7 @@ struct PublishJsonReport<'a> {
 struct ResumeJsonReport<'a> {
     schema_version: &'static str,
     command: &'static str,
+    execution_result: &'a ExecutionResult,
     safe_to_resume: bool,
     registry: String,
     plan_id: &'a str,
@@ -2871,6 +2911,7 @@ fn build_publish_json_report<'a>(
     Ok(PublishJsonReport {
         schema_version: "shipper.publish.v1",
         command: "publish",
+        execution_result: &receipt.execution_result,
         safe_to_rerun,
         registry: receipt.registry.name.clone(),
         plan_id: &receipt.plan_id,
@@ -2899,6 +2940,7 @@ fn build_resume_json_report<'a>(
     Ok(ResumeJsonReport {
         schema_version: "shipper.resume.v1",
         command: "resume",
+        execution_result: &receipt.execution_result,
         safe_to_resume,
         registry: receipt.registry.name.clone(),
         plan_id: &receipt.plan_id,
@@ -4407,6 +4449,27 @@ mod tests {
     fn parse_duration_handles_valid_and_invalid_inputs() {
         assert!(parse_duration("1s").is_ok());
         assert!(parse_duration("nope").is_err());
+    }
+
+    #[test]
+    fn exit_code_for_result_maps_correctly() {
+        use std::process::ExitCode;
+
+        // Success → 0
+        assert_eq!(
+            ExitCode::SUCCESS,
+            exit_code_for_result(&ExecutionResult::Success)
+        );
+        // PartialFailure → 2 (CI gate: resume recommended)
+        assert_eq!(
+            ExitCode::from(2),
+            exit_code_for_result(&ExecutionResult::PartialFailure)
+        );
+        // CompleteFailure → 1 (hard failure)
+        assert_eq!(
+            ExitCode::FAILURE,
+            exit_code_for_result(&ExecutionResult::CompleteFailure)
+        );
     }
 
     #[test]

@@ -110,9 +110,12 @@ Common event types:
   ],
   "event_log_path": ".shipper/events.jsonl",
   "git_context": {...},
-  "environment": {...}
+  "environment": {...},
+  "execution_result": "success"
 }
 ```
+
+`execution_result` is the aggregate run outcome: `"success"`, `"partial_failure"`, or `"complete_failure"`. It matches the process exit code (0 / 2 / 1) and the `execution_result` field in the `--format json` envelope. The field is `#[serde(default)]` — receipts written before it existed deserialize as `"success"`.
 
 ## jq one-liners
 

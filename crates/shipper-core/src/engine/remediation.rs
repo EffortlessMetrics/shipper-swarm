@@ -338,6 +338,7 @@ mod tests {
                 arch: "test".to_string(),
             },
             auth_evidence: None,
+            execution_result: crate::types::ExecutionResult::Success,
         }
     }
 

@@ -207,11 +207,12 @@ fn sample_receipt(plan_id: &str, pkg_names: &[&str]) -> shipper::types::Receipt 
             arch: "x86_64".to_string(),
         },
         auth_evidence: None,
+        execution_result: ExecutionResult::Success,
     }
 }
 
 // ===========================================================================
-// 1. Plan building from a three-crate workspace — dependency ordering
+// 1. Plan building from a three-crate workspace â€” dependency ordering
 // ===========================================================================
 
 #[test]
@@ -296,7 +297,7 @@ fn plan_filters_out_non_publishable_crates() {
 }
 
 // ===========================================================================
-// 4. Config validation pipeline: valid → roundtrip → invalid rejection
+// 4. Config validation pipeline: valid â†’ roundtrip â†’ invalid rejection
 // ===========================================================================
 
 #[test]
@@ -372,7 +373,7 @@ fn config_cli_overrides_take_precedence() {
 }
 
 // ===========================================================================
-// 6. State persistence: three-package partial progress → resume → complete
+// 6. State persistence: three-package partial progress â†’ resume â†’ complete
 // ===========================================================================
 
 #[test]
@@ -578,7 +579,7 @@ fn event_emission_full_lifecycle_with_preflight() {
         package: "base@0.2.0".to_string(),
     });
 
-    // Publish mid — fails once then succeeds
+    // Publish mid â€” fails once then succeeds
     log.record(PublishEvent {
         timestamp: Utc::now(),
         event_type: EventType::PackageStarted {
@@ -609,7 +610,7 @@ fn event_emission_full_lifecycle_with_preflight() {
         package: "mid@0.2.0".to_string(),
     });
 
-    // Publish top — succeeds first try
+    // Publish top â€” succeeds first try
     log.record(PublishEvent {
         timestamp: Utc::now(),
         event_type: EventType::PackageStarted {
@@ -649,7 +650,7 @@ fn event_emission_full_lifecycle_with_preflight() {
 
     // Verify per-package event counts
     let base_events = loaded.events_for_package("base@0.2.0");
-    assert_eq!(base_events.len(), 7); // new-crate + started + attempted + published + readiness×3
+    assert_eq!(base_events.len(), 7); // new-crate + started + attempted + published + readinessÃ—3
 
     let mid_events = loaded.events_for_package("mid@0.2.0");
     assert_eq!(mid_events.len(), 4); // started + failed + attempted + published
@@ -658,7 +659,7 @@ fn event_emission_full_lifecycle_with_preflight() {
     assert_eq!(top_events.len(), 3); // started + attempted + published
 
     let global_events = loaded.events_for_package("all");
-    assert_eq!(global_events.len(), 6); // preflight×3 + plan_created + exec_started + exec_finished
+    assert_eq!(global_events.len(), 6); // preflightÃ—3 + plan_created + exec_started + exec_finished
 }
 
 // ===========================================================================
@@ -870,7 +871,7 @@ fn registry_list_owners_with_mock() {
 }
 
 // ===========================================================================
-// 13. Registry: multi-request session — version check for all planned packages
+// 13. Registry: multi-request session â€” version check for all planned packages
 // ===========================================================================
 
 #[test]
@@ -1300,6 +1301,7 @@ fn receipt_mixed_outcomes_through_file_store() {
             arch: "x86_64".to_string(),
         },
         auth_evidence: None,
+        execution_result: ExecutionResult::Success,
     };
 
     store.save_receipt(&receipt).expect("save receipt");
@@ -1358,6 +1360,7 @@ fn environment_fingerprint_in_receipt_through_store() {
             arch: "x86_64".to_string(),
         },
         auth_evidence: None,
+        execution_result: ExecutionResult::Success,
     };
 
     store.save_receipt(&receipt).expect("save");
@@ -1770,7 +1773,7 @@ fn error_recovery_fail_persist_resume_succeed() {
     // Verify incomplete state exists
     assert!(state::has_incomplete_state(&state_dir));
 
-    // Phase 2: Resume — load state, reset failed package to pending, then publish
+    // Phase 2: Resume â€” load state, reset failed package to pending, then publish
     let mut resumed = state::load_state(&state_dir)
         .expect("load")
         .expect("exists");
@@ -1920,7 +1923,7 @@ fn plan_filtering_single_package_no_deps() {
     let root = td.path();
     create_three_crate_workspace(root);
 
-    // Select only "base" — no transitive deps needed since base has none
+    // Select only "base" â€” no transitive deps needed since base has none
     let spec = ReleaseSpec {
         manifest_path: root.join("Cargo.toml"),
         registry: Registry::crates_io(),
@@ -1938,7 +1941,7 @@ fn plan_filtering_mid_package_pulls_base_dep() {
     let root = td.path();
     create_three_crate_workspace(root);
 
-    // Select "mid" — should pull in base as transitive dep
+    // Select "mid" â€” should pull in base as transitive dep
     let spec = ReleaseSpec {
         manifest_path: root.join("Cargo.toml"),
         registry: Registry::crates_io(),
@@ -2150,6 +2153,7 @@ fn receipt_all_fields_persisted_and_roundtrip() {
             arch: "aarch64".to_string(),
         },
         auth_evidence: None,
+        execution_result: ExecutionResult::Success,
     };
 
     state::write_receipt(&state_dir, &receipt).expect("write receipt");
@@ -2403,7 +2407,7 @@ fn lock_double_acquire_fails() {
 }
 
 // ===========================================================================
-// 38. Full lifecycle: plan → state → events → receipt through FileStore
+// 38. Full lifecycle: plan â†’ state â†’ events â†’ receipt through FileStore
 // ===========================================================================
 
 #[test]

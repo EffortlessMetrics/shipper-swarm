@@ -1,6 +1,6 @@
 //! Cross-crate integration tests verifying that shipper's public modules
-//! compose correctly: config → plan, plan → state, auth → registry,
-//! state → store → events, and full preflight flows with a mocked registry.
+//! compose correctly: config â†’ plan, plan â†’ state, auth â†’ registry,
+//! state â†’ store â†’ events, and full preflight flows with a mocked registry.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -136,11 +136,12 @@ fn sample_receipt(plan_id: &str) -> shipper::types::Receipt {
             arch: "x86_64".to_string(),
         },
         auth_evidence: None,
+        execution_result: ExecutionResult::Success,
     }
 }
 
 // ===========================================================================
-// 1. Config loading → plan building flow
+// 1. Config loading â†’ plan building flow
 // ===========================================================================
 
 #[test]
@@ -180,7 +181,7 @@ fn config_load_then_build_plan() {
 }
 
 // ===========================================================================
-// 2. Plan building → state persistence flow
+// 2. Plan building â†’ state persistence flow
 // ===========================================================================
 
 #[test]
@@ -237,7 +238,7 @@ fn plan_build_then_persist_state() {
 }
 
 // ===========================================================================
-// 3. Auth resolution → registry checking flow (mocked HTTP)
+// 3. Auth resolution â†’ registry checking flow (mocked HTTP)
 // ===========================================================================
 
 #[test]
@@ -311,7 +312,7 @@ fn registry_reports_missing_version() {
 }
 
 // ===========================================================================
-// 4. Full flow: config → plan → preflight (mocked registry)
+// 4. Full flow: config â†’ plan â†’ preflight (mocked registry)
 // ===========================================================================
 
 #[test]
@@ -374,7 +375,7 @@ fn config_to_plan_to_registry_version_check() {
 }
 
 // ===========================================================================
-// 5. State save → reload → resume verification
+// 5. State save â†’ reload â†’ resume verification
 // ===========================================================================
 
 #[test]
@@ -572,7 +573,7 @@ fn event_log_simulated_publish_lifecycle() {
 
     // Verify per-package filtering
     let core_events = loaded.events_for_package("core@0.1.0");
-    assert_eq!(core_events.len(), 7); // started, attempted, published, readiness×4
+    assert_eq!(core_events.len(), 7); // started, attempted, published, readinessÃ—4
 
     let app_events = loaded.events_for_package("app@0.1.0");
     assert_eq!(app_events.len(), 4); // started, failed, attempted, published
@@ -736,7 +737,7 @@ fn events_persisted_via_store_readable_via_state_module() {
 // 11. Plan creation for multi-level dependency trees (deep 5-crate chain)
 // ===========================================================================
 
-/// Five-crate linear chain: a → b → c → d → e
+/// Five-crate linear chain: a â†’ b â†’ c â†’ d â†’ e
 fn create_deep_chain_workspace(root: &Path) {
     write_file(
         &root.join("Cargo.toml"),
@@ -1348,7 +1349,7 @@ fn event_log_full_publish_flow_deep_chain() {
     log.write_to_file(&events_path).expect("write events");
     let loaded = EventLog::read_from_file(&events_path).expect("read events");
 
-    // 2 global + 4×3 simple + 4 for c (started+failed+attempted+published) = 2 + 12 + 4 + 1 = 19
+    // 2 global + 4Ã—3 simple + 4 for c (started+failed+attempted+published) = 2 + 12 + 4 + 1 = 19
     assert_eq!(loaded.all_events().len(), 19);
 
     // c had a failure + retry
@@ -1440,6 +1441,7 @@ fn receipt_with_mixed_outcomes_roundtrips() {
             arch: "x86_64".to_string(),
         },
         auth_evidence: None,
+        execution_result: ExecutionResult::Success,
     };
 
     state::write_receipt(&state_dir, &receipt).expect("write receipt");
@@ -1491,6 +1493,7 @@ fn receipt_environment_fingerprint_roundtrips() {
             arch: "aarch64".to_string(),
         },
         auth_evidence: None,
+        execution_result: ExecutionResult::Success,
     };
 
     state::write_receipt(&state_dir, &receipt).expect("write receipt");

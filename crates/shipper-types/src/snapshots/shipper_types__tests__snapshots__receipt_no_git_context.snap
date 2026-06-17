@@ -30,3 +30,4 @@ environment:
   rust_version: ~
   os: windows
   arch: aarch64
+execution_result: success
