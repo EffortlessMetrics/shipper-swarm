@@ -4721,3 +4721,112 @@ fn reconcile_bdd_ambiguous_resolves_to_still_unknown() {
 
     server.join();
 }
+
+/// Regression test for #418: the "final chance after error" fallback branch
+/// (`publish.rs` ~`:1131`) must emit `PackagePublished` to `events.jsonl`,
+/// not just advance `state.json`. Without it, `state.json` says Published
+/// while `events.jsonl` has no projection for the package — a drift the
+/// finalization consistency check rejects loudly.
+///
+/// Scenario: cargo exits 1 with a transient error, version_exists returns
+/// 404 (initial), 404 (after the failed attempt), then 200 (the "final
+/// chance" check finds the package on the registry). The package ends up
+/// Published via the buggy branch. We assert the `PackagePublished` event
+/// is present in `events.jsonl`.
+#[test]
+#[serial]
+fn publish_package_final_chance_success_emits_package_published_event() {
+    let td = tempdir().expect("tempdir");
+    let bin = td.path().join("bin");
+    write_fake_tools(&bin);
+
+    // version_exists: 404 (initial), 404 (after failure), 200 (final chance)
+    let server = spawn_registry_server(
+        BTreeMap::from([(
+            "/api/v1/crates/demo/0.1.0".to_string(),
+            vec![
+                (404, "{}".to_string()),
+                (404, "{}".to_string()),
+                (200, "{}".to_string()),
+            ],
+        )]),
+        3,
+    );
+
+    let ws = planned_workspace(td.path(), server.base_url.clone());
+    let reg = RegistryClient::new(ws.plan.registry.api_base.as_str());
+    let mut opts = default_opts(PathBuf::from(".shipper"));
+    opts.max_attempts = 1;
+    let state_dir = td.path().join(".shipper");
+    std::fs::create_dir_all(&state_dir).expect("mkdir state");
+    let st = Arc::new(Mutex::new(init_state_for_package(
+        &ws.plan.plan_id,
+        &ws.plan.registry,
+        "demo",
+        "0.1.0",
+    )));
+    let event_log = Arc::new(Mutex::new(events::EventLog::new()));
+    let events_path = events::events_path(&state_dir);
+    let reporter = make_send_reporter();
+
+    temp_env::with_vars(
+        [
+            (
+                "SHIPPER_CARGO_BIN",
+                Some(fake_cargo_path(&bin).to_str().expect("utf8")),
+            ),
+            ("SHIPPER_CARGO_EXIT", Some("1")),
+            ("SHIPPER_CARGO_STDERR", Some("timeout talking to server")),
+        ],
+        || {
+            let result = publish_package(
+                &ws.plan.packages[0],
+                &ws,
+                &opts,
+                &reg,
+                &st,
+                &state_dir,
+                &event_log,
+                &events_path,
+                &reporter,
+            );
+
+            // The package should be reported Published (via the final-chance branch).
+            let receipt = result.result.expect("should succeed via final-chance");
+            assert!(
+                matches!(receipt.state, PackageState::Published),
+                "expected Published via final-chance, got {:?}",
+                receipt.state
+            );
+
+            // State must agree.
+            let state = st.lock().unwrap();
+            let progress = state.packages.get("demo@0.1.0").expect("pkg");
+            assert!(
+                matches!(progress.state, PackageState::Published),
+                "state.json should be Published, got {:?}",
+                progress.state
+            );
+
+            // The invariant: events.jsonl MUST contain a PackagePublished event.
+            let persisted =
+                events::EventLog::read_from_file(&events_path).expect("read events file");
+            let has_published = persisted
+                .all_events()
+                .iter()
+                .any(|e| matches!(e.event_type, EventType::PackagePublished { .. }));
+            assert!(
+                has_published,
+                "#418 regression: final-chance Published branch emitted no PackagePublished event \
+                 (events.jsonl has {} events: {:?})",
+                persisted.all_events().len(),
+                persisted
+                    .all_events()
+                    .iter()
+                    .map(|e| format!("{:?}", e.event_type))
+                    .collect::<Vec<_>>()
+            );
+        },
+    );
+    server.join();
+}
