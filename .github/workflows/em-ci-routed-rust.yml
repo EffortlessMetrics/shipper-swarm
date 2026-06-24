@@ -15,8 +15,8 @@ on:
         type: choice
         options:
           - auto
-          - cpx42
           - cx43
+          - cpx42
           - cx53
           - github
 
@@ -37,7 +37,10 @@ permissions:
 jobs:
   route:
     name: Route Shipper Rust Small
-    runs-on: self-hosted
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on:
+      group: em-ci-nano
+      labels: [self-hosted, linux, x64, em-ci, cx23, ci-nano, trusted-pr]
     timeout-minutes: 5
     outputs:
       target: ${{ steps.pick.outputs.target }}
@@ -68,7 +71,7 @@ jobs:
           github_token = os.environ.get("GITHUB_TOKEN", "")
           token = os.environ.get("GH_TOKEN", "")
           org = os.environ.get("ORG", "EffortlessMetrics")
-          route_order = ["cpx42", "cx43", "cx53"]
+          route_order = ["cx43", "cpx42", "cx53"]
 
           with open(event_path, "r", encoding="utf-8") as fh:
               event = json.load(fh)
@@ -173,8 +176,8 @@ jobs:
 
           target_labels = {
               "cpx42": {"self-hosted", "linux", "x64", "em-ci", "cpx42", "rust-16gb", "rust-medium", "trusted-pr"},
-              "cx43": {"self-hosted", "linux", "x64", "em-ci", "cx43", "rust-small", "trusted-pr"},
-              "cx53": {"self-hosted", "linux", "x64", "em-ci", "cx53", "rust-small", "trusted-pr"},
+              "cx43": {"self-hosted", "linux", "x64", "em-ci", "cx43", "rust-medium", "trusted-pr"},
+              "cx53": {"self-hosted", "linux", "x64", "em-ci", "cx53", "rust-large", "trusted-pr"},
           }
 
           for target in route_order:
@@ -198,8 +201,10 @@ jobs:
   rust_small_cx43:
     name: Shipper Rust Small on CX43
     needs: [route]
-    if: needs.route.outputs.target == 'cx43'
-    runs-on: [self-hosted, Linux, X64, em-ci, rust-small, trusted-pr, cx43]
+    if: needs.route.outputs.target == 'cx43' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on:
+      group: em-ci-small
+      labels: [self-hosted, linux, x64, em-ci, cx43, rust-medium, trusted-pr]
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v6.0.2
@@ -240,7 +245,7 @@ jobs:
   rust_small_cpx42:
     name: Shipper Rust Small on CPX42
     needs: [route]
-    if: needs.route.outputs.target == 'cpx42'
+    if: needs.route.outputs.target == 'cpx42' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on:
       group: em-ci-small
       labels: [self-hosted, linux, x64, em-ci, cpx42, rust-16gb, rust-medium, trusted-pr]
@@ -312,8 +317,10 @@ jobs:
   rust_small_cx53:
     name: Shipper Rust Small on CX53
     needs: [route]
-    if: needs.route.outputs.target == 'cx53'
-    runs-on: [self-hosted, Linux, X64, em-ci, rust-small, trusted-pr, cx53]
+    if: needs.route.outputs.target == 'cx53' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on:
+      group: em-ci-small
+      labels: [self-hosted, linux, x64, em-ci, cx53, rust-large, trusted-pr]
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v6.0.2
@@ -352,10 +359,10 @@ jobs:
           cargo run -p shipper -- preflight --help
 
   rust_small_github:
-    name: Shipper Rust Tiny Fallback (routed to self-hosted)
+    name: Shipper Rust Small on GitHub Hosted
     needs: [route]
     if: needs.route.outputs.target == 'github' && needs.route.outputs.fallback_allowed == 'true'
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6.0.2
@@ -379,8 +386,10 @@ jobs:
       - rust_small_cpx42
       - rust_small_cx53
       - rust_small_github
-    if: always()
-    runs-on: self-hosted
+    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on:
+      group: em-ci-nano
+      labels: [self-hosted, linux, x64, em-ci, cx23, ci-nano, trusted-pr]
     timeout-minutes: 5
     steps:
       - name: Normalize routed result
