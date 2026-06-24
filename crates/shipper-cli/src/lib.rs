@@ -848,6 +848,23 @@ impl Reporter for CliReporter {
     }
 }
 
+/// Format a top-level error for the operator-facing format.
+///
+/// Centralized here so the `shipper` and `shipper-cli` binaries cannot
+/// diverge. Returns the anyhow error in the readable multi-line form —
+/// `Error: <outer>` followed by a blank line and a `Caused by:` section
+/// enumerating each cause. Do **not** use `{e:#}` (alternate `Display`): that
+/// flattens the chain into a single line joined by `: `, hiding the cause
+/// structure. See `report_error_format` test for the contract this preserves.
+pub fn format_error(error: &anyhow::Error) -> String {
+    format!("Error: {error:?}")
+}
+
+/// Render a top-level error to stderr via [`format_error`].
+pub fn report_error(error: &anyhow::Error) {
+    eprintln!("{}", format_error(error));
+}
+
 /// CLI entry point. Exposed for the `shipper` crate's binary target
 /// and for the `shipper-cli` crate's own `shipper-cli` binary — both
 /// are three-line `fn main() { shipper_cli::run() }` wrappers over
@@ -4546,6 +4563,47 @@ mod tests {
         assert_eq!(
             ExitCode::FAILURE,
             exit_code_for_result(&ExecutionResult::CompleteFailure)
+        );
+    }
+
+    /// Regression guard for the top-level error format (PR #417 regression:
+    /// `{e:#}` flattened cause chains into one line; `format_error` must
+    /// preserve the readable `Error:` / `Caused by:` structure). If this
+    /// test fails, do NOT change the assertions — the renderer regressed.
+    #[test]
+    fn report_error_format_preserves_multi_line_cause_chain() {
+        // Build a three-level chain: outer -> mid -> leaf.
+        let leaf = std::io::Error::other("leaf cause");
+        let mid = anyhow::Error::new(leaf).context("mid context");
+        let error = mid.context("outer context");
+
+        let rendered = format_error(&error);
+
+        // Must start with the top-level "Error:" prefix.
+        assert!(
+            rendered.starts_with("Error: outer context"),
+            "missing `Error:` prefix; got:\n{rendered}"
+        );
+        // Must have a blank line then a `Caused by:` section header.
+        assert!(
+            rendered.contains("\n\nCaused by:"),
+            "missing blank-line + `Caused by:` section; got:\n{rendered}"
+        );
+        // Every cause level must be present.
+        assert!(
+            rendered.contains("mid context"),
+            "mid cause missing; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("leaf cause"),
+            "leaf cause missing; got:\n{rendered}"
+        );
+        // Must NOT collapse to a single line with `: ` separators (the
+        // `{e:#}` regression signature).
+        let first_line = rendered.lines().next().unwrap();
+        assert!(
+            !first_line.contains("outer context: mid context"),
+            "cause chain collapsed to single line (`{{e:#}}` regression); got:\n{rendered}"
         );
     }
 
