@@ -221,7 +221,7 @@ jobs:
     runs-on: [self-hosted, Linux, X64, em-ci, rust-small, trusted-pr, cx43]
     timeout-minutes: 75
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v7.0.0
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -232,7 +232,7 @@ jobs:
           tool: cargo-nextest
 
       - name: Cache Cargo
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -270,7 +270,7 @@ jobs:
       TMPDIR: /mnt/ci-scratch/tmp/${{ github.run_id }}-${{ github.run_attempt }}
       CARGO_TARGET_DIR: /mnt/ci-scratch/shipper/${{ github.run_id }}-${{ github.run_attempt }}
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v7.0.0
         with:
           fetch-depth: 1
 
@@ -293,7 +293,7 @@ jobs:
           tool: cargo-nextest
 
       - name: Cache Cargo
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -335,7 +335,7 @@ jobs:
     runs-on: [self-hosted, Linux, X64, em-ci, rust-small, trusted-pr, cx53]
     timeout-minutes: 75
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v7.0.0
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -346,7 +346,7 @@ jobs:
           tool: cargo-nextest
 
       - name: Cache Cargo
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -390,7 +390,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v7.0.0
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -401,7 +401,7 @@ jobs:
           tool: cargo-nextest
 
       - name: Cache Cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
