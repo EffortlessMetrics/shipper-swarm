@@ -105,6 +105,7 @@ jobs:
           fallback_allowed = force_route == "github" or any(label in {"allow-github-hosted", "ci-budget-ack"} for label in labels)
 
           trusted = event_name in {"push", "workflow_dispatch", "merge_group"}
+          bot_authored = False
           if event_name == "pull_request":
               pull_request = event.get("pull_request", {})
               head = pull_request.get("head", {})
@@ -113,6 +114,15 @@ jobs:
               trusted = head_repo == repo
               if not trusted and head_repo is None:
                   trusted = source_branch_matches(head.get("ref"), head.get("sha"))
+              # Bot-authored PRs (Dependabot, factory-droid, etc.) carry their
+              # own audit trail and consume no repository secrets at checkout
+              # time. GitHub masks repository secrets for them, so the runner
+              # read token below is unavailable by design. Treat such PRs as
+              # eligible for the GitHub-hosted fallback lane rather than as a
+              # hard routing failure (see SWARM_OPERATION.md §Queue Stewardship:
+              # trust-bootstrap condition).
+              author = pull_request.get("user") or {}
+              bot_authored = str(author.get("type", "")).lower() == "bot"
 
           def set_output(target, reason, fallback_allowed=False):
               output_path = os.environ["GITHUB_OUTPUT"]
@@ -147,7 +157,16 @@ jobs:
               sys.exit(0)
 
           if not token:
-              set_output("github", "runner_token_missing", fallback_allowed)
+              # Repository secrets are masked for Dependabot/bot PRs, so the
+              # runner read token is unavailable. For bot-authored PRs this is
+              # the documented trust-bootstrap condition, not a misconfiguration:
+              # route to the GitHub-hosted fallback (runs on ubuntu-latest, no
+              # repository secrets consumed) so the gate still runs. For human
+              # PRs keep the loud runner_token_missing hard-failure.
+              if bot_authored:
+                  set_output("github", "bot_pr_github_fallback", True)
+              else:
+                  set_output("github", "runner_token_missing", fallback_allowed)
               sys.exit(0)
 
           try:
@@ -352,24 +371,59 @@ jobs:
           cargo run -p shipper -- preflight --help
 
   rust_small_github:
-    name: Shipper Rust Tiny Fallback (routed to self-hosted)
+    name: Shipper Rust Small (GitHub-hosted fallback)
     needs: [route]
     if: needs.route.outputs.target == 'github' && needs.route.outputs.fallback_allowed == 'true'
-    runs-on: self-hosted
-    timeout-minutes: 15
+    # GitHub-hosted runners for the fallback lane. Used by bot-authored PRs
+    # (Dependabot, factory-droid) whose diffs are trivially auditable and whose
+    # checkout-time secret surface is empty, so there is no secret-exposure
+    # risk on shared infrastructure. Keeps self-hosted capacity free for
+    # trusted human-PR work. See SWARM_OPERATION.md §Queue Stewardship.
+    #
+    # Runs the SAME meaningful Rust-small gate as the self-hosted lanes
+    # (check + nextest all-features + doc tests + smoke help), not just
+    # cargo check + --help. This is deliberate: a fallback lane that skips
+    # the test suite lets red sneak onto main (the #417 error-renderer
+    # regression escaped detection for weeks because the tiny fallback
+    # could not run snapshot tests). Costs Actions minutes — acceptable for
+    # the small volume of bot-authored PRs.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6.0.2
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-routed-rust-small-github-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-routed-rust-small-github-
+
       - name: Check workspace
         run: cargo check --workspace --locked --all-targets
+
+      - name: Test workspace
+        run: cargo nextest run --workspace --locked --all-targets --all-features --profile ci
+
+      - name: Test docs
+        run: cargo test --workspace --locked --doc
 
       - name: Smoke CLI help
         run: |
           cargo run -p shipper -- --help
           cargo run -p shipper -- plan --help
+          cargo run -p shipper -- preflight --help
 
   result:
     name: Shipper Rust Small Result

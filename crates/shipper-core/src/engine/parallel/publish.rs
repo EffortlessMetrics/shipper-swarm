@@ -197,6 +197,30 @@ fn record_readiness_event(
     Ok(())
 }
 
+/// Emit the `PackagePublished` event for `pkg_label` and flush it to
+/// `events.jsonl`. Used by every code path that advances a package to
+/// `PackageState::Published`, so that `state.json` and `events.jsonl` never
+/// drift (the events-as-truth invariant, #418). Mirrors the inline block in
+/// the normal readiness-success path.
+fn record_package_published_event(
+    event_log: &Arc<Mutex<events::EventLog>>,
+    events_path: &Path,
+    pkg_label: &str,
+    duration_ms: u64,
+) -> Result<()> {
+    let mut log = event_log.lock().map_err(|_| {
+        anyhow::anyhow!("event log lock poisoned while recording PackagePublished event")
+    })?;
+    log.record(PublishEvent {
+        timestamp: Utc::now(),
+        event_type: EventType::PackagePublished { duration_ms },
+        package: pkg_label.to_string(),
+    });
+    log.write_to_file(events_path)?;
+    log.clear();
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn wait_after_retry(
     reporter: &Arc<SendReporter>,
@@ -1106,6 +1130,17 @@ pub(super) fn publish_package(
                     let _ = state::save_state(state_dir, &state);
                 }
 
+                // Event: PackagePublished (#418 — keep events.jsonl in sync
+                // with the state→Published transition above).
+                if let Err(e) = record_package_published_event(
+                    event_log,
+                    events_path,
+                    &pkg_label,
+                    start_instant.elapsed().as_millis() as u64,
+                ) {
+                    return PackagePublishResult { result: Err(e) };
+                }
+
                 // Send webhook notification: package succeeded
                 maybe_send_event(
                     &opts.webhook,
@@ -1137,6 +1172,17 @@ pub(super) fn publish_package(
                 };
                 update_state_locked(&mut state, &key, PackageState::Published);
                 let _ = state::save_state(state_dir, &state);
+            }
+
+            // Event: PackagePublished (#418 — keep events.jsonl in sync with
+            // the state→Published transition above).
+            if let Err(e) = record_package_published_event(
+                event_log,
+                events_path,
+                &pkg_label,
+                duration_ms as u64,
+            ) {
+                return PackagePublishResult { result: Err(e) };
             }
 
             // Send webhook notification: package succeeded
