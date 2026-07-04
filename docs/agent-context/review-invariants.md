@@ -24,13 +24,13 @@ This file captures invariants for both human and Droid review of shipper PRs. Th
 
 These constrain how Factory Droid review is configured for shipper. A reviewer should reject any change that violates them without an explicit, scoped justification PR.
 
-- Droid review uses MiniMax M2.7 via Factory Droid BYOK.
-- Model is `custom:MiniMax-M2.7-0` for both `review_model` and `security_model`.
-- Runtime BYOK settings are written to `$HOME/.factory/settings.local.json` at job time.
+- Droid review uses MiniMax M3 via Factory Droid BYOK.
+- Model is `custom:MiniMax-M3-0` for both `review_model` and `security_model`.
+- Runtime BYOK settings are written to `$HOME/.factory/settings.json` at job time, and stale `$HOME/.factory/settings.local.json` is removed first so it cannot override M3.
 - The settings file is written via a single-quoted heredoc so `${MINIMAX_API_KEY}` remains literal in the file.
 - Do not rely on the Droid Action `settings:` input to deliver BYOK custom models.
-- Do not set `ANTHROPIC_AUTH_TOKEN`.
-- Do not set `ANTHROPIC_BASE_URL`.
+- Clear `ANTHROPIC_AUTH_TOKEN` to an empty string on Droid action steps.
+- Clear `ANTHROPIC_BASE_URL` to an empty string on Droid action steps.
 - `show_full_output: false` on every Droid action step.
 - `upload_debug_artifacts: false` on every Droid action step.
 - Droid action ref is `EffortlessMetrics/droid-action-safe@7c1377ccbacddc95560d1570547a5baa51de01ec`. Do not use `Factory-AI/droid-action` directly for MiniMax BYOK workflows.
