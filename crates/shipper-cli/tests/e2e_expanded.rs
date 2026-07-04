@@ -166,6 +166,17 @@ fn normalize_tempdir_paths(raw: &str, tempdir: &Path) -> String {
         normalized = normalized.replace(without_mnt_prefix, "<TMPDIR>");
     }
 
+    // On Windows, cargo/rustc diagnostics sometimes strip the drive prefix
+    // and leading slash (e.g. `C:/Users/.../Temp/.tmpABC` ->
+    // `Users/.../Temp/.tmpABC`), so the native/slash replacements above miss
+    // those occurrences. Strip the drive letter and leading slash from the
+    // forward-slash form and normalize that too.
+    if slash_path.len() > 3 && slash_path.as_bytes()[1] == b':' && slash_path.as_bytes()[2] == b'/'
+    {
+        let drive_stripped = &slash_path[3..];
+        normalized = normalized.replace(drive_stripped, "<TMPDIR>");
+    }
+
     normalized
 }
 
