@@ -27,7 +27,7 @@ jobs:
       group: em-ci-small
       labels: [self-hosted, linux, x64, em-ci, cx43, rust-medium, trusted-pr]
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v7.0.0
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -35,7 +35,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Cache Cargo
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -84,13 +84,13 @@ jobs:
       group: em-ci-small
       labels: [self-hosted, linux, x64, em-ci, cx43, rust-medium, trusted-pr]
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v7.0.0
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Cargo
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -142,7 +142,7 @@ jobs:
       group: em-ci-small
       labels: [self-hosted, linux, x64, em-ci, cx43, rust-medium, trusted-pr]
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v7.0.0
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -153,7 +153,7 @@ jobs:
           tool: cargo-nextest
 
       - name: Cache Cargo
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -190,13 +190,13 @@ jobs:
       group: em-ci-small
       labels: [self-hosted, linux, x64, em-ci, cx43, rust-medium, trusted-pr]
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v7.0.0
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Cargo
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -236,7 +236,7 @@ jobs:
       labels: [self-hosted, linux, x64, em-ci, cx53, rust-large, trusted-pr]
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v7.0.0
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -247,7 +247,7 @@ jobs:
           tool: cargo-nextest
 
       - name: Cache Cargo
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -276,7 +276,7 @@ jobs:
       group: em-ci-small
       labels: [self-hosted, linux, x64, em-ci, cx43, rust-medium, trusted-pr]
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v7.0.0
 
       - name: Install Rust (MSRV)
         uses: dtolnay/rust-toolchain@stable
@@ -284,7 +284,7 @@ jobs:
           toolchain: 1.95.0
 
       - name: Cache Cargo
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -302,7 +302,7 @@ jobs:
       group: em-ci-small
       labels: [self-hosted, linux, x64, em-ci, cx43, rust-medium, trusted-pr]
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v7.0.0
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -311,7 +311,16 @@ jobs:
         uses: taiki-e/install-action@cargo-audit
 
       - name: Run security audit
-        run: cargo audit
+        # The advisory-db cache lives under $CARGO_HOME on the persistent
+        # self-hosted runner. An interrupted fetch can leave it as a
+        # non-empty but invalid directory, which makes cargo-audit refuse to
+        # reinitialize it ("Refusing to initialize the non-empty directory as
+        # .../advisory-db") on every subsequent run. Remove a stale db so
+        # cargo-audit performs a clean clone; the advisory-db is small, so the
+        # re-clone cost per run is negligible.
+        run: |
+          rm -rf "${CARGO_HOME:-$HOME/.cargo}/advisory-db"
+          cargo audit
 
   docs:
     name: Documentation
@@ -319,13 +328,13 @@ jobs:
       group: em-ci-small
       labels: [self-hosted, linux, x64, em-ci, cx43, rust-medium, trusted-pr]
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v7.0.0
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Cargo
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -346,11 +355,11 @@ jobs:
       labels: [self-hosted, linux, x64, em-ci, cx43, rust-medium, trusted-pr]
     needs: [lint]
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v7.0.0
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Cargo
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -376,7 +385,7 @@ jobs:
       labels: [self-hosted, linux, x64, em-ci, cx53, rust-large, trusted-pr]
     needs: [lint]
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v7.0.0
 
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
@@ -390,7 +399,7 @@ jobs:
           tool: cargo-fuzz
 
       - name: Cache Cargo + fuzz
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -421,7 +430,7 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v7.0.0
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -432,7 +441,7 @@ jobs:
         run: rustup target add ${{ matrix.target }}
 
       - name: Cache Cargo
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -455,13 +464,13 @@ jobs:
       labels: [self-hosted, linux, x64, em-ci, cx53, rust-large, trusted-pr]
     needs: [lint, test]
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v7.0.0
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Cargo
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry

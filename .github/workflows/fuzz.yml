@@ -46,7 +46,7 @@ jobs:
           - redact_output
 
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v7.0.0
 
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
@@ -59,7 +59,7 @@ jobs:
           tool: cargo-fuzz
 
       - name: Cache Cargo + fuzz
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
