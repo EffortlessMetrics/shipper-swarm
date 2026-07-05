@@ -29,7 +29,9 @@ permissions:
 jobs:
   fuzz:
     name: Fuzz (${{ matrix.target }})
-    runs-on: self-hosted
+    runs-on:
+      group: em-ci-small
+      labels: [self-hosted, linux, x64, em-ci, cx53, rust-large, trusted-pr]
     # Only run on main branch for scheduled runs
     if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
     strategy:
@@ -120,7 +122,9 @@ jobs:
 
   fuzz-summary:
     name: Fuzz Summary
-    runs-on: self-hosted
+    runs-on:
+      group: em-ci-nano
+      labels: [self-hosted, linux, x64, em-ci, cx23, ci-nano, trusted-pr]
     needs: [fuzz]
     if: always()
     steps:

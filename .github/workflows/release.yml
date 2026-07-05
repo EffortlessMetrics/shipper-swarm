@@ -58,7 +58,9 @@ jobs:
   build-binaries:
     name: Build ${{ matrix.target }}
     if: github.repository == 'EffortlessMetrics/shipper' && github.event_name == 'push'
-    runs-on: self-hosted
+    runs-on:
+      group: em-ci-small
+      labels: [self-hosted, linux, x64, em-ci, cx53, rust-large, trusted-pr]
     strategy:
       fail-fast: false
       matrix:
@@ -124,7 +126,9 @@ jobs:
   msrv-gate:
     name: MSRV gate (1.95)
     if: github.repository == 'EffortlessMetrics/shipper' && github.event_name == 'push'
-    runs-on: self-hosted
+    runs-on:
+      group: em-ci-small
+      labels: [self-hosted, linux, x64, em-ci, cx53, rust-large, trusted-pr]
     steps:
       - uses: actions/checkout@v7.0.0
       - name: Install Rust (MSRV)
@@ -154,7 +158,9 @@ jobs:
   policy-gate:
     name: Policy gate (no-panic + invariants)
     if: github.repository == 'EffortlessMetrics/shipper' && github.event_name == 'push'
-    runs-on: self-hosted
+    runs-on:
+      group: em-ci-small
+      labels: [self-hosted, linux, x64, em-ci, cx53, rust-large, trusted-pr]
     steps:
       - uses: actions/checkout@v7.0.0
       - uses: dtolnay/rust-toolchain@stable
@@ -222,7 +228,9 @@ jobs:
   publish-crates-io:
     name: Publish to crates.io (via shipper)
     if: github.repository == 'EffortlessMetrics/shipper' && github.event_name == 'push'
-    runs-on: self-hosted
+    runs-on:
+      group: em-ci-small
+      labels: [self-hosted, linux, x64, em-ci, cx53, rust-large, trusted-pr]
     needs: [msrv-gate, policy-gate]
     environment: release
     timeout-minutes: 180
@@ -455,7 +463,9 @@ jobs:
   create-release:
     name: Create GitHub Release
     if: github.repository == 'EffortlessMetrics/shipper' && github.event_name == 'push'
-    runs-on: self-hosted
+    runs-on:
+      group: em-ci-small
+      labels: [self-hosted, linux, x64, em-ci, cx53, rust-large, trusted-pr]
     needs: [build-binaries, publish-crates-io]
     steps:
       - uses: actions/checkout@v7.0.0
@@ -502,7 +512,9 @@ jobs:
   release-rehearse:
     name: Release rehearse (plan + preflight dry-run)
     if: github.repository == 'EffortlessMetrics/shipper' && github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'rehearse'
-    runs-on: self-hosted
+    runs-on:
+      group: em-ci-small
+      labels: [self-hosted, linux, x64, em-ci, cx53, rust-large, trusted-pr]
     # Bind to the `release` environment so the OIDC token minted here is
     # scoped identically to the production `publish-crates-io` job's.
     # Without this, rehearsal would validate only the mint *mechanism*
@@ -652,7 +664,9 @@ jobs:
   release-resume:
     name: Release resume
     if: github.repository == 'EffortlessMetrics/shipper' && github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'resume'
-    runs-on: self-hosted
+    runs-on:
+      group: em-ci-small
+      labels: [self-hosted, linux, x64, em-ci, cx53, rust-large, trusted-pr]
     environment: release
     timeout-minutes: 180
     steps:

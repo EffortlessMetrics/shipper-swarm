@@ -38,7 +38,10 @@ permissions:
 jobs:
   ripr-pilot:
     name: ripr pilot (advisory)
-    runs-on: self-hosted
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on:
+      group: em-ci-small
+      labels: [self-hosted, linux, x64, em-ci, cx43, rust-medium, trusted-pr]
     # Belt-and-braces: even if ripr exits non-zero, the workflow itself
     # succeeds. Findings live in the uploaded artifact, not the status.
     continue-on-error: true

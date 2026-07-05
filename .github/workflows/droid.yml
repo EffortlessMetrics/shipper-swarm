@@ -42,7 +42,9 @@ jobs:
         contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
       )
 
-    runs-on: self-hosted
+    runs-on:
+      group: em-ci-small
+      labels: [self-hosted, linux, x64, em-ci, cx53, rust-large, trusted-pr]
 
     env:
       MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
