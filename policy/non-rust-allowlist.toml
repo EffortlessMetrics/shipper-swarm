@@ -349,6 +349,17 @@ created = "2026-05-11"
 review_after = "2026-08-11"
 
 [[file]]
+path = ".github/actionlint.yaml"
+kind = "workflow_lint_config"
+surface = "ci"
+classification = "config"
+owner = "release/ci"
+reason = "Actionlint configuration constraining approved self-hosted runner labels and workflow policy variables."
+covered_by = ["runner-routing-guard.yml", "actionlint"]
+created = "2026-07-12"
+review_after = "2026-10-12"
+
+[[file]]
 path = ".shipper-meta/goals/README.md"
 kind = "agent_goal_documentation"
 surface = "tooling"
