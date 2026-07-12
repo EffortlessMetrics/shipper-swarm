@@ -43,6 +43,16 @@ created = "2026-05-11"
 review_after = "2026-08-11"
 
 [[workflow]]
+path = ".github/workflows/runner-routing-guard.yml"
+kind = "ci"
+owner = "release/ci"
+reason = "Blocks bare or unscoped self-hosted runner declarations in workflow changes and keeps runner routing inside the approved label policy."
+process_policy = "ci"
+network_policy = "ci"
+created = "2026-07-12"
+review_after = "2026-10-12"
+
+[[workflow]]
 path = ".github/workflows/fuzz.yml"
 kind = "ci_scheduled"
 owner = "fuzz/tests"
