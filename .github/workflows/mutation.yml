@@ -72,6 +72,8 @@ jobs:
             -p shipper-duration \
             -p shipper-types \
             -p shipper-config \
+            --timeout 120 \
+            --minimum-test-timeout 30 \
             -- --all-features
 
       - name: Upload mutation report
