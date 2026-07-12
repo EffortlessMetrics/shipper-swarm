@@ -37,7 +37,9 @@ permissions:
 jobs:
   route:
     name: Route Shipper Rust Small
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: |
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (github.event.action != 'labeled' || contains(fromJSON('["allow-github-hosted", "ci-budget-ack"]'), github.event.label.name))
     runs-on:
       group: em-ci-nano
       labels: [self-hosted, linux, x64, em-ci, cx23, ci-nano, trusted-pr]
@@ -440,7 +442,10 @@ jobs:
       - rust_small_cpx42
       - rust_small_cx53
       - rust_small_github
-    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    if: |
+      always() &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (github.event.action != 'labeled' || contains(fromJSON('["allow-github-hosted", "ci-budget-ack"]'), github.event.label.name))
     runs-on:
       group: em-ci-nano
       labels: [self-hosted, linux, x64, em-ci, cx23, ci-nano, trusted-pr]
