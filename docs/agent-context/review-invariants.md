@@ -35,13 +35,13 @@ These constrain how Factory Droid review is configured for shipper. A reviewer s
 - `upload_debug_artifacts: false` on every Droid action step.
 - Droid action ref is `EffortlessMetrics/droid-action-safe@7c1377ccbacddc95560d1570547a5baa51de01ec`. Do not use `Factory-AI/droid-action` directly for MiniMax BYOK workflows.
 - Droid workflows install Bun with `oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0` and pass `path_to_bun_executable` into the Droid action so the pinned wrapper skips its nested Node20 setup-bun path.
-- `actions/checkout` ref is `actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2`. Droid workflow action refs are immutable SHAs.
+- `actions/checkout` ref is `actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0`. Droid workflow action refs are immutable SHAs.
 - `automatic_review: true` and `automatic_security_review: true` on the auto-review workflow.
 - `review_depth: shallow`.
 - `cancel-in-progress: false` on the auto-review and security-scan workflows.
 - `pull_request` types include `opened`, `synchronize`, `ready_for_review`, `reopened`.
 - The auto-review job is guarded by `github.event.pull_request.head.repo.full_name == github.repository` (same-repo guard). Fork PRs are intentionally skipped because secrets must not run on untrusted fork code.
-- `allowed_bots: dependabot[bot]` is set so Dependabot dependency-bump PRs receive Droid Auto Review. The safe action rejects non-human actors by default; this list narrowly re-permits Dependabot. Do not change this to `'*'`. Adding additional bots requires an explicit follow-up PR with justification.
+- Automatic Droid review skips bot-authored PRs before any secret-bearing step, including Dependabot and generated security-report PRs. Maintainers can request an on-demand review through the trusted-actor `@droid` workflow when an LLM review is useful.
 - Generated `droid/security-report-*` branches are skipped by Droid Auto Review. Scheduled security-scan PRs are already produced by Factory Droid and should be triaged as generated evidence instead of broadening `allowed_bots` for recursive bot review.
 - Draft PRs are intentionally reviewable.
 - `[skip-review]` in the PR title opts out of automatic review.

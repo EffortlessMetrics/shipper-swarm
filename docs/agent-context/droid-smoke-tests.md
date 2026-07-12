@@ -13,7 +13,7 @@ Before any smoke test:
 
 ## 1. Automatic review
 
-1. Open a same-repo PR. A draft PR is sufficient.
+1. Open a same-repo human-authored PR. A draft PR is sufficient.
 2. Confirm `Droid Auto Review` starts. The workflow should be visible in the PR checks list.
 3. Open the job log. Confirm:
    - the `Configure MiniMax M3 for Factory Droid BYOK` step ran;
@@ -30,8 +30,10 @@ Before any smoke test:
    - residual risk;
    - validation signal with `Observed:`, `Reported:`, `Not verified:` lines.
 6. Confirm `[skip-review]` in a PR title prevents the workflow from running.
-7. Confirm a branch named `droid/security-report-<date>` does not run the auto-review workflow.
-8. Confirm a fork PR (if one is available) does not run the auto-review workflow with secrets.
+7. Confirm a bot-authored PR is skipped before the secret-bearing setup steps.
+8. Confirm a maintainer can request a review with `@droid review` through the trusted-actor workflow when needed.
+9. Confirm a branch named `droid/security-report-<date>` does not run the auto-review workflow.
+10. Confirm a fork PR (if one is available) does not run the auto-review workflow with secrets.
 
 ## 2. Manual review
 
