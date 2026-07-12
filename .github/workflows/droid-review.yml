@@ -12,6 +12,7 @@ jobs:
   droid-review:
     if: |
       github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.type != 'Bot' &&
       !contains(github.event.pull_request.title, '[skip-review]') &&
       !startsWith(github.event.pull_request.head.ref, 'droid/security-report-')
 
@@ -96,8 +97,6 @@ jobs:
           factory_api_key: ${{ secrets.FACTORY_API_KEY }}
           upload_debug_artifacts: false
           path_to_bun_executable: ${{ steps.setup-bun.outputs.bun-path }}
-
-          allowed_bots: dependabot[bot]
 
           automatic_review: true
           automatic_security_review: true
