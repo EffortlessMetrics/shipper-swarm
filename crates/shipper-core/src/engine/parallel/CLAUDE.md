@@ -26,8 +26,10 @@ in-tree duplicate, including the webhook submodule and BDD tests).
 - `mod.rs` — public entry, `Reporter` trait, adapter, `run_publish_parallel`
   and its internal counterpart `run_publish_parallel_inner`, plus inline
   `#[cfg(test)] mod tests;` and `mod property_tests`.
-- `publish.rs` — single-package/single-level primitives
-  (`publish_package`, `run_publish_level`, `PackagePublishResult`).
+- `scheduler.rs` — dependency-level batching and worker/thread scheduling;
+  it invokes the canonical executor and does not own package transitions.
+- `engine/execute_package.rs` — single-package execution primitives
+  (`publish_package`, `PackagePublishResult`).
 - `readiness.rs` — readiness-visibility polling with backoff/jitter and
   sparse-index fallback.
 - `reconcile.rs` — ambiguous-publish reconciliation against registry truth.

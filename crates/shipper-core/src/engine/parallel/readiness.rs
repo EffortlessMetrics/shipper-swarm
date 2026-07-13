@@ -13,7 +13,7 @@ use shipper_registry::HttpRegistryClient as RegistryClient;
 use shipper_types::{EventType, PublishEvent, ReadinessConfig, ReadinessEvidence, ReadinessMethod};
 
 /// Check readiness visibility with exponential backoff and optional sparse-index fallback.
-pub(super) fn is_version_visible_with_backoff(
+pub(crate) fn is_version_visible_with_backoff(
     reg: &RegistryClient,
     crate_name: &str,
     version: &str,
@@ -22,7 +22,7 @@ pub(super) fn is_version_visible_with_backoff(
     is_version_visible_with_backoff_and_events(reg, crate_name, version, config, &mut |_| Ok(()))
 }
 
-pub(super) fn is_version_visible_with_backoff_and_events(
+pub(crate) fn is_version_visible_with_backoff_and_events(
     reg: &RegistryClient,
     crate_name: &str,
     version: &str,

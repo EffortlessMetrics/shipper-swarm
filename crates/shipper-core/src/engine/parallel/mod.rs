@@ -20,11 +20,11 @@ use shipper_registry::HttpRegistryClient as RegistryClient;
 use shipper_types::{ExecutionState, PackageReceipt, RuntimeOptions};
 
 mod flow;
-mod policy;
-mod publish;
-mod readiness;
-mod reconcile;
-mod webhook;
+pub(crate) mod policy;
+pub(crate) mod readiness;
+pub(crate) mod reconcile;
+mod scheduler;
+pub(crate) mod webhook;
 
 /// Re-exported for parallel publish wave planning.
 pub use crate::plan::chunking::chunk_by_max_concurrent;
@@ -33,10 +33,20 @@ use flow::{
     LevelResumeAction, collect_level_receipts_from_state, determine_level_resume_action,
     init_send_reporter,
 };
-use publish::run_publish_level;
+use scheduler::run_publish_level;
 use webhook::WebhookEvent;
 #[cfg(test)]
 use webhook::maybe_send_event;
+
+// Keep the former test/import path stable while the package implementation
+// moves out of the scheduler module. New production code should import the
+// executor from `crate::engine::execute_package` and scheduling from
+// `scheduler`.
+#[cfg(test)]
+pub(crate) mod publish {
+    pub(crate) use super::scheduler::run_publish_level;
+    pub(crate) use crate::engine::execute_package::{emit_retry_backoff, publish_package};
+}
 
 /// Reporter interface shared with the host crate. Parallel publish forwards
 /// status updates and warnings through this trait.
@@ -122,7 +132,7 @@ pub(super) struct RetryWaitNotice {
 }
 
 #[derive(Default)]
-pub(super) struct SendReporter {
+pub(crate) struct SendReporter {
     infos: Mutex<Vec<String>>,
     warns: Mutex<Vec<String>>,
     errors: Mutex<Vec<String>>,
@@ -137,21 +147,21 @@ pub(super) struct SendReporter {
 // `events.jsonl`, not this in-memory buffer. See `flow.rs` for the typed
 // sites that CAN propagate poison as an error.
 impl SendReporter {
-    pub(super) fn info(&self, msg: &str) {
+    pub(crate) fn info(&self, msg: &str) {
         self.infos
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(msg.to_string());
     }
 
-    pub(super) fn warn(&self, msg: &str) {
+    pub(crate) fn warn(&self, msg: &str) {
         self.warns
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(msg.to_string());
     }
 
-    pub(super) fn error(&self, msg: &str) {
+    pub(crate) fn error(&self, msg: &str) {
         self.errors
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -159,7 +169,7 @@ impl SendReporter {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn retry_wait(
+    pub(crate) fn retry_wait(
         &self,
         pkg_name: &str,
         pkg_version: &str,
@@ -206,7 +216,7 @@ impl SendReporter {
     }
 }
 
-fn replay_buffered_messages(reporter: &mut dyn Reporter, send_reporter: &SendReporter) {
+pub(crate) fn replay_buffered_messages(reporter: &mut dyn Reporter, send_reporter: &SendReporter) {
     for msg in send_reporter.drain_infos() {
         reporter.info(&msg);
     }
@@ -218,7 +228,7 @@ fn replay_buffered_messages(reporter: &mut dyn Reporter, send_reporter: &SendRep
     }
 }
 
-pub(super) fn drain_retry_waits(reporter: &mut dyn Reporter, send_reporter: &SendReporter) {
+pub(crate) fn drain_retry_waits(reporter: &mut dyn Reporter, send_reporter: &SendReporter) {
     for notice in send_reporter.drain_retry_waits() {
         let remaining = notice.delay.saturating_sub(notice.started_at.elapsed());
         reporter.retry_wait(
@@ -231,6 +241,22 @@ pub(super) fn drain_retry_waits(reporter: &mut dyn Reporter, send_reporter: &Sen
             &notice.message,
         );
     }
+}
+
+pub(crate) fn replay_buffered_messages_to_host(
+    reporter: &mut dyn crate::engine::Reporter,
+    send_reporter: &SendReporter,
+) {
+    let mut adapter = HostReporterAdapter { inner: reporter };
+    replay_buffered_messages(&mut adapter, send_reporter);
+}
+
+pub(crate) fn drain_retry_waits_to_host(
+    reporter: &mut dyn crate::engine::Reporter,
+    send_reporter: &SendReporter,
+) {
+    let mut adapter = HostReporterAdapter { inner: reporter };
+    drain_retry_waits(&mut adapter, send_reporter);
 }
 
 /// Run publish in parallel mode using `shipper`'s wrapped `RegistryClient`.

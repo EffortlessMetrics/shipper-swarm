@@ -27,9 +27,11 @@ except `lib.rs` re-exports and `shipper-cli`.
   `run_publish`, `run_resume`) and the `Reporter` trait. This file was moved
   verbatim from `crates/shipper/src/engine.rs` when the `engine/` layer dir
   was introduced.
+- `engine/execute_package.rs` - canonical per-package Cargo/retry/readiness/
+  reconciliation executor. Scheduling belongs to mode-specific scheduler
+  modules; durable package outcomes belong here and in `transition.rs`.
 - `engine/parallel/` — wave-based parallel publish (was the standalone
   `shipper-engine-parallel` crate, absorbed in the same PR that created this
   layer dir).
 - Future: `engine/preflight/`, `engine/publish/`, `engine/resume/`,
   `engine/readiness/` as `engine/mod.rs` gets split up.
-

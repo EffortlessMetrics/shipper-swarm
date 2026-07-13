@@ -4120,8 +4120,8 @@ fn reconcile_bdd_ambiguous_resolves_to_published() {
     // no second cargo invocation.
     //
     // Request sequence (readiness disabled):
-    //   1. entry "already published" check (publish.rs:136) → 404
-    //   2. post-cargo-failure quick check (publish.rs:~446) → 404
+    //   1. entry "already published" check (execute_package.rs) → 404
+    //   2. post-cargo-failure quick check (execute_package.rs) → 404
     //   3. reconcile's single version_exists (via is_version_visible_with_backoff, enabled=false) → 200
     let td = tempdir().expect("tempdir");
     let bin = td.path().join("bin");
@@ -4237,7 +4237,7 @@ fn reconcile_bdd_ambiguous_resolves_to_not_published_then_retries() {
     //   3. attempt 1 reconcile (enabled=false, single call) → 404 → NotPublished
     //   4. attempt 2 post-cargo quick check → 404
     //   5. attempt 2 reconcile → 404 → NotPublished
-    //   6. post-loop final "if last_err, maybe visible" check (publish.rs:~817) → 404
+    //   6. post-loop final "if last_err, maybe visible" check (execute_package.rs) → 404
     let td = tempdir().expect("tempdir");
     let bin = td.path().join("bin");
     write_fake_tools(&bin);
@@ -4343,8 +4343,8 @@ fn reconcile_bdd_ambiguous_resolves_to_not_published_then_retries() {
 fn reconcile_bdd_resume_from_ambiguous_state_skips_republish() {
     // Scenario (from PR #115 resume-path reconcile):
     //   A prior run left demo@0.1.0 in PackageState::Ambiguous. On resume,
-    //   the entry "already published" check still returns 404 (publish.rs:136).
-    //   The resume-path reconcile block (publish.rs:~248) fires BEFORE the
+    //   the entry "already published" check still returns 404 (execute_package.rs).
+    //   The resume-path reconcile block (execute_package.rs) fires BEFORE the
     //   retry loop, polls the registry, and discovers the version IS now
     //   visible — marks Published and returns early with zero cargo attempts.
     //
@@ -4585,9 +4585,9 @@ fn reconcile_bdd_ambiguous_resolves_to_still_unknown() {
     // `PublishReconciled { outcome: StillUnknown }` event is persisted.
     //
     // Request sequence (readiness disabled):
-    //   1. entry "already published" check (publish.rs:136) → 500 → Err
+    //   1. entry "already published" check (execute_package.rs) → 500 → Err
     //      (does not match `if let Ok(true)`; proceeds to publish)
-    //   2. post-cargo-failure quick check (publish.rs:~452) → 500 → Err
+    //   2. post-cargo-failure quick check (execute_package.rs) → 500 → Err
     //      (unwrap_or(false); falls through to classify + reconcile)
     //   3. reconcile's single version_exists (via is_version_visible_with_backoff,
     //      enabled=false) → 500 → Err → StillUnknown
@@ -4730,7 +4730,7 @@ fn reconcile_bdd_ambiguous_resolves_to_still_unknown() {
 }
 
 /// Regression test for #418: the "final chance after error" fallback branch
-/// (`publish.rs` ~`:1131`) must emit `PackagePublished` to `events.jsonl`,
+/// (`execute_package.rs`) must emit `PackagePublished` to `events.jsonl`,
 /// not just advance `state.json`. Without it, `state.json` says Published
 /// while `events.jsonl` has no projection for the package — a drift the
 /// finalization consistency check rejects loudly.

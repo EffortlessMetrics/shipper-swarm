@@ -1,13 +1,12 @@
-//! Single-package and single-level publish primitives for parallel execution.
+//! Canonical per-package execution and scheduler support.
 //!
-//! `publish_package` handles one crate with retries/backoff/readiness; it is
-//! parallel-safe (all shared state goes through `Arc<Mutex<_>>`).
-//! `run_publish_level` fans out a level's packages into concurrent threads,
-//! batched by `parallel.max_concurrent`.
+//! `publish_package` owns Cargo invocation, retries, readiness,
+//! reconciliation, persistence, receipts, and notifications for one crate.
+//! The parallel scheduler remains in `engine::parallel`; the module boundary
+//! deliberately keeps package execution independent from scheduling.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
@@ -24,22 +23,166 @@ use crate::state::execution_state as state;
 use shipper_registry::HttpRegistryClient as RegistryClient;
 use shipper_types::{
     AttemptDetail, AttemptEvidence, ErrorClass, EventType, ExecutionState, PackageEvidence,
-    PackageReceipt, PackageState, PlannedPackage, PublishEvent, PublishLevel, PublishRegime,
-    ReadinessConfig, ReadinessEvidence, ReconciliationOutcome, RuntimeOptions,
+    PackageReceipt, PackageState, PlannedPackage, PublishEvent, PublishRegime, ReadinessConfig,
+    ReadinessEvidence, ReconciliationOutcome, RuntimeOptions,
 };
 
-use super::policy::policy_effects;
-use super::readiness::is_version_visible_with_backoff_and_events;
-use super::reconcile::reconcile_ambiguous_upload;
-use super::webhook::{WebhookEvent, maybe_send_event};
-use super::{Reporter, SendReporter, drain_retry_waits};
-
-use crate::plan::chunking::chunk_by_max_concurrent;
+use crate::engine::parallel::SendReporter;
+use crate::engine::parallel::policy::policy_effects;
+use crate::engine::parallel::readiness::is_version_visible_with_backoff_and_events;
+use crate::engine::parallel::reconcile::reconcile_ambiguous_upload;
+use crate::engine::parallel::webhook::{WebhookEvent, maybe_send_event};
 
 /// Result of publishing a single package (for parallel execution)
 #[derive(Debug)]
-pub(super) struct PackagePublishResult {
-    pub(super) result: anyhow::Result<PackageReceipt>,
+pub(crate) struct PackagePublishResult {
+    pub(crate) result: anyhow::Result<PackageReceipt>,
+}
+
+/// Execute packages in plan order through the canonical package executor.
+///
+/// This is the sequential scheduler counterpart to
+/// `parallel::scheduler::run_publish_level`: it owns ordering and resume
+/// gating, while `publish_package_with_timeout` owns package behavior.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_sequential_scheduler(
+    ws: &PlannedWorkspace,
+    opts: &RuntimeOptions,
+    st: &mut ExecutionState,
+    state_dir: &Path,
+    reg: &crate::registry::RegistryClient,
+    event_log: &mut events::EventLog,
+    events_path: &Path,
+    reporter: &mut dyn crate::engine::Reporter,
+) -> Result<Vec<PackageReceipt>> {
+    if let Some(resume_from) = opts.resume_from.as_deref()
+        && !ws.plan.packages.iter().any(|p| p.name == resume_from)
+    {
+        bail!("resume package not found in plan: {resume_from}");
+    }
+
+    let api_base = reg.registry().api_base.trim_end_matches('/');
+    let reg_inner = shipper_registry::HttpRegistryClient::new(api_base);
+    let st_arc = Arc::new(Mutex::new(st.clone()));
+    let event_log_arc = Arc::new(Mutex::new(std::mem::replace(
+        event_log,
+        events::EventLog::new(),
+    )));
+    let send_reporter = Arc::new(crate::engine::parallel::SendReporter::default());
+    let mut reached_resume_point = opts.resume_from.is_none();
+    let mut receipts = Vec::new();
+
+    for package in &ws.plan.packages {
+        let key = pkg_key(&package.name, &package.version);
+        let progress = st_arc
+            .lock()
+            .map_err(|_| anyhow::anyhow!("execution state lock poisoned before package execution"))?
+            .packages
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("missing package progress in state"))?;
+
+        if !reached_resume_point
+            && matches!(
+                crate::engine::publish::resume::apply_resume_from_gate(
+                    package,
+                    &progress,
+                    opts,
+                    &mut reached_resume_point,
+                    reporter,
+                ),
+                crate::engine::publish::resume::ResumeGate::Skip
+            )
+        {
+            if matches!(
+                progress.state,
+                PackageState::Published | PackageState::Skipped { .. }
+            ) {
+                let mut log = event_log_arc
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("event log lock poisoned before resume skip"))?;
+                crate::engine::publish::resume::record_terminal_resume_skip_event(
+                    &progress,
+                    &format!("{}@{}", package.name, package.version),
+                    events_path,
+                    &mut log,
+                )?;
+            }
+            continue;
+        }
+
+        if matches!(
+            progress.state,
+            PackageState::Published | PackageState::Skipped { .. }
+        ) {
+            let mut log = event_log_arc
+                .lock()
+                .map_err(|_| anyhow::anyhow!("event log lock poisoned before terminal skip"))?;
+            crate::engine::publish::resume::record_terminal_resume_skip(
+                package,
+                &progress,
+                &format!("{}@{}", package.name, package.version),
+                events_path,
+                &mut log,
+                reporter,
+            )?;
+            continue;
+        }
+
+        if matches!(progress.state, PackageState::Uploaded) {
+            reporter.info(&format!(
+                "{}@{}: resuming from uploaded (skipping cargo publish)",
+                package.name, package.version
+            ));
+        }
+
+        let result = publish_package_with_timeout(
+            package,
+            ws,
+            opts,
+            &reg_inner,
+            &st_arc,
+            state_dir,
+            &event_log_arc,
+            events_path,
+            &send_reporter,
+            None,
+        );
+        crate::engine::parallel::drain_retry_waits_to_host(reporter, &send_reporter);
+        crate::engine::parallel::replay_buffered_messages_to_host(reporter, &send_reporter);
+
+        match result.result {
+            Ok(receipt) => receipts.push(receipt),
+            Err(error) => {
+                synchronize_sequential_state(st, event_log, &st_arc, &event_log_arc)?;
+                return Err(error);
+            }
+        }
+    }
+
+    crate::engine::parallel::drain_retry_waits_to_host(reporter, &send_reporter);
+    crate::engine::parallel::replay_buffered_messages_to_host(reporter, &send_reporter);
+    synchronize_sequential_state(st, event_log, &st_arc, &event_log_arc)?;
+    Ok(receipts)
+}
+
+fn synchronize_sequential_state(
+    state: &mut ExecutionState,
+    event_log: &mut events::EventLog,
+    state_arc: &Arc<Mutex<ExecutionState>>,
+    event_log_arc: &Arc<Mutex<events::EventLog>>,
+) -> Result<()> {
+    *state = state_arc
+        .lock()
+        .map_err(|_| anyhow::anyhow!("execution state lock poisoned after package execution"))?
+        .clone();
+    *event_log = std::mem::replace(
+        &mut *event_log_arc
+            .lock()
+            .map_err(|_| anyhow::anyhow!("event log lock poisoned after package execution"))?,
+        events::EventLog::new(),
+    );
+    Ok(())
 }
 
 /// Build a poison failure for `publish_package`. The `PackagePublishResult`
@@ -218,7 +361,7 @@ fn commit_attempt_detail_transition(
 /// retry-backoff site in the publish loop so operators never stare at a
 /// silent CI log during the wait window. See #91.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn emit_retry_backoff(
+pub(crate) fn emit_retry_backoff(
     event_log: &Arc<Mutex<events::EventLog>>,
     events_path: &Path,
     reporter: &Arc<SendReporter>,
@@ -395,7 +538,7 @@ fn write_reconciliation_report_best_effort(
 
 /// Publish a single package with retries (parallel-safe version)
 #[allow(clippy::too_many_arguments)]
-pub(super) fn publish_package(
+pub(crate) fn publish_package(
     p: &PlannedPackage,
     ws: &PlannedWorkspace,
     opts: &RuntimeOptions,
@@ -405,6 +548,36 @@ pub(super) fn publish_package(
     event_log: &Arc<Mutex<events::EventLog>>,
     events_path: &Path,
     reporter: &Arc<SendReporter>,
+) -> PackagePublishResult {
+    publish_package_with_timeout(
+        p,
+        ws,
+        opts,
+        reg,
+        st,
+        state_dir,
+        event_log,
+        events_path,
+        reporter,
+        Some(opts.parallel.per_package_timeout),
+    )
+}
+
+/// Execute a package with an explicit Cargo timeout policy. Sequential
+/// scheduling passes `None`; parallel scheduling passes its per-package
+/// timeout through the compatibility wrapper above.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn publish_package_with_timeout(
+    p: &PlannedPackage,
+    ws: &PlannedWorkspace,
+    opts: &RuntimeOptions,
+    reg: &RegistryClient,
+    st: &Arc<Mutex<ExecutionState>>,
+    state_dir: &Path,
+    event_log: &Arc<Mutex<events::EventLog>>,
+    events_path: &Path,
+    reporter: &Arc<SendReporter>,
+    cargo_timeout: Option<Duration>,
 ) -> PackagePublishResult {
     let key = pkg_key(&p.name, &p.version);
     let pkg_label = format!("{}@{}", p.name, p.version);
@@ -715,7 +888,7 @@ pub(super) fn publish_package(
                 opts.allow_dirty,
                 opts.no_verify,
                 opts.output_lines,
-                Some(opts.parallel.per_package_timeout),
+                cargo_timeout,
             ) {
                 Ok(o) => o,
                 Err(e) => {
@@ -1469,91 +1642,4 @@ pub(super) fn publish_package(
             superseded_by: None,
         }),
     }
-}
-
-/// Publish packages in a single level in parallel
-#[allow(clippy::too_many_arguments)]
-pub(super) fn run_publish_level(
-    level: &PublishLevel,
-    ws: &PlannedWorkspace,
-    opts: &RuntimeOptions,
-    reg: &RegistryClient,
-    st: &Arc<Mutex<ExecutionState>>,
-    state_dir: &Path,
-    event_log: &Arc<Mutex<events::EventLog>>,
-    events_path: &Path,
-    reporter: &mut dyn Reporter,
-    send_reporter: &Arc<SendReporter>,
-) -> Result<Vec<PackageReceipt>> {
-    let num_packages = level.packages.len();
-    let max_concurrent = opts.parallel.max_concurrent.min(num_packages);
-
-    reporter.info(&format!(
-        "Level {}: publishing {} packages (max concurrent: {})",
-        level.level, num_packages, max_concurrent
-    ));
-
-    let mut all_receipts: Vec<PackageReceipt> = Vec::new();
-    let mut errors: Vec<String> = Vec::new();
-
-    // Process packages in batches limited by max_concurrent
-    for chunk in chunk_by_max_concurrent(&level.packages, max_concurrent) {
-        let mut handles: Vec<std::thread::JoinHandle<PackagePublishResult>> = Vec::new();
-
-        // Start all packages in this chunk
-        for p in chunk {
-            let p = p.clone();
-            let ws_clone = ws.clone();
-            let opts_clone = opts.clone();
-            let reg_clone = reg.clone();
-            let st_clone = Arc::clone(st);
-            let state_dir = state_dir.to_path_buf();
-            let event_log_clone = Arc::clone(event_log);
-            let events_path = events_path.to_path_buf();
-            let reporter_clone = Arc::clone(send_reporter);
-
-            let handle = thread::spawn(move || {
-                publish_package(
-                    &p,
-                    &ws_clone,
-                    &opts_clone,
-                    &reg_clone,
-                    &st_clone,
-                    &state_dir,
-                    &event_log_clone,
-                    &events_path,
-                    &reporter_clone,
-                )
-            });
-
-            handles.push(handle);
-        }
-
-        while handles.iter().any(|handle| !handle.is_finished()) {
-            drain_retry_waits(reporter, send_reporter.as_ref());
-            thread::sleep(Duration::from_millis(25));
-        }
-        drain_retry_waits(reporter, send_reporter.as_ref());
-
-        // Wait for all packages in this chunk to complete, collecting all results
-        for handle in handles {
-            let result = handle
-                .join()
-                .map_err(|_| anyhow::anyhow!("publish thread panicked"))?;
-            match result.result {
-                Ok(receipt) => all_receipts.push(receipt),
-                Err(e) => errors.push(format!("{e:#}")),
-            }
-        }
-    }
-
-    if !errors.is_empty() {
-        bail!(
-            "parallel publish failed for {} package(s): {}",
-            errors.len(),
-            errors.join("; ")
-        );
-    }
-
-    Ok(all_receipts)
 }
