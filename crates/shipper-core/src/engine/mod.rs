@@ -648,8 +648,14 @@ pub fn run_publish(
                                 break;
                             }
                             ReconciliationOutcome::NotPublished { .. } => {
-                                event_log.write_to_file(&events_path)?;
-                                event_log.clear();
+                                transition::commit_pending(
+                                    &mut st,
+                                    &state_dir,
+                                    &mut event_log,
+                                    &events_path,
+                                    &key,
+                                    PackageState::Pending,
+                                )?;
                                 write_reconciliation_report_best_effort(
                                     &state_dir,
                                     ws,

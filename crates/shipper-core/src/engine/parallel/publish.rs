@@ -17,7 +17,7 @@ use crate::ops::cargo;
 use crate::plan::PlannedWorkspace;
 use crate::runtime::execution::{
     append_attempt_detail, backoff_delay, classify_cargo_failure, pkg_key, registry_aware_backoff,
-    retry_after_delay, retry_next_attempt_at, update_state_locked,
+    retry_after_delay, retry_next_attempt_at,
 };
 use crate::state::events;
 use crate::state::execution_state as state;
@@ -446,10 +446,7 @@ pub(super) fn publish_package(
                 },
                 package: pkg_label.clone(),
             });
-            let _ = log.write_to_file(events_path);
-            log.clear();
         }
-        write_reconciliation_report_best_effort(state_dir, ws, events_path, reporter);
         let reconciliation_report_path = state::reconciliation_path(state_dir);
 
         match outcome {
@@ -471,6 +468,7 @@ pub(super) fn publish_package(
                 ) {
                     return PackagePublishResult { result: Err(e) };
                 }
+                write_reconciliation_report_best_effort(state_dir, ws, events_path, reporter);
                 reporter.info(&format!(
                     "{}@{}: reconciliation outcome: Published; action: mark published and continue without republish (evidence: {})",
                     p.name,
@@ -497,13 +495,17 @@ pub(super) fn publish_package(
                 };
             }
             ReconciliationOutcome::NotPublished { .. } => {
-                {
-                    let Ok(mut state) = st.lock() else {
-                        return poisoned_lock("execution state");
-                    };
-                    update_state_locked(&mut state, &key, PackageState::Pending);
-                    let _ = state::save_state(state_dir, &state);
+                if let Err(e) = commit_pending_transition(
+                    st,
+                    state_dir,
+                    event_log,
+                    events_path,
+                    &key,
+                    PackageState::Pending,
+                ) {
+                    return PackagePublishResult { result: Err(e) };
                 }
+                write_reconciliation_report_best_effort(state_dir, ws, events_path, reporter);
                 reporter.info(&format!(
                     "{}@{}: reconciliation outcome: NotPublished; action: retry under publish policy (evidence: {})",
                     p.name,
@@ -513,6 +515,19 @@ pub(super) fn publish_package(
                 // Fall through to the normal retry loop below.
             }
             ReconciliationOutcome::StillUnknown { reason, .. } => {
+                if let Err(e) = commit_pending_transition(
+                    st,
+                    state_dir,
+                    event_log,
+                    events_path,
+                    &key,
+                    PackageState::Ambiguous {
+                        message: reason.clone(),
+                    },
+                ) {
+                    return PackagePublishResult { result: Err(e) };
+                }
+                write_reconciliation_report_best_effort(state_dir, ws, events_path, reporter);
                 reporter.error(&format!(
                     "{}@{}: reconciliation outcome: StillUnknown; action: stop before blind retry; operator action required (evidence: {}): {}",
                     p.name,
