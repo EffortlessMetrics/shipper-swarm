@@ -591,14 +591,6 @@ pub fn run_publish(
                             },
                             package: pkg_label.clone(),
                         });
-                        event_log.write_to_file(&events_path)?;
-                        event_log.clear();
-                        write_reconciliation_report_best_effort(
-                            &state_dir,
-                            ws,
-                            &events_path,
-                            reporter,
-                        );
                         let reconciliation_report_path = state::reconciliation_path(&state_dir);
 
                         match outcome {
@@ -610,21 +602,40 @@ pub fn run_publish(
                                     p.version,
                                     reconciliation_report_path.display()
                                 ));
-                                update_state(&mut st, &state_dir, &key, PackageState::Published)?;
-                                event_log.record(PublishEvent {
-                                    timestamp: Utc::now(),
-                                    event_type: EventType::PackagePublished {
-                                        duration_ms: start_instant.elapsed().as_millis() as u64,
+                                transition::commit(
+                                    &mut st,
+                                    &state_dir,
+                                    &mut event_log,
+                                    &events_path,
+                                    &key,
+                                    PackageState::Published,
+                                    PublishEvent {
+                                        timestamp: Utc::now(),
+                                        event_type: EventType::PackagePublished {
+                                            duration_ms: start_instant.elapsed().as_millis() as u64,
+                                        },
+                                        package: pkg_label.clone(),
                                     },
-                                    package: pkg_label.clone(),
-                                });
-                                event_log.write_to_file(&events_path)?;
-                                event_log.clear();
+                                )?;
+                                write_reconciliation_report_best_effort(
+                                    &state_dir,
+                                    ws,
+                                    &events_path,
+                                    reporter,
+                                );
                                 readiness_evidence = reconcile_evidence;
                                 last_err = None;
                                 break;
                             }
                             ReconciliationOutcome::NotPublished { .. } => {
+                                event_log.write_to_file(&events_path)?;
+                                event_log.clear();
+                                write_reconciliation_report_best_effort(
+                                    &state_dir,
+                                    ws,
+                                    &events_path,
+                                    reporter,
+                                );
                                 reporter.info(&format!(
                                     "{}@{}: reconciliation outcome: NotPublished; registry still absent; action: retry under publish policy (evidence: {})",
                                     p.name,
@@ -638,7 +649,20 @@ pub fn run_publish(
                                 let ambiguous_state = PackageState::Ambiguous {
                                     message: reason.clone(),
                                 };
-                                update_state(&mut st, &state_dir, &key, ambiguous_state)?;
+                                transition::commit_pending(
+                                    &mut st,
+                                    &state_dir,
+                                    &mut event_log,
+                                    &events_path,
+                                    &key,
+                                    ambiguous_state,
+                                )?;
+                                write_reconciliation_report_best_effort(
+                                    &state_dir,
+                                    ws,
+                                    &events_path,
+                                    reporter,
+                                );
                                 reporter.error(&format!(
                                     "{}@{}: reconciliation outcome: StillUnknown; action: stop before blind retry; operator action required (evidence: {}): {}",
                                     p.name,
@@ -679,16 +703,21 @@ pub fn run_publish(
                                 p.name, p.version
                             ));
                             record_attempt_detail(&mut st, &state_dir, attempt_detail)?;
-                            update_state(&mut st, &state_dir, &key, PackageState::Published)?;
-                            event_log.record(PublishEvent {
-                                timestamp: Utc::now(),
-                                event_type: EventType::PackagePublished {
-                                    duration_ms: start_instant.elapsed().as_millis() as u64,
+                            transition::commit(
+                                &mut st,
+                                &state_dir,
+                                &mut event_log,
+                                &events_path,
+                                &key,
+                                PackageState::Published,
+                                PublishEvent {
+                                    timestamp: Utc::now(),
+                                    event_type: EventType::PackagePublished {
+                                        duration_ms: start_instant.elapsed().as_millis() as u64,
+                                    },
+                                    package: pkg_label.clone(),
                                 },
-                                package: pkg_label.clone(),
-                            });
-                            event_log.write_to_file(&events_path)?;
-                            event_log.clear();
+                            )?;
                             last_err = None;
                             break;
                         }
@@ -701,8 +730,6 @@ pub fn run_publish(
                                 class: class.clone(),
                                 message: msg.clone(),
                             };
-                            update_state(&mut st, &state_dir, &key, failed)?;
-
                             // Event: PackageFailed
                             event_log.record(PublishEvent {
                                 timestamp: Utc::now(),
@@ -712,8 +739,14 @@ pub fn run_publish(
                                 },
                                 package: pkg_label.clone(),
                             });
-                            event_log.write_to_file(&events_path)?;
-                            event_log.clear();
+                            transition::commit_pending(
+                                &mut st,
+                                &state_dir,
+                                &mut event_log,
+                                &events_path,
+                                &key,
+                                failed,
+                            )?;
 
                             return Err(anyhow::anyhow!(
                                 "{}@{}: permanent failure: {}",
@@ -920,8 +953,6 @@ pub fn run_publish(
                     class: class.clone(),
                     message: msg.clone(),
                 };
-                update_state(&mut st, &state_dir, &key, failed)?;
-
                 // Event: PackageFailed
                 event_log.record(PublishEvent {
                     timestamp: Utc::now(),
@@ -931,8 +962,14 @@ pub fn run_publish(
                     },
                     package: pkg_label.clone(),
                 });
-                event_log.write_to_file(&events_path)?;
-                event_log.clear();
+                transition::commit_pending(
+                    &mut st,
+                    &state_dir,
+                    &mut event_log,
+                    &events_path,
+                    &key,
+                    failed,
+                )?;
 
                 // Send webhook notification: package failed
                 webhook::maybe_send_event(
