@@ -9,7 +9,69 @@ use crate::registry::RegistryClient;
 use crate::state::events;
 use crate::types::{EventType, PublishEvent, ReadinessEvidence};
 
+#[cfg(test)]
 pub(crate) fn verify_published(
+    reg: &RegistryClient,
+    crate_name: &str,
+    version: &str,
+    config: &crate::types::ReadinessConfig,
+    reporter: &mut dyn Reporter,
+    event_log: &mut events::EventLog,
+    events_path: &Path,
+    pkg_label: &str,
+) -> Result<(bool, Vec<ReadinessEvidence>)> {
+    record_readiness_event(
+        event_log,
+        events_path,
+        PublishEvent {
+            timestamp: Utc::now(),
+            event_type: EventType::ReadinessStarted {
+                method: config.method,
+            },
+            package: pkg_label.to_string(),
+        },
+    )?;
+    verify_published_inner(
+        reg,
+        crate_name,
+        version,
+        config,
+        reporter,
+        event_log,
+        events_path,
+        pkg_label,
+    )
+}
+
+/// Verify a package after the caller has durably recorded `ReadinessStarted`.
+///
+/// The publish engine uses the readiness-start event as the durable checkpoint
+/// that projects `PackageState::Uploaded`; keeping the event emission at the
+/// transition boundary prevents an interruption between cargo success and
+/// readiness polling from leaving an un-rebuildable state.
+pub(crate) fn verify_published_after_started(
+    reg: &RegistryClient,
+    crate_name: &str,
+    version: &str,
+    config: &crate::types::ReadinessConfig,
+    reporter: &mut dyn Reporter,
+    event_log: &mut events::EventLog,
+    events_path: &Path,
+    pkg_label: &str,
+) -> Result<(bool, Vec<ReadinessEvidence>)> {
+    verify_published_inner(
+        reg,
+        crate_name,
+        version,
+        config,
+        reporter,
+        event_log,
+        events_path,
+        pkg_label,
+    )
+}
+
+fn verify_published_inner(
     reg: &RegistryClient,
     crate_name: &str,
     version: &str,
@@ -24,17 +86,6 @@ pub(crate) fn verify_published(
         crate_name, version, config.method
     ));
     let started_at = Instant::now();
-    record_readiness_event(
-        event_log,
-        events_path,
-        PublishEvent {
-            timestamp: Utc::now(),
-            event_type: EventType::ReadinessStarted {
-                method: config.method,
-            },
-            package: pkg_label.to_string(),
-        },
-    )?;
     let mut emit_event = |event| record_readiness_event(event_log, events_path, event);
     let (visible, evidence) = reg.is_version_visible_with_backoff_and_events(
         crate_name,

@@ -466,6 +466,13 @@ fn test_publish_package_publishes_successfully() {
             let receipt = result.result.expect("should succeed");
             assert!(matches!(receipt.state, PackageState::Published));
             assert!(receipt.attempts >= 1);
+            let persisted = events::EventLog::read_from_file(&events_path).expect("read events");
+            assert!(
+                persisted
+                    .all_events()
+                    .iter()
+                    .any(|event| matches!(event.event_type, EventType::ReadinessStarted { .. }))
+            );
         },
     );
     server.join();

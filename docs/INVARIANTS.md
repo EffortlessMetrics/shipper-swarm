@@ -38,3 +38,12 @@ If you are writing tooling that consumes Shipper output:
 - **For "did this release succeed and what was published"**: read `receipt.json`.
 
 Never derive critical decisions from CLI stdout alone. Stdout is a human-facing rendering of the events; structured consumers should always go to the JSON files.
+
+## Uploaded recovery checkpoint
+
+`EventType::ReadinessStarted` is emitted only after Cargo has accepted an
+upload. It is therefore the durable checkpoint for `PackageState::Uploaded`:
+state rebuild maps that event to `uploaded`, and a later
+`package_published` event advances the projection to `published`. This keeps
+the event vocabulary backward-compatible while making interruption between
+Cargo completion and registry readiness mechanically recoverable.
