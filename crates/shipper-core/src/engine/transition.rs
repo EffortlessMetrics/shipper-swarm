@@ -12,7 +12,7 @@ use chrono::Utc;
 
 use crate::state::events::EventLog;
 use crate::state::execution_state;
-use crate::types::{ExecutionState, PackageState, PublishEvent};
+use crate::types::{AttemptDetail, ExecutionState, PackageState, PublishEvent};
 
 /// Apply one package transition through the shared event/state boundary.
 ///
@@ -46,6 +46,7 @@ pub(crate) fn commit(
         key,
         Some(new_state),
         None,
+        None,
     )
 }
 
@@ -77,6 +78,45 @@ pub(crate) fn commit_attempt(
         key,
         None,
         Some(attempt),
+        None,
+    )
+}
+
+/// Apply a package transition and persist the completed attempt detail at the
+/// same durable boundary.
+///
+/// Attempt details are operator-facing projection data. Keeping them in this
+/// boundary prevents a successful terminal transition from being written by
+/// one path while its matching attempt timeline is written by another.
+pub(crate) fn commit_with_attempt_detail(
+    state: &mut ExecutionState,
+    state_dir: &Path,
+    event_log: &mut EventLog,
+    events_path: &Path,
+    key: &str,
+    new_state: PackageState,
+    event: PublishEvent,
+    detail: AttemptDetail,
+) -> Result<()> {
+    validate_attempt_detail(key, &detail)?;
+    if event.package != key {
+        bail!(
+            "package transition key '{}' does not match event package '{}'",
+            key,
+            event.package
+        );
+    }
+
+    event_log.record(event);
+    persist(
+        state,
+        state_dir,
+        event_log,
+        events_path,
+        key,
+        Some(new_state),
+        None,
+        Some(detail),
     )
 }
 
@@ -115,7 +155,90 @@ pub(crate) fn commit_pending(
         key,
         Some(new_state),
         None,
+        None,
     )
+}
+
+/// Complete a transition whose explanatory events are already buffered and
+/// persist the matching attempt detail through the same boundary.
+pub(crate) fn commit_pending_with_attempt_detail(
+    state: &mut ExecutionState,
+    state_dir: &Path,
+    event_log: &mut EventLog,
+    events_path: &Path,
+    key: &str,
+    new_state: PackageState,
+    detail: AttemptDetail,
+) -> Result<()> {
+    validate_attempt_detail(key, &detail)?;
+    let event = event_log
+        .all_events()
+        .last()
+        .with_context(|| format!("missing domain event for package transition: {key}"))?;
+    if event.package != key {
+        bail!(
+            "package transition key '{}' does not match pending event package '{}'",
+            key,
+            event.package
+        );
+    }
+
+    persist(
+        state,
+        state_dir,
+        event_log,
+        events_path,
+        key,
+        Some(new_state),
+        None,
+        Some(detail),
+    )
+}
+
+/// Flush buffered explanatory events while appending attempt detail without
+/// changing the package state projection. This is used for retry scheduling,
+/// where the package remains pending between attempts.
+pub(crate) fn commit_attempt_detail_pending(
+    state: &mut ExecutionState,
+    state_dir: &Path,
+    event_log: &mut EventLog,
+    events_path: &Path,
+    key: &str,
+    detail: AttemptDetail,
+) -> Result<()> {
+    validate_attempt_detail(key, &detail)?;
+    if let Some(event) = event_log.all_events().last()
+        && event.package != key
+    {
+        bail!(
+            "attempt detail key '{}' does not match pending event package '{}'",
+            key,
+            event.package
+        );
+    }
+
+    persist(
+        state,
+        state_dir,
+        event_log,
+        events_path,
+        key,
+        None,
+        None,
+        Some(detail),
+    )
+}
+
+fn validate_attempt_detail(key: &str, detail: &AttemptDetail) -> Result<()> {
+    let detail_key = format!("{}@{}", detail.package, detail.version);
+    if detail_key != key {
+        bail!(
+            "package transition key '{}' does not match attempt detail package '{}'",
+            key,
+            detail_key
+        );
+    }
+    Ok(())
 }
 
 fn persist(
@@ -126,6 +249,7 @@ fn persist(
     key: &str,
     new_state: Option<PackageState>,
     attempt: Option<u32>,
+    attempt_detail: Option<AttemptDetail>,
 ) -> Result<()> {
     let mut next_state = state.clone();
     let progress = next_state
@@ -137,6 +261,9 @@ fn persist(
     }
     if let Some(attempt) = attempt {
         progress.attempts = attempt;
+    }
+    if let Some(detail) = attempt_detail {
+        next_state.attempt_history.push(detail);
     }
     progress.last_updated_at = Utc::now();
     next_state.updated_at = Utc::now();
@@ -161,10 +288,14 @@ mod tests {
     use chrono::Utc;
     use tempfile::tempdir;
 
-    use super::{commit, commit_attempt, commit_pending};
+    use super::{
+        commit, commit_attempt, commit_attempt_detail_pending, commit_pending,
+        commit_pending_with_attempt_detail, commit_with_attempt_detail,
+    };
     use crate::state::events::{EventLog, events_path};
     use crate::types::{
-        EventType, ExecutionState, PackageProgress, PackageState, PublishEvent, Registry,
+        AttemptDetail, EventType, ExecutionState, PackageProgress, PackageState, PublishEvent,
+        Registry,
     };
 
     fn state() -> ExecutionState {
@@ -205,6 +336,21 @@ mod tests {
                 command: "cargo publish -p demo".to_string(),
             },
             package: "demo@1.0.0".to_string(),
+        }
+    }
+
+    fn attempt_detail() -> AttemptDetail {
+        let now = Utc::now();
+        AttemptDetail {
+            package: "demo".to_string(),
+            version: "1.0.0".to_string(),
+            attempt: 1,
+            max_attempts: 3,
+            started_at: now,
+            ended_at: now,
+            error_class: None,
+            next_attempt_at: None,
+            redacted_message: None,
         }
     }
 
@@ -296,6 +442,90 @@ mod tests {
                 .first()
                 .map(|event| &event.event_type),
             Some(EventType::PackageAttempted { attempt: 2, .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn commit_with_attempt_detail_persists_event_and_timeline_together() -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let events = events_path(dir.path());
+        let mut state = state();
+        let mut log = EventLog::new();
+
+        commit_with_attempt_detail(
+            &mut state,
+            dir.path(),
+            &mut log,
+            &events,
+            "demo@1.0.0",
+            PackageState::Published,
+            published_event(),
+            attempt_detail(),
+        )?;
+
+        assert_eq!(state.packages["demo@1.0.0"].state, PackageState::Published);
+        assert_eq!(state.attempt_history.len(), 1);
+        assert_eq!(state.attempt_history[0].attempt, 1);
+        assert_eq!(EventLog::read_from_file(&events)?.len(), 1);
+        let saved = crate::state::execution_state::load_state(dir.path())?
+            .context("combined transition state was not persisted")?;
+        assert_eq!(saved.attempt_history, state.attempt_history);
+        Ok(())
+    }
+
+    #[test]
+    fn commit_pending_with_attempt_detail_projects_buffered_events_and_timeline()
+    -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let events = events_path(dir.path());
+        let mut state = state();
+        let mut log = EventLog::new();
+        log.record(published_event());
+
+        commit_pending_with_attempt_detail(
+            &mut state,
+            dir.path(),
+            &mut log,
+            &events,
+            "demo@1.0.0",
+            PackageState::Published,
+            attempt_detail(),
+        )?;
+
+        assert!(log.all_events().is_empty());
+        assert_eq!(state.attempt_history.len(), 1);
+        assert_eq!(EventLog::read_from_file(&events)?.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn commit_attempt_detail_pending_flushes_retry_events_without_state_change()
+    -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let events = events_path(dir.path());
+        let mut state = state();
+        let mut log = EventLog::new();
+        log.record(attempted_event(1));
+
+        commit_attempt_detail_pending(
+            &mut state,
+            dir.path(),
+            &mut log,
+            &events,
+            "demo@1.0.0",
+            attempt_detail(),
+        )?;
+
+        assert_eq!(state.packages["demo@1.0.0"].state, PackageState::Pending);
+        assert_eq!(state.packages["demo@1.0.0"].attempts, 0);
+        assert_eq!(state.attempt_history.len(), 1);
+        assert!(matches!(
+            EventLog::read_from_file(&events)?
+                .all_events()
+                .first()
+                .map(|event| &event.event_type),
+            Some(EventType::PackageAttempted { attempt: 1, .. })
         ));
         Ok(())
     }

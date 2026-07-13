@@ -35,6 +35,7 @@ pub(crate) fn emit_retry_backoff_event(
         &reason,
         message,
     )?;
+    flush_event_log(event_log, events_path)?;
     wait_after_retry(
         reporter,
         pkg_name,
@@ -51,7 +52,7 @@ pub(crate) fn emit_retry_backoff_event(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn record_retry_backoff_event(
     event_log: &mut events::EventLog,
-    events_path: &Path,
+    _events_path: &Path,
     pkg_label: &str,
     attempt: u32,
     max_attempts: u32,
@@ -74,7 +75,6 @@ pub(crate) fn record_retry_backoff_event(
     });
     record_publish_wait_event(
         event_log,
-        events_path,
         pkg_label,
         delay,
         "retry backoff",
@@ -92,14 +92,12 @@ pub(crate) fn record_retry_backoff_event(
         },
         package: pkg_label.to_string(),
     });
-    event_log.write_to_file(events_path)?;
-    event_log.clear();
     Ok(())
 }
 
 pub(crate) fn record_rate_limit_observed_event(
     event_log: &mut events::EventLog,
-    events_path: &Path,
+    _events_path: &Path,
     pkg_label: &str,
     is_new_crate: bool,
     retry_after: Option<Duration>,
@@ -114,14 +112,11 @@ pub(crate) fn record_rate_limit_observed_event(
         },
         package: pkg_label.to_string(),
     });
-    event_log.write_to_file(events_path)?;
-    event_log.clear();
     Ok(())
 }
 
 fn record_publish_wait_event(
     event_log: &mut events::EventLog,
-    events_path: &Path,
     pkg_label: &str,
     delay: Duration,
     reason: &str,
@@ -136,6 +131,10 @@ fn record_publish_wait_event(
         },
         package: pkg_label.to_string(),
     });
+    Ok(())
+}
+
+fn flush_event_log(event_log: &mut events::EventLog, events_path: &Path) -> Result<()> {
     event_log.write_to_file(events_path)?;
     event_log.clear();
     Ok(())

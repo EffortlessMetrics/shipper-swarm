@@ -16,8 +16,8 @@ use chrono::{DateTime, Utc};
 use crate::ops::cargo;
 use crate::plan::PlannedWorkspace;
 use crate::runtime::execution::{
-    append_attempt_detail, backoff_delay, classify_cargo_failure, pkg_key, registry_aware_backoff,
-    retry_after_delay, retry_next_attempt_at,
+    backoff_delay, classify_cargo_failure, pkg_key, registry_aware_backoff, retry_after_delay,
+    retry_next_attempt_at,
 };
 use crate::state::events;
 use crate::state::execution_state as state;
@@ -133,16 +133,84 @@ fn commit_attempt_transition(
     )
 }
 
-fn record_attempt_detail(
+#[allow(clippy::too_many_arguments)]
+fn commit_with_attempt_detail_transition(
     st: &Arc<Mutex<ExecutionState>>,
     state_dir: &Path,
+    event_log: &Arc<Mutex<events::EventLog>>,
+    events_path: &Path,
+    key: &str,
+    new_state: PackageState,
+    event: PublishEvent,
     detail: AttemptDetail,
 ) -> Result<()> {
-    let mut state = st.lock().map_err(|_| {
-        anyhow::anyhow!("execution state lock poisoned while recording attempt detail")
-    })?;
-    append_attempt_detail(&mut state, detail);
-    state::save_state(state_dir, &state)
+    let mut log = event_log
+        .lock()
+        .map_err(|_| anyhow::anyhow!("event log lock poisoned during package transition"))?;
+    let mut state = st
+        .lock()
+        .map_err(|_| anyhow::anyhow!("execution state lock poisoned during package transition"))?;
+    crate::engine::transition::commit_with_attempt_detail(
+        &mut state,
+        state_dir,
+        &mut log,
+        events_path,
+        key,
+        new_state,
+        event,
+        detail,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn commit_pending_with_attempt_detail_transition(
+    st: &Arc<Mutex<ExecutionState>>,
+    state_dir: &Path,
+    event_log: &Arc<Mutex<events::EventLog>>,
+    events_path: &Path,
+    key: &str,
+    new_state: PackageState,
+    detail: AttemptDetail,
+) -> Result<()> {
+    let mut log = event_log
+        .lock()
+        .map_err(|_| anyhow::anyhow!("event log lock poisoned during package transition"))?;
+    let mut state = st
+        .lock()
+        .map_err(|_| anyhow::anyhow!("execution state lock poisoned during package transition"))?;
+    crate::engine::transition::commit_pending_with_attempt_detail(
+        &mut state,
+        state_dir,
+        &mut log,
+        events_path,
+        key,
+        new_state,
+        detail,
+    )
+}
+
+fn commit_attempt_detail_transition(
+    st: &Arc<Mutex<ExecutionState>>,
+    state_dir: &Path,
+    event_log: &Arc<Mutex<events::EventLog>>,
+    events_path: &Path,
+    key: &str,
+    detail: AttemptDetail,
+) -> Result<()> {
+    let mut log = event_log
+        .lock()
+        .map_err(|_| anyhow::anyhow!("event log lock poisoned during attempt detail"))?;
+    let mut state = st
+        .lock()
+        .map_err(|_| anyhow::anyhow!("execution state lock poisoned during attempt detail"))?;
+    crate::engine::transition::commit_attempt_detail_pending(
+        &mut state,
+        state_dir,
+        &mut log,
+        events_path,
+        key,
+        detail,
+    )
 }
 
 /// Emit a [`EventType::RetryBackoffStarted`] event + a human-readable warn
@@ -164,7 +232,7 @@ pub(super) fn emit_retry_backoff(
     reason: ErrorClass,
     message: &str,
 ) {
-    record_retry_backoff(
+    let _ = record_retry_backoff(
         event_log,
         events_path,
         pkg_label,
@@ -175,6 +243,7 @@ pub(super) fn emit_retry_backoff(
         &reason,
         message,
     );
+    let _ = flush_event_log(event_log, events_path);
     wait_after_retry(
         reporter,
         pkg_name,
@@ -198,10 +267,10 @@ fn record_retry_backoff(
     next_attempt_at: DateTime<Utc>,
     reason: &ErrorClass,
     message: &str,
-) {
-    let Ok(mut log) = event_log.lock() else {
-        return;
-    };
+) -> Result<()> {
+    let mut log = event_log
+        .lock()
+        .map_err(|_| anyhow::anyhow!("event log lock poisoned during retry scheduling"))?;
     log.record(PublishEvent {
         timestamp: Utc::now(),
         event_type: EventType::RetryScheduled {
@@ -235,8 +304,8 @@ fn record_retry_backoff(
         },
         package: pkg_label.to_string(),
     });
-    let _ = log.write_to_file(events_path);
-    log.clear();
+    let _ = events_path;
+    Ok(())
 }
 
 fn record_rate_limit_observed(
@@ -246,10 +315,10 @@ fn record_rate_limit_observed(
     is_new_crate: bool,
     retry_after: Option<std::time::Duration>,
     message: &str,
-) {
-    let Ok(mut log) = event_log.lock() else {
-        return;
-    };
+) -> Result<()> {
+    let mut log = event_log
+        .lock()
+        .map_err(|_| anyhow::anyhow!("event log lock poisoned during rate-limit observation"))?;
     log.record(PublishEvent {
         timestamp: Utc::now(),
         event_type: EventType::RateLimitObserved {
@@ -259,8 +328,17 @@ fn record_rate_limit_observed(
         },
         package: pkg_label.to_string(),
     });
-    let _ = log.write_to_file(events_path);
+    let _ = events_path;
+    Ok(())
+}
+
+fn flush_event_log(event_log: &Arc<Mutex<events::EventLog>>, events_path: &Path) -> Result<()> {
+    let mut log = event_log
+        .lock()
+        .map_err(|_| anyhow::anyhow!("event log lock poisoned while flushing events"))?;
+    log.write_to_file(events_path)?;
     log.clear();
+    Ok(())
 }
 
 fn record_readiness_event(
@@ -679,27 +757,21 @@ pub(super) fn publish_package(
             }
 
             if out.exit_code == 0 && !out.timed_out {
-                if let Err(e) = record_attempt_detail(
-                    st,
-                    state_dir,
-                    AttemptDetail {
-                        package: p.name.clone(),
-                        version: p.version.clone(),
-                        attempt,
-                        max_attempts: opts.max_attempts,
-                        started_at: attempt_started_at,
-                        ended_at: attempt_ended_at,
-                        error_class: None,
-                        next_attempt_at: None,
-                        redacted_message: None,
-                    },
-                ) {
-                    return PackagePublishResult { result: Err(e) };
-                }
+                let attempt_detail = AttemptDetail {
+                    package: p.name.clone(),
+                    version: p.version.clone(),
+                    attempt,
+                    max_attempts: opts.max_attempts,
+                    started_at: attempt_started_at,
+                    ended_at: attempt_ended_at,
+                    error_class: None,
+                    next_attempt_at: None,
+                    redacted_message: None,
+                };
                 cargo_succeeded = true;
                 // ReadinessStarted is the durable checkpoint that proves
                 // cargo accepted the upload and projects Uploaded on rebuild.
-                if let Err(e) = commit_transition(
+                if let Err(e) = commit_with_attempt_detail_transition(
                     st,
                     state_dir,
                     event_log,
@@ -713,6 +785,7 @@ pub(super) fn publish_package(
                         },
                         package: pkg_label.clone(),
                     },
+                    attempt_detail,
                 ) {
                     return PackagePublishResult { result: Err(e) };
                 }
@@ -744,10 +817,7 @@ pub(super) fn publish_package(
                         p.name, p.version
                     ));
 
-                    if let Err(e) = record_attempt_detail(st, state_dir, attempt_detail) {
-                        return PackagePublishResult { result: Err(e) };
-                    }
-                    if let Err(e) = commit_transition(
+                    if let Err(e) = commit_with_attempt_detail_transition(
                         st,
                         state_dir,
                         event_log,
@@ -761,6 +831,7 @@ pub(super) fn publish_package(
                             },
                             package: pkg_label.clone(),
                         },
+                        attempt_detail,
                     ) {
                         return PackagePublishResult { result: Err(e) };
                     }
@@ -822,18 +893,13 @@ pub(super) fn publish_package(
 
                     match outcome {
                         ReconciliationOutcome::Published { .. } => {
-                            if let Err(e) =
-                                record_attempt_detail(st, state_dir, attempt_detail.clone())
-                            {
-                                return PackagePublishResult { result: Err(e) };
-                            }
                             reporter.info(&format!(
                                 "{}@{}: reconciliation outcome: Published; registry shows version present; action: mark published and continue without retry (evidence: {})",
                                 p.name,
                                 p.version,
                                 reconciliation_report_path.display()
                             ));
-                            if let Err(e) = commit_transition(
+                            if let Err(e) = commit_with_attempt_detail_transition(
                                 st,
                                 state_dir,
                                 event_log,
@@ -847,6 +913,7 @@ pub(super) fn publish_package(
                                     },
                                     package: pkg_label.clone(),
                                 },
+                                attempt_detail.clone(),
                             ) {
                                 return PackagePublishResult { result: Err(e) };
                             }
@@ -892,21 +959,17 @@ pub(super) fn publish_package(
                             readiness_evidence = reconcile_evidence;
                         }
                         ReconciliationOutcome::StillUnknown { reason, .. } => {
-                            if let Err(e) =
-                                record_attempt_detail(st, state_dir, attempt_detail.clone())
-                            {
-                                return PackagePublishResult { result: Err(e) };
-                            }
                             let ambiguous_state = PackageState::Ambiguous {
                                 message: reason.clone(),
                             };
-                            if let Err(e) = commit_pending_transition(
+                            if let Err(e) = commit_pending_with_attempt_detail_transition(
                                 st,
                                 state_dir,
                                 event_log,
                                 events_path,
                                 &key,
                                 ambiguous_state,
+                                attempt_detail.clone(),
                             ) {
                                 return PackagePublishResult { result: Err(e) };
                             }
@@ -951,20 +1014,18 @@ pub(super) fn publish_package(
 
                 match class {
                     ErrorClass::Permanent => {
-                        if let Err(e) = record_attempt_detail(st, state_dir, attempt_detail) {
-                            return PackagePublishResult { result: Err(e) };
-                        }
                         let failed = PackageState::Failed {
                             class: class.clone(),
                             message: msg.clone(),
                         };
-                        if let Err(e) = commit_pending_transition(
+                        if let Err(e) = commit_pending_with_attempt_detail_transition(
                             st,
                             state_dir,
                             event_log,
                             events_path,
                             &key,
                             failed,
+                            attempt_detail,
                         ) {
                             return PackagePublishResult { result: Err(e) };
                         }
@@ -1006,15 +1067,17 @@ pub(super) fn publish_package(
                                 false
                             };
                         if attempt < opts.max_attempts {
-                            if crate::runtime::execution::looks_like_rate_limit(&failure_output) {
-                                record_rate_limit_observed(
+                            if crate::runtime::execution::looks_like_rate_limit(&failure_output)
+                                && let Err(e) = record_rate_limit_observed(
                                     event_log,
                                     events_path,
                                     &pkg_label,
                                     is_new_crate,
                                     retry_after_delay(&failure_output),
                                     &msg,
-                                );
+                                )
+                            {
+                                return PackagePublishResult { result: Err(e) };
                             }
                             let delay = registry_aware_backoff(
                                 opts.base_delay,
@@ -1027,7 +1090,7 @@ pub(super) fn publish_package(
                             );
                             let next_attempt_at = retry_next_attempt_at(delay);
                             attempt_detail.next_attempt_at = Some(next_attempt_at);
-                            record_retry_backoff(
+                            if let Err(e) = record_retry_backoff(
                                 event_log,
                                 events_path,
                                 &pkg_label,
@@ -1037,8 +1100,17 @@ pub(super) fn publish_package(
                                 next_attempt_at,
                                 &class,
                                 &msg,
-                            );
-                            if let Err(e) = record_attempt_detail(st, state_dir, attempt_detail) {
+                            ) {
+                                return PackagePublishResult { result: Err(e) };
+                            }
+                            if let Err(e) = commit_attempt_detail_transition(
+                                st,
+                                state_dir,
+                                event_log,
+                                events_path,
+                                &key,
+                                attempt_detail,
+                            ) {
                                 return PackagePublishResult { result: Err(e) };
                             }
                             wait_after_retry(
@@ -1051,8 +1123,14 @@ pub(super) fn publish_package(
                                 class.clone(),
                                 &msg,
                             );
-                        } else if let Err(e) = record_attempt_detail(st, state_dir, attempt_detail)
-                        {
+                        } else if let Err(e) = commit_attempt_detail_transition(
+                            st,
+                            state_dir,
+                            event_log,
+                            events_path,
+                            &key,
+                            attempt_detail,
+                        ) {
                             return PackagePublishResult { result: Err(e) };
                         }
                     }
