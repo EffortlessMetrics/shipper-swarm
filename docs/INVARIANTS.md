@@ -47,3 +47,11 @@ state rebuild maps that event to `uploaded`, and a later
 `package_published` event advances the projection to `published`. This keeps
 the event vocabulary backward-compatible while making interruption between
 Cargo completion and registry readiness mechanically recoverable.
+
+Attempt details are appended to `state.json` through the same event-first
+transition boundary as the matching terminal, reconciliation, or retry event.
+This prevents a scheduler from independently persisting the attempt timeline
+and package state. The current event vocabulary does not yet replay the full
+`AttemptDetail` record during state rebuild; detailed timeline replay remains
+an explicit follow-up rather than an unearned claim of complete event
+equivalence.

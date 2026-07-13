@@ -16,8 +16,8 @@ use crate::runtime::execution::short_state;
 #[cfg(test)]
 use crate::runtime::execution::update_state;
 use crate::runtime::execution::{
-    backoff_delay, classify_cargo_failure, pkg_key, record_attempt_detail, registry_aware_backoff,
-    resolve_state_dir, retry_after_delay, retry_next_attempt_at,
+    backoff_delay, classify_cargo_failure, pkg_key, registry_aware_backoff, resolve_state_dir,
+    retry_after_delay, retry_next_attempt_at,
 };
 use crate::state::events;
 use crate::state::execution_state as state;
@@ -524,26 +524,22 @@ pub fn run_publish(
                 event_log.clear();
 
                 if out.exit_code == 0 {
-                    record_attempt_detail(
-                        &mut st,
-                        &state_dir,
-                        AttemptDetail {
-                            package: p.name.clone(),
-                            version: p.version.clone(),
-                            attempt,
-                            max_attempts: opts.max_attempts,
-                            started_at: attempt_started_at,
-                            ended_at: attempt_ended_at,
-                            error_class: None,
-                            next_attempt_at: None,
-                            redacted_message: None,
-                        },
-                    )?;
+                    let attempt_detail = AttemptDetail {
+                        package: p.name.clone(),
+                        version: p.version.clone(),
+                        attempt,
+                        max_attempts: opts.max_attempts,
+                        started_at: attempt_started_at,
+                        ended_at: attempt_ended_at,
+                        error_class: None,
+                        next_attempt_at: None,
+                        redacted_message: None,
+                    };
                     cargo_succeeded = true;
                     // ReadinessStarted is the durable checkpoint that proves
                     // cargo accepted the upload and projects Uploaded on
                     // rebuild. Keep it with the state transition boundary.
-                    transition::commit(
+                    transition::commit_with_attempt_detail(
                         &mut st,
                         &state_dir,
                         &mut event_log,
@@ -557,6 +553,7 @@ pub fn run_publish(
                             },
                             package: pkg_label.clone(),
                         },
+                        attempt_detail,
                     )?;
                 } else {
                     let failure_output = format!("{}\n{}", out.stderr_tail, out.stdout_tail);
@@ -613,14 +610,13 @@ pub fn run_publish(
 
                         match outcome {
                             ReconciliationOutcome::Published { .. } => {
-                                record_attempt_detail(&mut st, &state_dir, attempt_detail)?;
                                 reporter.info(&format!(
                                     "{}@{}: reconciliation outcome: Published; registry shows version present; action: mark published and continue without retry (evidence: {})",
                                     p.name,
                                     p.version,
                                     reconciliation_report_path.display()
                                 ));
-                                transition::commit(
+                                transition::commit_with_attempt_detail(
                                     &mut st,
                                     &state_dir,
                                     &mut event_log,
@@ -634,6 +630,7 @@ pub fn run_publish(
                                         },
                                         package: pkg_label.clone(),
                                     },
+                                    attempt_detail,
                                 )?;
                                 write_reconciliation_report_best_effort(
                                     &state_dir,
@@ -669,17 +666,17 @@ pub fn run_publish(
                                 readiness_evidence = reconcile_evidence;
                             }
                             ReconciliationOutcome::StillUnknown { reason, .. } => {
-                                record_attempt_detail(&mut st, &state_dir, attempt_detail)?;
                                 let ambiguous_state = PackageState::Ambiguous {
                                     message: reason.clone(),
                                 };
-                                transition::commit_pending(
+                                transition::commit_pending_with_attempt_detail(
                                     &mut st,
                                     &state_dir,
                                     &mut event_log,
                                     &events_path,
                                     &key,
                                     ambiguous_state,
+                                    attempt_detail,
                                 )?;
                                 write_reconciliation_report_best_effort(
                                     &state_dir,
@@ -726,8 +723,7 @@ pub fn run_publish(
                                 "{}@{}: version is present on registry; treating as published",
                                 p.name, p.version
                             ));
-                            record_attempt_detail(&mut st, &state_dir, attempt_detail)?;
-                            transition::commit(
+                            transition::commit_with_attempt_detail(
                                 &mut st,
                                 &state_dir,
                                 &mut event_log,
@@ -741,6 +737,7 @@ pub fn run_publish(
                                     },
                                     package: pkg_label.clone(),
                                 },
+                                attempt_detail,
                             )?;
                             last_err = None;
                             break;
@@ -749,7 +746,6 @@ pub fn run_publish(
 
                     match class {
                         ErrorClass::Permanent => {
-                            record_attempt_detail(&mut st, &state_dir, attempt_detail)?;
                             let failed = PackageState::Failed {
                                 class: class.clone(),
                                 message: msg.clone(),
@@ -763,13 +759,14 @@ pub fn run_publish(
                                 },
                                 package: pkg_label.clone(),
                             });
-                            transition::commit_pending(
+                            transition::commit_pending_with_attempt_detail(
                                 &mut st,
                                 &state_dir,
                                 &mut event_log,
                                 &events_path,
                                 &key,
                                 failed,
+                                attempt_detail,
                             )?;
 
                             return Err(anyhow::anyhow!(
@@ -823,7 +820,14 @@ pub fn run_publish(
                                     &class,
                                     &msg,
                                 )?;
-                                record_attempt_detail(&mut st, &state_dir, attempt_detail)?;
+                                transition::commit_attempt_detail_pending(
+                                    &mut st,
+                                    &state_dir,
+                                    &mut event_log,
+                                    &events_path,
+                                    &key,
+                                    attempt_detail,
+                                )?;
                                 wait_after_retry(
                                     reporter,
                                     &p.name,
@@ -835,7 +839,14 @@ pub fn run_publish(
                                     &msg,
                                 );
                             } else {
-                                record_attempt_detail(&mut st, &state_dir, attempt_detail)?;
+                                transition::commit_attempt_detail_pending(
+                                    &mut st,
+                                    &state_dir,
+                                    &mut event_log,
+                                    &events_path,
+                                    &key,
+                                    attempt_detail,
+                                )?;
                             }
                         }
                     }
