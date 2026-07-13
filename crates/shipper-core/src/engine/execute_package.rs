@@ -651,7 +651,15 @@ pub(crate) fn publish_package_with_timeout(
 
     reporter.info(&format!("{}@{}: publishing...", p.name, p.version));
 
-    let mut attempt = 0u32;
+    let mut attempt = {
+        let Ok(state) = st.lock() else {
+            return poisoned_lock("execution state");
+        };
+        state
+            .packages
+            .get(&key)
+            .map_or(0, |progress| progress.attempts)
+    };
     let mut last_err: Option<(ErrorClass, String)> = None;
     let mut attempt_evidence: Vec<AttemptEvidence> = Vec::new();
     let mut readiness_evidence: Vec<ReadinessEvidence> = Vec::new();
@@ -963,12 +971,6 @@ pub(crate) fn publish_package_with_timeout(
                     return PackagePublishResult { result: Err(e) };
                 }
             } else {
-                // Cargo failed, check registry
-                reporter.warn(&format!(
-                    "{}@{}: cargo publish failed (exit={}); checking registry...",
-                    p.name, p.version, out.exit_code
-                ));
-
                 let failure_output = format!("{}\n{}", out.stderr_tail, out.stdout_tail);
                 let (class, msg) = classify_cargo_failure(&out.stderr_tail, &out.stdout_tail);
                 last_err = Some((class.clone(), msg.clone()));
@@ -983,34 +985,6 @@ pub(crate) fn publish_package_with_timeout(
                     next_attempt_at: None,
                     redacted_message: Some(msg.clone()),
                 };
-
-                if reg.version_exists(&p.name, &p.version).unwrap_or(false) {
-                    reporter.info(&format!(
-                        "{}@{}: version is present on registry; treating as published",
-                        p.name, p.version
-                    ));
-
-                    if let Err(e) = commit_with_attempt_detail_transition(
-                        st,
-                        state_dir,
-                        event_log,
-                        events_path,
-                        &key,
-                        PackageState::Published,
-                        PublishEvent {
-                            timestamp: Utc::now(),
-                            event_type: EventType::PackagePublished {
-                                duration_ms: start_instant.elapsed().as_millis() as u64,
-                            },
-                            package: pkg_label.clone(),
-                        },
-                        attempt_detail,
-                    ) {
-                        return PackagePublishResult { result: Err(e) };
-                    }
-                    last_err = None;
-                    break;
-                }
 
                 // Event: PackageFailed
                 {
@@ -1182,6 +1156,43 @@ pub(crate) fn publish_package_with_timeout(
                                 )),
                             };
                         }
+                    }
+                } else {
+                    // Non-ambiguous failures keep the historical quick registry
+                    // check. Ambiguous failures use the reconciliation state
+                    // machine above so they are queried exactly once before a
+                    // retry decision.
+                    reporter.warn(&format!(
+                        "{}@{}: cargo publish failed (exit={}); checking registry...",
+                        p.name, p.version, out.exit_code
+                    ));
+
+                    if reg.version_exists(&p.name, &p.version).unwrap_or(false) {
+                        reporter.info(&format!(
+                            "{}@{}: version is present on registry; treating as published",
+                            p.name, p.version
+                        ));
+
+                        if let Err(e) = commit_with_attempt_detail_transition(
+                            st,
+                            state_dir,
+                            event_log,
+                            events_path,
+                            &key,
+                            PackageState::Published,
+                            PublishEvent {
+                                timestamp: Utc::now(),
+                                event_type: EventType::PackagePublished {
+                                    duration_ms: start_instant.elapsed().as_millis() as u64,
+                                },
+                                package: pkg_label.clone(),
+                            },
+                            attempt_detail,
+                        ) {
+                            return PackagePublishResult { result: Err(e) };
+                        }
+                        last_err = None;
+                        break;
                     }
                 }
 
@@ -1432,32 +1443,7 @@ pub(crate) fn publish_package_with_timeout(
                     );
                 }
             }
-            Err(_) => {
-                let message = "readiness check failed";
-                last_err = Some((ErrorClass::Ambiguous, message.to_string()));
-                let delay = backoff_delay(
-                    opts.base_delay,
-                    opts.max_delay,
-                    attempt,
-                    opts.retry_strategy,
-                    opts.retry_jitter,
-                );
-                let next_attempt_at = retry_next_attempt_at(delay);
-                emit_retry_backoff(
-                    event_log,
-                    events_path,
-                    reporter,
-                    &pkg_label,
-                    &p.name,
-                    &p.version,
-                    attempt,
-                    opts.max_attempts,
-                    delay,
-                    next_attempt_at,
-                    ErrorClass::Ambiguous,
-                    message,
-                );
-            }
+            Err(error) => return PackagePublishResult { result: Err(error) },
         }
     }
 
@@ -1619,17 +1605,24 @@ pub(crate) fn publish_package_with_timeout(
         },
     );
 
+    let (attempts, final_state) = {
+        let Ok(state) = st.lock() else {
+            return poisoned_lock("execution state");
+        };
+        let Some(progress) = state.packages.get(&key) else {
+            return PackagePublishResult {
+                result: Err(anyhow::anyhow!("missing package progress after execution")),
+            };
+        };
+        (progress.attempts, progress.state.clone())
+    };
+
     PackagePublishResult {
         result: Ok(PackageReceipt {
             name: p.name.clone(),
             version: p.version.clone(),
-            attempts: {
-                let Ok(st) = st.lock() else {
-                    return poisoned_lock("execution state");
-                };
-                st.packages.get(&key).map_or(0, |p| p.attempts)
-            },
-            state: PackageState::Published,
+            attempts,
+            state: final_state,
             started_at,
             finished_at,
             duration_ms,
