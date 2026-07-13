@@ -35,6 +35,7 @@ mod publish;
 mod readiness;
 mod rehearsal;
 mod retry;
+pub(crate) mod transition;
 
 pub use preflight::PreflightRunOptions;
 use readiness::verify_published;
@@ -392,18 +393,21 @@ pub fn run_publish(
             let skipped = PackageState::Skipped {
                 reason: "already published".into(),
             };
-            update_state(&mut st, &state_dir, &key, skipped)?;
-
-            // Event: PackageSkipped
-            event_log.record(PublishEvent {
-                timestamp: Utc::now(),
-                event_type: EventType::PackageSkipped {
-                    reason: "already published".to_string(),
+            transition::commit(
+                &mut st,
+                &state_dir,
+                &mut event_log,
+                &events_path,
+                &key,
+                skipped.clone(),
+                PublishEvent {
+                    timestamp: Utc::now(),
+                    event_type: EventType::PackageSkipped {
+                        reason: "already published".to_string(),
+                    },
+                    package: pkg_label.clone(),
                 },
-                package: pkg_label.clone(),
-            });
-            event_log.write_to_file(&events_path)?;
-            event_log.clear();
+            )?;
 
             let progress = st
                 .packages
@@ -803,19 +807,22 @@ pub fn run_publish(
             )?;
             readiness_evidence = checks;
             if visible {
-                update_state(&mut st, &state_dir, &key, PackageState::Published)?;
-                last_err = None;
-
-                // Event: PackagePublished
-                event_log.record(PublishEvent {
-                    timestamp: Utc::now(),
-                    event_type: EventType::PackagePublished {
-                        duration_ms: start_instant.elapsed().as_millis() as u64,
+                transition::commit(
+                    &mut st,
+                    &state_dir,
+                    &mut event_log,
+                    &events_path,
+                    &key,
+                    PackageState::Published,
+                    PublishEvent {
+                        timestamp: Utc::now(),
+                        event_type: EventType::PackagePublished {
+                            duration_ms: start_instant.elapsed().as_millis() as u64,
+                        },
+                        package: pkg_label.clone(),
                     },
-                    package: pkg_label.clone(),
-                });
-                event_log.write_to_file(&events_path)?;
-                event_log.clear();
+                )?;
+                last_err = None;
 
                 // Send webhook notification: package succeeded
                 webhook::maybe_send_event(
@@ -863,16 +870,21 @@ pub fn run_publish(
             let current_state = st.packages.get(&key).map(|p| &p.state);
             if matches!(current_state, Some(PackageState::Uploaded)) {
                 if reg.version_exists(&p.name, &p.version)? {
-                    update_state(&mut st, &state_dir, &key, PackageState::Published)?;
-                    event_log.record(PublishEvent {
-                        timestamp: Utc::now(),
-                        event_type: EventType::PackagePublished {
-                            duration_ms: start_instant.elapsed().as_millis() as u64,
+                    transition::commit(
+                        &mut st,
+                        &state_dir,
+                        &mut event_log,
+                        &events_path,
+                        &key,
+                        PackageState::Published,
+                        PublishEvent {
+                            timestamp: Utc::now(),
+                            event_type: EventType::PackagePublished {
+                                duration_ms: start_instant.elapsed().as_millis() as u64,
+                            },
+                            package: pkg_label.clone(),
                         },
-                        package: pkg_label.clone(),
-                    });
-                    event_log.write_to_file(&events_path)?;
-                    event_log.clear();
+                    )?;
                 } else {
                     last_err = Some((
                         ErrorClass::Ambiguous,
@@ -888,16 +900,21 @@ pub fn run_publish(
         if let Some((class, msg)) = last_err {
             // Final chance: maybe it eventually showed up.
             if reg.version_exists(&p.name, &p.version)? {
-                update_state(&mut st, &state_dir, &key, PackageState::Published)?;
-                event_log.record(PublishEvent {
-                    timestamp: Utc::now(),
-                    event_type: EventType::PackagePublished {
-                        duration_ms: start_instant.elapsed().as_millis() as u64,
+                transition::commit(
+                    &mut st,
+                    &state_dir,
+                    &mut event_log,
+                    &events_path,
+                    &key,
+                    PackageState::Published,
+                    PublishEvent {
+                        timestamp: Utc::now(),
+                        event_type: EventType::PackagePublished {
+                            duration_ms: start_instant.elapsed().as_millis() as u64,
+                        },
+                        package: pkg_label.clone(),
                     },
-                    package: pkg_label.clone(),
-                });
-                event_log.write_to_file(&events_path)?;
-                event_log.clear();
+                )?;
             } else {
                 let failed = PackageState::Failed {
                     class: class.clone(),

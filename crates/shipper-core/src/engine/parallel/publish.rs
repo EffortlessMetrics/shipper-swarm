@@ -53,6 +53,33 @@ fn poisoned_lock(resource: &str) -> PackagePublishResult {
         )),
     }
 }
+
+#[allow(clippy::too_many_arguments)]
+fn commit_transition(
+    st: &Arc<Mutex<ExecutionState>>,
+    state_dir: &Path,
+    event_log: &Arc<Mutex<events::EventLog>>,
+    events_path: &Path,
+    key: &str,
+    new_state: PackageState,
+    event: PublishEvent,
+) -> Result<()> {
+    let mut log = event_log
+        .lock()
+        .map_err(|_| anyhow::anyhow!("event log lock poisoned during package transition"))?;
+    let mut state = st
+        .lock()
+        .map_err(|_| anyhow::anyhow!("execution state lock poisoned during package transition"))?;
+    crate::engine::transition::commit(
+        &mut state,
+        state_dir,
+        &mut log,
+        events_path,
+        key,
+        new_state,
+        event,
+    )
+}
 fn record_attempt_detail(
     st: &Arc<Mutex<ExecutionState>>,
     state_dir: &Path,
@@ -197,30 +224,6 @@ fn record_readiness_event(
     Ok(())
 }
 
-/// Emit the `PackagePublished` event for `pkg_label` and flush it to
-/// `events.jsonl`. Used by every code path that advances a package to
-/// `PackageState::Published`, so that `state.json` and `events.jsonl` never
-/// drift (the events-as-truth invariant, #418). Mirrors the inline block in
-/// the normal readiness-success path.
-fn record_package_published_event(
-    event_log: &Arc<Mutex<events::EventLog>>,
-    events_path: &Path,
-    pkg_label: &str,
-    duration_ms: u64,
-) -> Result<()> {
-    let mut log = event_log.lock().map_err(|_| {
-        anyhow::anyhow!("event log lock poisoned while recording PackagePublished event")
-    })?;
-    log.record(PublishEvent {
-        timestamp: Utc::now(),
-        event_type: EventType::PackagePublished { duration_ms },
-        package: pkg_label.to_string(),
-    });
-    log.write_to_file(events_path)?;
-    log.clear();
-    Ok(())
-}
-
 #[allow(clippy::too_many_arguments)]
 fn wait_after_retry(
     reporter: &Arc<SendReporter>,
@@ -304,28 +307,22 @@ pub(super) fn publish_package(
         let skipped = PackageState::Skipped {
             reason: "already published".to_string(),
         };
-        {
-            let Ok(mut state) = st.lock() else {
-                return poisoned_lock("execution state");
-            };
-            update_state_locked(&mut state, &key, skipped.clone());
-            let _ = state::save_state(state_dir, &state);
-        }
-
-        // Event: PackageSkipped
-        {
-            let Ok(mut log) = event_log.lock() else {
-                return poisoned_lock("event log");
-            };
-            log.record(PublishEvent {
+        if let Err(err) = commit_transition(
+            st,
+            state_dir,
+            event_log,
+            events_path,
+            &key,
+            skipped.clone(),
+            PublishEvent {
                 timestamp: Utc::now(),
                 event_type: EventType::PackageSkipped {
                     reason: "already published".to_string(),
                 },
                 package: pkg_label.clone(),
-            });
-            let _ = log.write_to_file(events_path);
-            log.clear();
+            },
+        ) {
+            return PackagePublishResult { result: Err(err) };
         }
 
         return PackagePublishResult {
@@ -432,12 +429,22 @@ pub(super) fn publish_package(
 
         match outcome {
             ReconciliationOutcome::Published { .. } => {
-                {
-                    let Ok(mut state) = st.lock() else {
-                        return poisoned_lock("execution state");
-                    };
-                    update_state_locked(&mut state, &key, PackageState::Published);
-                    let _ = state::save_state(state_dir, &state);
+                if let Err(e) = commit_transition(
+                    st,
+                    state_dir,
+                    event_log,
+                    events_path,
+                    &key,
+                    PackageState::Published,
+                    PublishEvent {
+                        timestamp: Utc::now(),
+                        event_type: EventType::PackagePublished {
+                            duration_ms: start_instant.elapsed().as_millis() as u64,
+                        },
+                        package: pkg_label.clone(),
+                    },
+                ) {
+                    return PackagePublishResult { result: Err(e) };
                 }
                 reporter.info(&format!(
                     "{}@{}: reconciliation outcome: Published; action: mark published and continue without republish (evidence: {})",
@@ -667,12 +674,22 @@ pub(super) fn publish_package(
                     if let Err(e) = record_attempt_detail(st, state_dir, attempt_detail) {
                         return PackagePublishResult { result: Err(e) };
                     }
-                    {
-                        let Ok(mut state) = st.lock() else {
-                            return poisoned_lock("execution state");
-                        };
-                        update_state_locked(&mut state, &key, PackageState::Published);
-                        let _ = state::save_state(state_dir, &state);
+                    if let Err(e) = commit_transition(
+                        st,
+                        state_dir,
+                        event_log,
+                        events_path,
+                        &key,
+                        PackageState::Published,
+                        PublishEvent {
+                            timestamp: Utc::now(),
+                            event_type: EventType::PackagePublished {
+                                duration_ms: start_instant.elapsed().as_millis() as u64,
+                            },
+                            package: pkg_label.clone(),
+                        },
+                    ) {
+                        return PackagePublishResult { result: Err(e) };
                     }
                     last_err = None;
                     break;
@@ -746,26 +763,22 @@ pub(super) fn publish_package(
                                 p.version,
                                 reconciliation_report_path.display()
                             ));
-                            {
-                                let Ok(mut state) = st.lock() else {
-                                    return poisoned_lock("execution state");
-                                };
-                                update_state_locked(&mut state, &key, PackageState::Published);
-                                let _ = state::save_state(state_dir, &state);
-                            }
-                            {
-                                let Ok(mut log) = event_log.lock() else {
-                                    return poisoned_lock("event log");
-                                };
-                                log.record(PublishEvent {
+                            if let Err(e) = commit_transition(
+                                st,
+                                state_dir,
+                                event_log,
+                                events_path,
+                                &key,
+                                PackageState::Published,
+                                PublishEvent {
                                     timestamp: Utc::now(),
                                     event_type: EventType::PackagePublished {
                                         duration_ms: start_instant.elapsed().as_millis() as u64,
                                     },
                                     package: pkg_label.clone(),
-                                });
-                                let _ = log.write_to_file(events_path);
-                                log.clear();
+                                },
+                            ) {
+                                return PackagePublishResult { result: Err(e) };
                             }
 
                             // Preserve reconciliation evidence in the receipt.
@@ -1007,30 +1020,24 @@ pub(super) fn publish_package(
                     ) {
                         return PackagePublishResult { result: Err(e) };
                     }
-                    {
-                        let Ok(mut state) = st.lock() else {
-                            return poisoned_lock("execution state");
-                        };
-                        update_state_locked(&mut state, &key, PackageState::Published);
-                        let _ = state::save_state(state_dir, &state);
-                    }
-                    last_err = None;
-
-                    // Event: PackagePublished
-                    {
-                        let Ok(mut log) = event_log.lock() else {
-                            return poisoned_lock("event log");
-                        };
-                        log.record(PublishEvent {
+                    if let Err(e) = commit_transition(
+                        st,
+                        state_dir,
+                        event_log,
+                        events_path,
+                        &key,
+                        PackageState::Published,
+                        PublishEvent {
                             timestamp: Utc::now(),
                             event_type: EventType::PackagePublished {
                                 duration_ms: start_instant.elapsed().as_millis() as u64,
                             },
                             package: pkg_label.clone(),
-                        });
-                        let _ = log.write_to_file(events_path);
-                        log.clear();
+                        },
+                    ) {
+                        return PackagePublishResult { result: Err(e) };
                     }
+                    last_err = None;
 
                     // Send webhook notification: package succeeded
                     maybe_send_event(
@@ -1122,21 +1129,20 @@ pub(super) fn publish_package(
         let current_state = state.packages.get(&key).map(|p| p.state.clone());
         if matches!(current_state, Some(PackageState::Uploaded)) {
             if reg.version_exists(&p.name, &p.version).unwrap_or(false) {
-                {
-                    let Ok(mut state) = st.lock() else {
-                        return poisoned_lock("execution state");
-                    };
-                    update_state_locked(&mut state, &key, PackageState::Published);
-                    let _ = state::save_state(state_dir, &state);
-                }
-
-                // Event: PackagePublished (#418 — keep events.jsonl in sync
-                // with the state→Published transition above).
-                if let Err(e) = record_package_published_event(
+                if let Err(e) = commit_transition(
+                    st,
+                    state_dir,
                     event_log,
                     events_path,
-                    &pkg_label,
-                    start_instant.elapsed().as_millis() as u64,
+                    &key,
+                    PackageState::Published,
+                    PublishEvent {
+                        timestamp: Utc::now(),
+                        event_type: EventType::PackagePublished {
+                            duration_ms: start_instant.elapsed().as_millis() as u64,
+                        },
+                        package: pkg_label.clone(),
+                    },
                 ) {
                     return PackagePublishResult { result: Err(e) };
                 }
@@ -1166,21 +1172,20 @@ pub(super) fn publish_package(
     if let Some((class, msg)) = last_err {
         // Final chance: maybe it eventually showed up.
         if reg.version_exists(&p.name, &p.version).unwrap_or(false) {
-            {
-                let Ok(mut state) = st.lock() else {
-                    return poisoned_lock("execution state");
-                };
-                update_state_locked(&mut state, &key, PackageState::Published);
-                let _ = state::save_state(state_dir, &state);
-            }
-
-            // Event: PackagePublished (#418 — keep events.jsonl in sync with
-            // the state→Published transition above).
-            if let Err(e) = record_package_published_event(
+            if let Err(e) = commit_transition(
+                st,
+                state_dir,
                 event_log,
                 events_path,
-                &pkg_label,
-                duration_ms as u64,
+                &key,
+                PackageState::Published,
+                PublishEvent {
+                    timestamp: Utc::now(),
+                    event_type: EventType::PackagePublished {
+                        duration_ms: duration_ms as u64,
+                    },
+                    package: pkg_label.clone(),
+                },
             ) {
                 return PackagePublishResult { result: Err(e) };
             }
