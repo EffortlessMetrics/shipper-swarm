@@ -13,9 +13,11 @@ use crate::registry::RegistryClient;
 use crate::runtime::environment;
 #[cfg(test)]
 use crate::runtime::execution::short_state;
+#[cfg(test)]
+use crate::runtime::execution::update_state;
 use crate::runtime::execution::{
     backoff_delay, classify_cargo_failure, pkg_key, record_attempt_detail, registry_aware_backoff,
-    resolve_state_dir, retry_after_delay, retry_next_attempt_at, update_state,
+    resolve_state_dir, retry_after_delay, retry_next_attempt_at,
 };
 use crate::state::events;
 use crate::state::execution_state as state;
@@ -38,7 +40,9 @@ mod retry;
 pub(crate) mod transition;
 
 pub use preflight::PreflightRunOptions;
+#[cfg(test)]
 use readiness::verify_published;
+use readiness::verify_published_after_started;
 use retry::{
     emit_retry_backoff_event, record_rate_limit_observed_event, record_retry_backoff_event,
     wait_after_retry,
@@ -538,8 +542,24 @@ pub fn run_publish(
                         },
                     )?;
                     cargo_succeeded = true;
-                    // Persist Uploaded state so resume skips cargo publish
-                    update_state(&mut st, &state_dir, &key, PackageState::Uploaded)?;
+                    // ReadinessStarted is the durable checkpoint that proves
+                    // cargo accepted the upload and projects Uploaded on
+                    // rebuild. Keep it with the state transition boundary.
+                    transition::commit(
+                        &mut st,
+                        &state_dir,
+                        &mut event_log,
+                        &events_path,
+                        &key,
+                        PackageState::Uploaded,
+                        PublishEvent {
+                            timestamp: Utc::now(),
+                            event_type: EventType::ReadinessStarted {
+                                method: opts.readiness.method,
+                            },
+                            package: pkg_label.clone(),
+                        },
+                    )?;
                 } else {
                     let failure_output = format!("{}\n{}", out.stderr_tail, out.stdout_tail);
                     let (class, msg) = classify_cargo_failure(&out.stderr_tail, &out.stdout_tail);
@@ -828,7 +848,7 @@ pub fn run_publish(
                 enabled: effects.readiness_enabled,
                 ..opts.readiness.clone()
             };
-            let (visible, checks) = verify_published(
+            let (visible, checks) = verify_published_after_started(
                 &reg,
                 &p.name,
                 &p.version,
@@ -3375,6 +3395,15 @@ mod tests {
             let mut reporter = CollectingReporter::default();
             let receipt = run_publish(&ws, &opts, &mut reporter).expect("publish");
             assert!(matches!(receipt.packages[0].state, PackageState::Published));
+            let persisted =
+                events::EventLog::read_from_file(&events::events_path(&td.path().join(".shipper")))
+                    .expect("read events");
+            assert!(
+                persisted
+                    .all_events()
+                    .iter()
+                    .any(|event| matches!(event.event_type, EventType::ReadinessStarted { .. }))
+            );
             server.join();
         });
     }

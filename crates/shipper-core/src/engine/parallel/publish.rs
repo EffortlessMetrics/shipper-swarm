@@ -660,13 +660,24 @@ pub(super) fn publish_package(
                     return PackagePublishResult { result: Err(e) };
                 }
                 cargo_succeeded = true;
-                // Persist Uploaded state so resume skips cargo publish
-                {
-                    let Ok(mut state) = st.lock() else {
-                        return poisoned_lock("execution state");
-                    };
-                    update_state_locked(&mut state, &key, PackageState::Uploaded);
-                    let _ = state::save_state(state_dir, &state);
+                // ReadinessStarted is the durable checkpoint that proves
+                // cargo accepted the upload and projects Uploaded on rebuild.
+                if let Err(e) = commit_transition(
+                    st,
+                    state_dir,
+                    event_log,
+                    events_path,
+                    &key,
+                    PackageState::Uploaded,
+                    PublishEvent {
+                        timestamp: Utc::now(),
+                        event_type: EventType::ReadinessStarted {
+                            method: readiness_config.method,
+                        },
+                        package: pkg_label.clone(),
+                    },
+                ) {
+                    return PackagePublishResult { result: Err(e) };
                 }
             } else {
                 // Cargo failed, check registry
