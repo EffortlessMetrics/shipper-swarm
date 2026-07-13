@@ -4,8 +4,6 @@
 //! owns the mechanically separate pieces around bootstrap, resume-gating, and
 //! end-of-run finalization.
 
-#[cfg(test)]
-pub(super) mod ambiguous;
 pub(super) mod bootstrap;
 pub(super) mod finalize;
 pub(super) mod resume;

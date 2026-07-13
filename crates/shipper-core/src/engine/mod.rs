@@ -35,8 +35,6 @@ mod publish;
 #[cfg(test)]
 mod readiness;
 mod rehearsal;
-#[cfg(test)]
-mod retry;
 pub(crate) mod transition;
 
 #[cfg(test)]
@@ -87,23 +85,6 @@ pub trait Reporter {
 
 pub(crate) fn policy_effects(opts: &RuntimeOptions) -> crate::runtime::policy::PolicyEffects {
     crate::runtime::policy::policy_effects(opts)
-}
-
-#[cfg(test)]
-fn write_reconciliation_report_best_effort(
-    state_dir: &Path,
-    ws: &PlannedWorkspace,
-    events_path: &Path,
-    reporter: &mut dyn Reporter,
-) {
-    if let Err(err) = crate::state::reconciliation::write_report_from_events(
-        state_dir,
-        &ws.plan.plan_id,
-        &ws.plan.registry,
-        events_path,
-    ) {
-        reporter.warn(&format!("failed to write reconciliation report: {err}"));
-    }
 }
 
 fn init_registry_client(registry: Registry, state_dir: &Path) -> Result<RegistryClient> {
@@ -745,51 +726,6 @@ pub(crate) fn init_state(ws: &PlannedWorkspace, state_dir: &Path) -> Result<Exec
 
     state::save_state(state_dir, &st)?;
     Ok(st)
-}
-
-/// Reconcile an ambiguous publish outcome against registry truth (sequential
-/// path mirror of `engine::parallel::reconcile::reconcile_ambiguous_upload`).
-///
-/// Returns the same [`ReconciliationOutcome`] enum + accumulated
-/// [`ReadinessEvidence`], wrapping the sequential path's registry client
-/// (`crate::registry::RegistryClient`) rather than the parallel path's
-/// `HttpRegistryClient`. Used by the resume-path branch that handles packages
-/// found in `PackageState::Ambiguous` (#99 follow-on).
-#[cfg(test)]
-fn sequential_reconcile(
-    reg: &RegistryClient,
-    crate_name: &str,
-    version: &str,
-    config: &crate::types::ReadinessConfig,
-) -> (
-    crate::types::ReconciliationOutcome,
-    Vec<crate::types::ReadinessEvidence>,
-) {
-    let start = Instant::now();
-    match reg.is_version_visible_with_backoff(crate_name, version, config) {
-        Ok((true, evidence)) => (
-            crate::types::ReconciliationOutcome::Published {
-                attempts: evidence.len() as u32,
-                elapsed_ms: start.elapsed().as_millis() as u64,
-            },
-            evidence,
-        ),
-        Ok((false, evidence)) => (
-            crate::types::ReconciliationOutcome::NotPublished {
-                attempts: evidence.len() as u32,
-                elapsed_ms: start.elapsed().as_millis() as u64,
-            },
-            evidence,
-        ),
-        Err(e) => (
-            crate::types::ReconciliationOutcome::StillUnknown {
-                attempts: 0,
-                elapsed_ms: start.elapsed().as_millis() as u64,
-                reason: format!("reconciliation query failed: {e}"),
-            },
-            Vec::new(),
-        ),
-    }
 }
 
 #[cfg(test)]
