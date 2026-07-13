@@ -80,6 +80,31 @@ fn commit_transition(
         event,
     )
 }
+
+#[allow(clippy::too_many_arguments)]
+fn commit_pending_transition(
+    st: &Arc<Mutex<ExecutionState>>,
+    state_dir: &Path,
+    event_log: &Arc<Mutex<events::EventLog>>,
+    events_path: &Path,
+    key: &str,
+    new_state: PackageState,
+) -> Result<()> {
+    let mut log = event_log
+        .lock()
+        .map_err(|_| anyhow::anyhow!("event log lock poisoned during package transition"))?;
+    let mut state = st
+        .lock()
+        .map_err(|_| anyhow::anyhow!("execution state lock poisoned during package transition"))?;
+    crate::engine::transition::commit_pending(
+        &mut state,
+        state_dir,
+        &mut log,
+        events_path,
+        key,
+        new_state,
+    )
+}
 fn record_attempt_detail(
     st: &Arc<Mutex<ExecutionState>>,
     state_dir: &Path,
@@ -744,10 +769,7 @@ pub(super) fn publish_package(
                             },
                             package: pkg_label.clone(),
                         });
-                        let _ = log.write_to_file(events_path);
-                        log.clear();
                     }
-                    write_reconciliation_report_best_effort(state_dir, ws, events_path, reporter);
                     let reconciliation_report_path = state::reconciliation_path(state_dir);
 
                     match outcome {
@@ -780,6 +802,12 @@ pub(super) fn publish_package(
                             ) {
                                 return PackagePublishResult { result: Err(e) };
                             }
+                            write_reconciliation_report_best_effort(
+                                state_dir,
+                                ws,
+                                events_path,
+                                reporter,
+                            );
 
                             // Preserve reconciliation evidence in the receipt.
                             // Do NOT emit PublishSucceeded webhook here ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â the
@@ -789,6 +817,21 @@ pub(super) fn publish_package(
                             break;
                         }
                         ReconciliationOutcome::NotPublished { .. } => {
+                            {
+                                let Ok(mut log) = event_log.lock() else {
+                                    return poisoned_lock("event log");
+                                };
+                                if let Err(e) = log.write_to_file(events_path) {
+                                    return PackagePublishResult { result: Err(e) };
+                                }
+                                log.clear();
+                            }
+                            write_reconciliation_report_best_effort(
+                                state_dir,
+                                ws,
+                                events_path,
+                                reporter,
+                            );
                             reporter.info(&format!(
                                 "{}@{}: reconciliation outcome: NotPublished; registry still absent; action: retry under publish policy (evidence: {})",
                                 p.name,
@@ -809,20 +852,22 @@ pub(super) fn publish_package(
                             let ambiguous_state = PackageState::Ambiguous {
                                 message: reason.clone(),
                             };
-                            {
-                                let Ok(mut state) = st.lock() else {
-                                    return poisoned_lock("execution state");
-                                };
-                                update_state_locked(&mut state, &key, ambiguous_state);
-                                let _ = state::save_state(state_dir, &state);
+                            if let Err(e) = commit_pending_transition(
+                                st,
+                                state_dir,
+                                event_log,
+                                events_path,
+                                &key,
+                                ambiguous_state,
+                            ) {
+                                return PackagePublishResult { result: Err(e) };
                             }
-                            {
-                                let Ok(mut log) = event_log.lock() else {
-                                    return poisoned_lock("event log");
-                                };
-                                let _ = log.write_to_file(events_path);
-                                log.clear();
-                            }
+                            write_reconciliation_report_best_effort(
+                                state_dir,
+                                ws,
+                                events_path,
+                                reporter,
+                            );
                             reporter.error(&format!(
                                 "{}@{}: reconciliation outcome: StillUnknown; action: stop before blind retry; operator action required (evidence: {}): {}",
                                 p.name,
@@ -865,19 +910,15 @@ pub(super) fn publish_package(
                             class: class.clone(),
                             message: msg.clone(),
                         };
-                        {
-                            let Ok(mut state) = st.lock() else {
-                                return poisoned_lock("execution state");
-                            };
-                            update_state_locked(&mut state, &key, failed);
-                            let _ = state::save_state(state_dir, &state);
-                        }
-                        {
-                            let Ok(mut log) = event_log.lock() else {
-                                return poisoned_lock("event log");
-                            };
-                            let _ = log.write_to_file(events_path);
-                            log.clear();
+                        if let Err(e) = commit_pending_transition(
+                            st,
+                            state_dir,
+                            event_log,
+                            events_path,
+                            &key,
+                            failed,
+                        ) {
+                            return PackagePublishResult { result: Err(e) };
                         }
 
                         // Send webhook notification: package failed
@@ -1227,17 +1268,9 @@ pub(super) fn publish_package(
         } else {
             let error_class_str = format!("{:?}", class);
             let failed = PackageState::Failed {
-                class,
+                class: class.clone(),
                 message: msg.clone(),
             };
-            {
-                let Ok(mut state) = st.lock() else {
-                    return poisoned_lock("execution state");
-                };
-                update_state_locked(&mut state, &key, failed);
-                let _ = state::save_state(state_dir, &state);
-            }
-
             // Event: PackageFailed (final)
             {
                 let Ok(mut log) = event_log.lock() else {
@@ -1249,10 +1282,13 @@ pub(super) fn publish_package(
                         class: ErrorClass::Ambiguous,
                         message: msg.clone(),
                     },
-                    package: pkg_label,
+                    package: pkg_label.clone(),
                 });
-                let _ = log.write_to_file(events_path);
-                log.clear();
+            }
+            if let Err(e) =
+                commit_pending_transition(st, state_dir, event_log, events_path, &key, failed)
+            {
+                return PackagePublishResult { result: Err(e) };
             }
 
             // Send webhook notification: package failed

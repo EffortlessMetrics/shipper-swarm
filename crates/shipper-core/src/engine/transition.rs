@@ -37,6 +37,48 @@ pub(crate) fn commit(
         );
     }
 
+    event_log.record(event);
+    persist(state, state_dir, event_log, events_path, key, new_state)
+}
+
+/// Persist a transition whose domain event has already been recorded in the
+/// in-memory log by the caller.
+///
+/// This is used when a transition is preceded by one or more explanatory
+/// events, such as reconciliation. The most recently recorded event must be
+/// for the same package; the boundary still writes the event log before the
+/// state projection and only updates the caller's state after both succeed.
+pub(crate) fn commit_pending(
+    state: &mut ExecutionState,
+    state_dir: &Path,
+    event_log: &mut EventLog,
+    events_path: &Path,
+    key: &str,
+    new_state: PackageState,
+) -> Result<()> {
+    let event = event_log
+        .all_events()
+        .last()
+        .with_context(|| format!("missing domain event for package transition: {key}"))?;
+    if event.package != key {
+        bail!(
+            "package transition key '{}' does not match pending event package '{}'",
+            key,
+            event.package
+        );
+    }
+
+    persist(state, state_dir, event_log, events_path, key, new_state)
+}
+
+fn persist(
+    state: &mut ExecutionState,
+    state_dir: &Path,
+    event_log: &mut EventLog,
+    events_path: &Path,
+    key: &str,
+    new_state: PackageState,
+) -> Result<()> {
     let mut next_state = state.clone();
     let progress = next_state
         .packages
@@ -46,7 +88,6 @@ pub(crate) fn commit(
     progress.last_updated_at = Utc::now();
     next_state.updated_at = Utc::now();
 
-    event_log.record(event);
     event_log
         .write_to_file(events_path)
         .with_context(|| format!("failed to persist package transition event for {key}"))?;
@@ -67,7 +108,7 @@ mod tests {
     use chrono::Utc;
     use tempfile::tempdir;
 
-    use super::commit;
+    use super::{commit, commit_pending};
     use crate::state::events::{EventLog, events_path};
     use crate::types::{
         EventType, ExecutionState, PackageProgress, PackageState, PublishEvent, Registry,
@@ -160,6 +201,56 @@ mod tests {
 
         assert!(err.to_string().contains("does not match event package"));
         assert!(log.all_events().is_empty());
+        assert!(!events.exists());
+        assert_eq!(state.packages["demo@1.0.0"].state, PackageState::Pending);
+        Ok(())
+    }
+
+    #[test]
+    fn commit_pending_persists_the_buffered_event_before_state_projection() -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let events = events_path(dir.path());
+        let mut state = state();
+        let mut log = EventLog::new();
+        log.record(published_event());
+
+        commit_pending(
+            &mut state,
+            dir.path(),
+            &mut log,
+            &events,
+            "demo@1.0.0",
+            PackageState::Published,
+        )?;
+
+        assert!(log.all_events().is_empty());
+        assert_eq!(state.packages["demo@1.0.0"].state, PackageState::Published);
+        assert_eq!(EventLog::read_from_file(&events)?.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn commit_pending_rejects_a_different_package() -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let events = events_path(dir.path());
+        let mut state = state();
+        let mut log = EventLog::new();
+        log.record(PublishEvent {
+            package: "other@1.0.0".to_string(),
+            ..published_event()
+        });
+
+        let err = commit_pending(
+            &mut state,
+            dir.path(),
+            &mut log,
+            &events,
+            "demo@1.0.0",
+            PackageState::Published,
+        )
+        .expect_err("pending transition must match the buffered event package");
+
+        assert!(err.to_string().contains("pending event package"));
         assert!(!events.exists());
         assert_eq!(state.packages["demo@1.0.0"].state, PackageState::Pending);
         Ok(())
