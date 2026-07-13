@@ -38,7 +38,46 @@ pub(crate) fn commit(
     }
 
     event_log.record(event);
-    persist(state, state_dir, event_log, events_path, key, new_state)
+    persist(
+        state,
+        state_dir,
+        event_log,
+        events_path,
+        key,
+        Some(new_state),
+        None,
+    )
+}
+
+/// Record a package attempt before Cargo is invoked and project the attempt
+/// counter only after the event is durable.
+pub(crate) fn commit_attempt(
+    state: &mut ExecutionState,
+    state_dir: &Path,
+    event_log: &mut EventLog,
+    events_path: &Path,
+    key: &str,
+    attempt: u32,
+    event: PublishEvent,
+) -> Result<()> {
+    if event.package != key {
+        bail!(
+            "package attempt key '{}' does not match event package '{}'",
+            key,
+            event.package
+        );
+    }
+
+    event_log.record(event);
+    persist(
+        state,
+        state_dir,
+        event_log,
+        events_path,
+        key,
+        None,
+        Some(attempt),
+    )
 }
 
 /// Persist a transition whose domain event has already been recorded in the
@@ -68,7 +107,15 @@ pub(crate) fn commit_pending(
         );
     }
 
-    persist(state, state_dir, event_log, events_path, key, new_state)
+    persist(
+        state,
+        state_dir,
+        event_log,
+        events_path,
+        key,
+        Some(new_state),
+        None,
+    )
 }
 
 fn persist(
@@ -77,14 +124,20 @@ fn persist(
     event_log: &mut EventLog,
     events_path: &Path,
     key: &str,
-    new_state: PackageState,
+    new_state: Option<PackageState>,
+    attempt: Option<u32>,
 ) -> Result<()> {
     let mut next_state = state.clone();
     let progress = next_state
         .packages
         .get_mut(key)
         .with_context(|| format!("missing package progress for transition: {key}"))?;
-    progress.state = new_state;
+    if let Some(new_state) = new_state {
+        progress.state = new_state;
+    }
+    if let Some(attempt) = attempt {
+        progress.attempts = attempt;
+    }
     progress.last_updated_at = Utc::now();
     next_state.updated_at = Utc::now();
 
@@ -108,7 +161,7 @@ mod tests {
     use chrono::Utc;
     use tempfile::tempdir;
 
-    use super::{commit, commit_pending};
+    use super::{commit, commit_attempt, commit_pending};
     use crate::state::events::{EventLog, events_path};
     use crate::types::{
         EventType, ExecutionState, PackageProgress, PackageState, PublishEvent, Registry,
@@ -140,6 +193,17 @@ mod tests {
         PublishEvent {
             timestamp: Utc::now(),
             event_type: EventType::PackagePublished { duration_ms: 7 },
+            package: "demo@1.0.0".to_string(),
+        }
+    }
+
+    fn attempted_event(attempt: u32) -> PublishEvent {
+        PublishEvent {
+            timestamp: Utc::now(),
+            event_type: EventType::PackageAttempted {
+                attempt,
+                command: "cargo publish -p demo".to_string(),
+            },
             package: "demo@1.0.0".to_string(),
         }
     }
@@ -203,6 +267,36 @@ mod tests {
         assert!(log.all_events().is_empty());
         assert!(!events.exists());
         assert_eq!(state.packages["demo@1.0.0"].state, PackageState::Pending);
+        Ok(())
+    }
+
+    #[test]
+    fn commit_attempt_persists_event_before_attempt_projection() -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let events = events_path(dir.path());
+        let mut state = state();
+        let mut log = EventLog::new();
+
+        commit_attempt(
+            &mut state,
+            dir.path(),
+            &mut log,
+            &events,
+            "demo@1.0.0",
+            2,
+            attempted_event(2),
+        )?;
+
+        assert_eq!(state.packages["demo@1.0.0"].attempts, 2);
+        assert_eq!(state.packages["demo@1.0.0"].state, PackageState::Pending);
+        assert!(log.all_events().is_empty());
+        assert!(matches!(
+            EventLog::read_from_file(&events)?
+                .all_events()
+                .first()
+                .map(|event| &event.event_type),
+            Some(EventType::PackageAttempted { attempt: 2, .. })
+        ));
         Ok(())
     }
 

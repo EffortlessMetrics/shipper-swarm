@@ -105,6 +105,34 @@ fn commit_pending_transition(
         new_state,
     )
 }
+
+#[allow(clippy::too_many_arguments)]
+fn commit_attempt_transition(
+    st: &Arc<Mutex<ExecutionState>>,
+    state_dir: &Path,
+    event_log: &Arc<Mutex<events::EventLog>>,
+    events_path: &Path,
+    key: &str,
+    attempt: u32,
+    event: PublishEvent,
+) -> Result<()> {
+    let mut log = event_log
+        .lock()
+        .map_err(|_| anyhow::anyhow!("event log lock poisoned during package attempt"))?;
+    let mut state = st
+        .lock()
+        .map_err(|_| anyhow::anyhow!("execution state lock poisoned during package attempt"))?;
+    crate::engine::transition::commit_attempt(
+        &mut state,
+        state_dir,
+        &mut log,
+        events_path,
+        key,
+        attempt,
+        event,
+    )
+}
+
 fn record_attempt_detail(
     st: &Arc<Mutex<ExecutionState>>,
     state_dir: &Path,
@@ -570,16 +598,6 @@ pub(super) fn publish_package(
 
     while attempt < opts.max_attempts {
         attempt += 1;
-        {
-            let Ok(mut state) = st.lock() else {
-                return poisoned_lock("execution state");
-            };
-            if let Some(pr) = state.packages.get_mut(&key) {
-                pr.attempts = attempt;
-                pr.last_updated_at = Utc::now();
-            }
-            let _ = state::save_state(state_dir, &state);
-        }
 
         let command = format!(
             "cargo publish -p {} --registry {}",
@@ -592,20 +610,24 @@ pub(super) fn publish_package(
         ));
 
         if !cargo_succeeded {
-            // Event: PackageAttempted
             let attempt_started_at = Utc::now();
-            {
-                let Ok(mut log) = event_log.lock() else {
-                    return poisoned_lock("event log");
-                };
-                log.record(PublishEvent {
+            if let Err(e) = commit_attempt_transition(
+                st,
+                state_dir,
+                event_log,
+                events_path,
+                &key,
+                attempt,
+                PublishEvent {
                     timestamp: attempt_started_at,
                     event_type: EventType::PackageAttempted {
                         attempt,
                         command: command.clone(),
                     },
                     package: pkg_label.clone(),
-                });
+                },
+            ) {
+                return PackagePublishResult { result: Err(e) };
             }
 
             let out = match cargo::cargo_publish(

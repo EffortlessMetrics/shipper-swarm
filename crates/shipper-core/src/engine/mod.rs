@@ -459,15 +459,6 @@ pub fn run_publish(
 
         while attempt < opts.max_attempts {
             attempt += 1;
-            {
-                let pr = st
-                    .packages
-                    .get_mut(&key)
-                    .context("missing package progress in state during attempt")?;
-                pr.attempts = attempt;
-                pr.last_updated_at = Utc::now();
-                state::save_state(&state_dir, &st)?;
-            }
 
             let command = format!(
                 "cargo publish -p {} --registry {}",
@@ -480,16 +471,23 @@ pub fn run_publish(
             ));
 
             if !cargo_succeeded {
-                // Event: PackageAttempted
                 let attempt_started_at = Utc::now();
-                event_log.record(PublishEvent {
-                    timestamp: attempt_started_at,
-                    event_type: EventType::PackageAttempted {
-                        attempt,
-                        command: command.clone(),
+                transition::commit_attempt(
+                    &mut st,
+                    &state_dir,
+                    &mut event_log,
+                    &events_path,
+                    &key,
+                    attempt,
+                    PublishEvent {
+                        timestamp: attempt_started_at,
+                        event_type: EventType::PackageAttempted {
+                            attempt,
+                            command: command.clone(),
+                        },
+                        package: pkg_label.clone(),
                     },
-                    package: pkg_label.clone(),
-                });
+                )?;
 
                 let out = cargo::cargo_publish(
                     workspace_root,
