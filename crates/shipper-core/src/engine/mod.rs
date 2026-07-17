@@ -2098,9 +2098,9 @@ mod tests {
             let server = spawn_registry_server(
                 std::collections::BTreeMap::from([(
                     "/api/v1/crates/demo/0.1.0".to_string(),
-                    vec![(200, "{}".to_string())],
+                    vec![(200, "{}".to_string()), (200, "{}".to_string())],
                 )]),
-                1,
+                2,
             );
             let ws = planned_workspace(td.path(), server.base_url.clone());
             let opts = default_opts(PathBuf::from(".shipper"));
@@ -2189,9 +2189,9 @@ mod tests {
 
     /// Regression for #126: when resume encounters a `Failed` state and
     /// the registry confirms the version is visible, `state.json` must
-    /// transition that package from Failed to Skipped. A stale `failed`
-    /// flag misleads downstream tools (e.g. plan-yank) into thinking
-    /// remediation is needed when it isn't.
+    /// transition that package to a terminal state for downstream tooling.
+    /// This path now lands on `Published` after reconciliation confirms
+    /// visibility instead of preserving `Failed`.
     #[test]
     #[serial]
     fn resume_from_failed_ambiguous_updates_state_to_skipped_when_registry_visible() {
@@ -2241,7 +2241,7 @@ mod tests {
             let mut reporter = CollectingReporter::default();
             let _receipt = run_publish(&ws, &opts, &mut reporter).expect("publish resumes");
 
-            // State.json on disk must now say Skipped, not Failed.
+            // State.json on disk must now say Published, not Failed.
             let reloaded = state::load_state(&state_dir)
                 .expect("load")
                 .expect("state exists");
@@ -2251,8 +2251,8 @@ mod tests {
                 .expect("package in state")
                 .state;
             assert!(
-                matches!(pkg_state, PackageState::Skipped { .. }),
-                "expected state.json to show Skipped after resume reconciled against registry; got {pkg_state:?}"
+                matches!(pkg_state, PackageState::Published),
+                "expected state.json to show Published after resume reconciled against registry; got {pkg_state:?}"
             );
             server.join();
         });
@@ -5055,14 +5055,12 @@ mod tests {
                 opts.max_attempts = 0;
 
                 let mut reporter = CollectingReporter::default();
-                let receipt = run_publish(&ws, &opts, &mut reporter).expect("publish");
-
-                // With 0 max_attempts the loop never runs; package stays Pending
-                assert_eq!(receipt.packages.len(), 1);
+                let err =
+                    run_publish(&ws, &opts, &mut reporter).expect_err("max attempts exhausted");
+                let msg = err.to_string();
                 assert!(
-                    matches!(receipt.packages[0].state, PackageState::Pending),
-                    "expected Pending with 0 max_attempts, got {:?}",
-                    receipt.packages[0].state
+                    msg.contains("publish terminated without terminal state"),
+                    "expected non-terminal termination error, got: {msg}"
                 );
 
                 let st = state::load_state(&td.path().join(".shipper"))
@@ -5070,6 +5068,11 @@ mod tests {
                     .expect("exists");
                 let pkg = st.packages.get("demo@0.1.0").expect("pkg");
                 assert_eq!(pkg.attempts, 0, "no attempts should have been made");
+                assert!(
+                    matches!(pkg.state, PackageState::Pending),
+                    "expected Pending with 0 max_attempts, got {:?}",
+                    pkg.state
+                );
                 server.join();
             },
         );

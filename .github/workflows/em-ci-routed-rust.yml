@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    types: [opened, synchronize, reopened, labeled]
+    types: [opened, synchronize, reopened]
   merge_group:
   workflow_dispatch:
     inputs:
@@ -382,7 +382,11 @@ jobs:
   rust_small_github:
     name: Shipper Rust Small (GitHub-hosted fallback)
     needs: [route]
-    if: needs.route.outputs.target == 'github' && needs.route.outputs.fallback_allowed == 'true'
+    if: >
+      needs.route.outputs.target == 'github' && needs.route.outputs.fallback_allowed == 'true' ||
+      (needs.route.outputs.target == 'cx43' && needs.rust_small_cx43.result == 'cancelled') ||
+      (needs.route.outputs.target == 'cpx42' && needs.rust_small_cpx42.result == 'cancelled') ||
+      (needs.route.outputs.target == 'cx53' && needs.rust_small_cx53.result == 'cancelled')
     # GitHub-hosted runners for the fallback lane. Used by bot-authored PRs
     # (Dependabot, factory-droid) whose diffs are trivially auditable and whose
     # checkout-time secret surface is empty, so there is no secret-exposure
@@ -397,7 +401,7 @@ jobs:
     # could not run snapshot tests). Costs Actions minutes — acceptable for
     # the small volume of bot-authored PRs.
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v7.0.0
 
@@ -445,7 +449,7 @@ jobs:
     if: |
       always() &&
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
-      (github.event.action != 'labeled' || contains(fromJSON('["allow-github-hosted", "ci-budget-ack"]'), github.event.label.name))
+      (github.event_name != 'pull_request' || github.event.action != 'labeled')
     runs-on:
       group: em-ci-nano
       labels: [self-hosted, linux, x64, em-ci, cx23, ci-nano, trusted-pr]
@@ -506,7 +510,10 @@ jobs:
           for name, value in results.items():
               if name == target:
                   if value != "success":
-                      failures.append(f"selected {name} job result was {value}")
+                      if name in {"cx43", "cpx42", "cx53"} and value == "cancelled" and results["github"] == "success":
+                          print(f"selected {name} job was cancelled; github fallback succeeded")
+                      else:
+                          failures.append(f"selected {name} job result was {value}")
               elif value != "skipped":
                   failures.append(f"unselected {name} job result was {value}")
 

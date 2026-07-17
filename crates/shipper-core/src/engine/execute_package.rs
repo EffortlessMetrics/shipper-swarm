@@ -62,7 +62,8 @@ pub(crate) fn run_sequential_scheduler(
     }
 
     let api_base = reg.registry().api_base.trim_end_matches('/');
-    let reg_inner = shipper_registry::HttpRegistryClient::new(api_base);
+    let reg_inner =
+        shipper_registry::HttpRegistryClient::new(api_base).with_cache_dir(state_dir.join("cache"));
     let st_arc = Arc::new(Mutex::new(st.clone()));
     let event_log_arc = Arc::new(Mutex::new(std::mem::replace(
         event_log,
@@ -70,100 +71,117 @@ pub(crate) fn run_sequential_scheduler(
     )));
     let send_reporter = Arc::new(crate::engine::parallel::SendReporter::default());
     let mut reached_resume_point = opts.resume_from.is_none();
-    let mut receipts = Vec::new();
+    let run_result = (|| -> Result<Vec<PackageReceipt>> {
+        let mut receipts = Vec::new();
+        for package in &ws.plan.packages {
+            let key = pkg_key(&package.name, &package.version);
+            let progress = st_arc
+                .lock()
+                .map_err(|_| {
+                    anyhow::anyhow!("execution state lock poisoned before package execution")
+                })?
+                .packages
+                .get(&key)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("missing package progress in state"))?;
 
-    for package in &ws.plan.packages {
-        let key = pkg_key(&package.name, &package.version);
-        let progress = st_arc
-            .lock()
-            .map_err(|_| anyhow::anyhow!("execution state lock poisoned before package execution"))?
-            .packages
-            .get(&key)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("missing package progress in state"))?;
+            if !reached_resume_point
+                && matches!(
+                    crate::engine::publish::resume::apply_resume_from_gate(
+                        package,
+                        &progress,
+                        opts,
+                        &mut reached_resume_point,
+                        reporter,
+                    ),
+                    crate::engine::publish::resume::ResumeGate::Skip
+                )
+            {
+                if matches!(
+                    progress.state,
+                    PackageState::Published | PackageState::Skipped { .. }
+                ) {
+                    let mut log = event_log_arc.lock().map_err(|_| {
+                        anyhow::anyhow!("event log lock poisoned before resume skip")
+                    })?;
+                    crate::engine::publish::resume::record_terminal_resume_skip_event(
+                        &progress,
+                        &format!("{}@{}", package.name, package.version),
+                        events_path,
+                        &mut log,
+                    )?;
+                }
+                continue;
+            }
 
-        if !reached_resume_point
-            && matches!(
-                crate::engine::publish::resume::apply_resume_from_gate(
-                    package,
-                    &progress,
-                    opts,
-                    &mut reached_resume_point,
-                    reporter,
-                ),
-                crate::engine::publish::resume::ResumeGate::Skip
-            )
-        {
             if matches!(
                 progress.state,
                 PackageState::Published | PackageState::Skipped { .. }
             ) {
                 let mut log = event_log_arc
                     .lock()
-                    .map_err(|_| anyhow::anyhow!("event log lock poisoned before resume skip"))?;
-                crate::engine::publish::resume::record_terminal_resume_skip_event(
+                    .map_err(|_| anyhow::anyhow!("event log lock poisoned before terminal skip"))?;
+                crate::engine::publish::resume::record_terminal_resume_skip(
+                    package,
                     &progress,
                     &format!("{}@{}", package.name, package.version),
                     events_path,
                     &mut log,
+                    reporter,
                 )?;
+                continue;
             }
-            continue;
-        }
 
-        if matches!(
-            progress.state,
-            PackageState::Published | PackageState::Skipped { .. }
-        ) {
-            let mut log = event_log_arc
-                .lock()
-                .map_err(|_| anyhow::anyhow!("event log lock poisoned before terminal skip"))?;
-            crate::engine::publish::resume::record_terminal_resume_skip(
+            if matches!(progress.state, PackageState::Uploaded) {
+                reporter.info(&format!(
+                    "{}@{}: resuming from uploaded (skipping cargo publish)",
+                    package.name, package.version
+                ));
+            }
+
+            let result = publish_package_with_timeout(
                 package,
-                &progress,
-                &format!("{}@{}", package.name, package.version),
+                ws,
+                opts,
+                &reg_inner,
+                &st_arc,
+                state_dir,
+                &event_log_arc,
                 events_path,
-                &mut log,
-                reporter,
-            )?;
-            continue;
+                &send_reporter,
+                Some(opts.parallel.per_package_timeout),
+            );
+            crate::engine::parallel::drain_retry_waits_to_host(reporter, &send_reporter);
+            crate::engine::parallel::replay_buffered_messages_to_host(reporter, &send_reporter);
+
+            match result.result {
+                Ok(receipt) => receipts.push(receipt),
+                Err(error) => return Err(error),
+            }
         }
 
-        if matches!(progress.state, PackageState::Uploaded) {
-            reporter.info(&format!(
-                "{}@{}: resuming from uploaded (skipping cargo publish)",
-                package.name, package.version
-            ));
-        }
-
-        let result = publish_package_with_timeout(
-            package,
-            ws,
-            opts,
-            &reg_inner,
-            &st_arc,
-            state_dir,
-            &event_log_arc,
-            events_path,
-            &send_reporter,
-            None,
-        );
         crate::engine::parallel::drain_retry_waits_to_host(reporter, &send_reporter);
         crate::engine::parallel::replay_buffered_messages_to_host(reporter, &send_reporter);
+        Ok(receipts)
+    })();
 
-        match result.result {
-            Ok(receipt) => receipts.push(receipt),
-            Err(error) => {
-                synchronize_sequential_state(st, event_log, &st_arc, &event_log_arc)?;
-                return Err(error);
+    match run_result {
+        Ok(receipts) => {
+            synchronize_sequential_state(st, event_log, &st_arc, &event_log_arc)?;
+            Ok(receipts)
+        }
+        Err(error) => {
+            if let Err(sync_error) =
+                synchronize_sequential_state(st, event_log, &st_arc, &event_log_arc)
+            {
+                Err(anyhow::anyhow!(
+                    "publish failed: {error}; additionally failed to synchronize sequential state: {sync_error}"
+                ))
+            } else {
+                Err(error)
             }
         }
     }
-
-    crate::engine::parallel::drain_retry_waits_to_host(reporter, &send_reporter);
-    crate::engine::parallel::replay_buffered_messages_to_host(reporter, &send_reporter);
-    synchronize_sequential_state(st, event_log, &st_arc, &event_log_arc)?;
-    Ok(receipts)
 }
 
 fn synchronize_sequential_state(
@@ -374,8 +392,8 @@ pub(crate) fn emit_retry_backoff(
     next_attempt_at: DateTime<Utc>,
     reason: ErrorClass,
     message: &str,
-) {
-    let _ = record_retry_backoff(
+) -> Result<()> {
+    record_retry_backoff(
         event_log,
         events_path,
         pkg_label,
@@ -385,8 +403,8 @@ pub(crate) fn emit_retry_backoff(
         next_attempt_at,
         &reason,
         message,
-    );
-    let _ = flush_event_log(event_log, events_path);
+    )?;
+    flush_event_log(event_log, events_path)?;
     wait_after_retry(
         reporter,
         pkg_name,
@@ -397,6 +415,7 @@ pub(crate) fn emit_retry_backoff(
         reason,
         message,
     );
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -471,7 +490,8 @@ fn record_rate_limit_observed(
         },
         package: pkg_label.to_string(),
     });
-    let _ = events_path;
+    log.write_to_file(events_path)?;
+    log.clear();
     Ok(())
 }
 
@@ -563,9 +583,7 @@ pub(crate) fn publish_package(
     )
 }
 
-/// Execute a package with an explicit Cargo timeout policy. Sequential
-/// scheduling passes `None`; parallel scheduling passes its per-package
-/// timeout through the compatibility wrapper above.
+/// Execute a package with an explicit Cargo timeout policy.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn publish_package_with_timeout(
     p: &PlannedPackage,
@@ -597,85 +615,116 @@ pub(crate) fn publish_package_with_timeout(
             },
             package: pkg_label.clone(),
         });
-        let _ = log.write_to_file(events_path);
+        if let Err(err) = log.write_to_file(events_path) {
+            return PackagePublishResult {
+                result: Err(anyhow::anyhow!(
+                    "{}@{}: failed to write package-start event: {err}",
+                    p.name,
+                    p.version
+                )),
+            };
+        }
         log.clear();
     }
 
-    // Check if already published
-    if let Ok(true) = reg.version_exists(&p.name, &p.version) {
-        reporter.info(&format!(
-            "{}@{}: already published (skipping)",
-            p.name, p.version
-        ));
-
-        let skipped = PackageState::Skipped {
-            reason: "already published".to_string(),
+    let (mut attempt, was_uploaded, ambiguous_prior, was_pending_initially) = {
+        let Ok(state) = st.lock() else {
+            return poisoned_lock("execution state");
         };
-        if let Err(err) = commit_transition(
-            st,
-            state_dir,
-            event_log,
-            events_path,
-            &key,
-            skipped.clone(),
-            PublishEvent {
-                timestamp: Utc::now(),
-                event_type: EventType::PackageSkipped {
+        let progress = if let Some(progress) = state.packages.get(&key) {
+            progress.clone()
+        } else {
+            return PackagePublishResult {
+                result: Err(anyhow::anyhow!("missing package progress in state")),
+            };
+        };
+
+        let was_uploaded = matches!(progress.state, PackageState::Uploaded);
+        let was_pending_initially =
+            !was_uploaded && matches!(&progress.state, PackageState::Pending);
+        let ambiguous_prior = match &progress.state {
+            PackageState::Ambiguous { message } => Some(message.clone()),
+            _ => None,
+        };
+        (
+            progress.attempts,
+            was_uploaded,
+            ambiguous_prior,
+            was_pending_initially,
+        )
+    };
+
+    if was_pending_initially {
+        match reg.version_exists(&p.name, &p.version) {
+            Ok(true) => {
+                reporter.info(&format!(
+                    "{}@{}: already published (skipping)",
+                    p.name, p.version
+                ));
+
+                let skipped = PackageState::Skipped {
                     reason: "already published".to_string(),
-                },
-                package: pkg_label.clone(),
-            },
-        ) {
-            return PackagePublishResult { result: Err(err) };
-        }
+                };
+                if let Err(err) = commit_transition(
+                    st,
+                    state_dir,
+                    event_log,
+                    events_path,
+                    &key,
+                    skipped.clone(),
+                    PublishEvent {
+                        timestamp: Utc::now(),
+                        event_type: EventType::PackageSkipped {
+                            reason: "already published".to_string(),
+                        },
+                        package: pkg_label.clone(),
+                    },
+                ) {
+                    return PackagePublishResult {
+                        result: Err(anyhow::anyhow!(
+                            "{}@{}: failed to mark pending package as already published: {err}",
+                            p.name,
+                            p.version
+                        )),
+                    };
+                }
 
-        return PackagePublishResult {
-            result: Ok(PackageReceipt {
-                name: p.name.clone(),
-                version: p.version.clone(),
-                attempts: 0,
-                state: skipped,
-                started_at,
-                finished_at: Utc::now(),
-                duration_ms: start_instant.elapsed().as_millis(),
-                evidence: PackageEvidence {
-                    attempts: vec![],
-                    readiness_checks: vec![],
-                },
-                compromised_at: None,
-                compromised_by: None,
-                superseded_by: None,
-            }),
-        };
+                return PackagePublishResult {
+                    result: Ok(PackageReceipt {
+                        name: p.name.clone(),
+                        version: p.version.clone(),
+                        attempts: attempt,
+                        state: PackageState::Skipped {
+                            reason: "already published".to_string(),
+                        },
+                        started_at,
+                        finished_at: Utc::now(),
+                        duration_ms: start_instant.elapsed().as_millis(),
+                        evidence: PackageEvidence {
+                            attempts: vec![],
+                            readiness_checks: vec![],
+                        },
+                        compromised_at: None,
+                        compromised_by: None,
+                        superseded_by: None,
+                    }),
+                };
+            }
+            Ok(false) => {}
+            Err(error) => {
+                reporter.warn(&format!(
+                    "{}@{}: existing-version check failed before publish; continuing publish: {error}",
+                    p.name, p.version
+                ));
+            }
+        }
     }
 
     reporter.info(&format!("{}@{}: publishing...", p.name, p.version));
-
-    let mut attempt = {
-        let Ok(state) = st.lock() else {
-            return poisoned_lock("execution state");
-        };
-        state
-            .packages
-            .get(&key)
-            .map_or(0, |progress| progress.attempts)
-    };
     let mut last_err: Option<(ErrorClass, String)> = None;
     let mut attempt_evidence: Vec<AttemptEvidence> = Vec::new();
     let mut readiness_evidence: Vec<ReadinessEvidence> = Vec::new();
-    let mut cargo_succeeded = false;
-
-    // Check if resuming from Uploaded state (cargo publish succeeded previously)
-    {
-        let Ok(state) = st.lock() else {
-            return poisoned_lock("execution state");
-        };
-        if let Some(pr) = state.packages.get(&key)
-            && matches!(pr.state, PackageState::Uploaded)
-        {
-            cargo_succeeded = true;
-        }
-    }
+    let mut cargo_succeeded = was_uploaded;
 
     // Apply policy effects for readiness (Fix 7: parallel mode must respect PublishPolicy::Fast)
     let effects = policy_effects(opts);
@@ -688,19 +737,6 @@ pub(crate) fn publish_package_with_timeout(
     // package in PackageState::Ambiguous, reconcile against registry truth
     // BEFORE entering the retry loop so we never re-upload a crate whose
     // prior upload may have actually succeeded.
-    let ambiguous_prior: Option<String> = {
-        let Ok(state) = st.lock() else {
-            return poisoned_lock("execution state");
-        };
-        state.packages.get(&key).and_then(|pr| {
-            if let PackageState::Ambiguous { message } = &pr.state {
-                Some(message.clone())
-            } else {
-                None
-            }
-        })
-    };
-
     if let Some(prior_reason) = ambiguous_prior {
         reporter.warn(&format!(
             "{}@{}: resume found ambiguous state ({}); reconciling against registry",
@@ -766,7 +802,7 @@ pub(crate) fn publish_package_with_timeout(
                     result: Ok(PackageReceipt {
                         name: p.name.clone(),
                         version: p.version.clone(),
-                        attempts: 0,
+                        attempts: attempt,
                         state: PackageState::Published,
                         started_at,
                         finished_at: Utc::now(),
@@ -933,7 +969,15 @@ pub(crate) fn publish_package_with_timeout(
                     },
                     package: pkg_label.clone(),
                 });
-                let _ = log.write_to_file(events_path);
+                if let Err(err) = log.write_to_file(events_path) {
+                    return PackagePublishResult {
+                        result: Err(anyhow::anyhow!(
+                            "{}@{}: failed to write package-output event: {err}",
+                            p.name,
+                            p.version
+                        )),
+                    };
+                }
                 log.clear();
             }
 
@@ -1167,32 +1211,44 @@ pub(crate) fn publish_package_with_timeout(
                         p.name, p.version, out.exit_code
                     ));
 
-                    if reg.version_exists(&p.name, &p.version).unwrap_or(false) {
-                        reporter.info(&format!(
-                            "{}@{}: version is present on registry; treating as published",
-                            p.name, p.version
-                        ));
+                    match reg.version_exists(&p.name, &p.version) {
+                        Ok(true) => {
+                            reporter.info(&format!(
+                                "{}@{}: version is present on registry; treating as published",
+                                p.name, p.version
+                            ));
 
-                        if let Err(e) = commit_with_attempt_detail_transition(
-                            st,
-                            state_dir,
-                            event_log,
-                            events_path,
-                            &key,
-                            PackageState::Published,
-                            PublishEvent {
-                                timestamp: Utc::now(),
-                                event_type: EventType::PackagePublished {
-                                    duration_ms: start_instant.elapsed().as_millis() as u64,
+                            if let Err(e) = commit_with_attempt_detail_transition(
+                                st,
+                                state_dir,
+                                event_log,
+                                events_path,
+                                &key,
+                                PackageState::Published,
+                                PublishEvent {
+                                    timestamp: Utc::now(),
+                                    event_type: EventType::PackagePublished {
+                                        duration_ms: start_instant.elapsed().as_millis() as u64,
+                                    },
+                                    package: pkg_label.clone(),
                                 },
-                                package: pkg_label.clone(),
-                            },
-                            attempt_detail,
-                        ) {
-                            return PackagePublishResult { result: Err(e) };
+                                attempt_detail,
+                            ) {
+                                return PackagePublishResult { result: Err(e) };
+                            }
+                            last_err = None;
+                            break;
                         }
-                        last_err = None;
-                        break;
+                        Ok(false) => {}
+                        Err(error) => {
+                            return PackagePublishResult {
+                                result: Err(anyhow::anyhow!(
+                                    "{}@{}: failed to verify registry visibility after cargo failure: {error}",
+                                    p.name,
+                                    p.version
+                                )),
+                            };
+                        }
                     }
                 }
 
@@ -1330,19 +1386,6 @@ pub(crate) fn publish_package_with_timeout(
         ));
 
         let readiness_started_at = Instant::now();
-        if let Err(e) = record_readiness_event(
-            event_log,
-            events_path,
-            PublishEvent {
-                timestamp: Utc::now(),
-                event_type: EventType::ReadinessStarted {
-                    method: readiness_config.method,
-                },
-                package: pkg_label.clone(),
-            },
-        ) {
-            return PackagePublishResult { result: Err(e) };
-        }
         let mut emit_readiness_event =
             |event| record_readiness_event(event_log, events_path, event);
         let verify_result = is_version_visible_with_backoff_and_events(
@@ -1390,17 +1433,6 @@ pub(crate) fn publish_package_with_timeout(
                     }
                     last_err = None;
 
-                    // Send webhook notification: package succeeded
-                    maybe_send_event(
-                        &opts.webhook,
-                        WebhookEvent::PublishSucceeded {
-                            plan_id: ws.plan.plan_id.clone(),
-                            package_name: p.name.clone(),
-                            package_version: p.version.clone(),
-                            duration_ms: start_instant.elapsed().as_millis() as u64,
-                        },
-                    );
-
                     break;
                 } else {
                     if let Err(e) = record_readiness_event(
@@ -1427,7 +1459,7 @@ pub(crate) fn publish_package_with_timeout(
                         opts.retry_jitter,
                     );
                     let next_attempt_at = retry_next_attempt_at(delay);
-                    emit_retry_backoff(
+                    if let Err(err) = emit_retry_backoff(
                         event_log,
                         events_path,
                         reporter,
@@ -1440,7 +1472,15 @@ pub(crate) fn publish_package_with_timeout(
                         next_attempt_at,
                         ErrorClass::Ambiguous,
                         message,
-                    );
+                    ) {
+                        return PackagePublishResult {
+                            result: Err(anyhow::anyhow!(
+                                "{}@{}: failed to schedule retry backoff: {err}",
+                                p.name,
+                                p.version
+                            )),
+                        };
+                    }
                 }
             }
             Err(error) => return PackagePublishResult { result: Err(error) },
@@ -1448,13 +1488,21 @@ pub(crate) fn publish_package_with_timeout(
     }
 
     // If package is still Uploaded (loop didn't run or readiness never checked), force a final check
-    if last_err.is_none() {
+    let is_still_uploaded = if last_err.is_none() {
         let Ok(state) = st.lock() else {
             return poisoned_lock("execution state");
         };
-        let current_state = state.packages.get(&key).map(|p| p.state.clone());
-        if matches!(current_state, Some(PackageState::Uploaded)) {
-            if reg.version_exists(&p.name, &p.version).unwrap_or(false) {
+        matches!(
+            state.packages.get(&key).map(|p| &p.state),
+            Some(PackageState::Uploaded)
+        )
+    } else {
+        false
+    };
+
+    if is_still_uploaded {
+        match reg.version_exists(&p.name, &p.version) {
+            Ok(true) => {
                 if let Err(e) = commit_transition(
                     st,
                     state_dir,
@@ -1472,22 +1520,21 @@ pub(crate) fn publish_package_with_timeout(
                 ) {
                     return PackagePublishResult { result: Err(e) };
                 }
-
-                // Send webhook notification: package succeeded
-                maybe_send_event(
-                    &opts.webhook,
-                    WebhookEvent::PublishSucceeded {
-                        plan_id: ws.plan.plan_id.clone(),
-                        package_name: p.name.clone(),
-                        package_version: p.version.clone(),
-                        duration_ms: start_instant.elapsed().as_millis() as u64,
-                    },
-                );
-            } else {
+            }
+            Ok(false) => {
                 last_err = Some((
                     ErrorClass::Ambiguous,
                     "package was uploaded but not confirmed visible on registry".into(),
                 ));
+            }
+            Err(error) => {
+                return PackagePublishResult {
+                    result: Err(anyhow::anyhow!(
+                        "{}@{}: failed to verify final visibility for uploaded package: {error}",
+                        p.name,
+                        p.version
+                    )),
+                };
             }
         }
     }
@@ -1497,99 +1544,101 @@ pub(crate) fn publish_package_with_timeout(
 
     if let Some((class, msg)) = last_err {
         // Final chance: maybe it eventually showed up.
-        if reg.version_exists(&p.name, &p.version).unwrap_or(false) {
-            if let Err(e) = commit_transition(
-                st,
-                state_dir,
-                event_log,
-                events_path,
-                &key,
-                PackageState::Published,
-                PublishEvent {
-                    timestamp: Utc::now(),
-                    event_type: EventType::PackagePublished {
-                        duration_ms: duration_ms as u64,
+        match reg.version_exists(&p.name, &p.version) {
+            Ok(true) => {
+                if let Err(e) = commit_transition(
+                    st,
+                    state_dir,
+                    event_log,
+                    events_path,
+                    &key,
+                    PackageState::Published,
+                    PublishEvent {
+                        timestamp: Utc::now(),
+                        event_type: EventType::PackagePublished {
+                            duration_ms: duration_ms as u64,
+                        },
+                        package: pkg_label.clone(),
                     },
-                    package: pkg_label.clone(),
-                },
-            ) {
-                return PackagePublishResult { result: Err(e) };
+                ) {
+                    return PackagePublishResult { result: Err(e) };
+                }
             }
-
-            // Send webhook notification: package succeeded
-            maybe_send_event(
-                &opts.webhook,
-                WebhookEvent::PublishSucceeded {
-                    plan_id: ws.plan.plan_id.clone(),
-                    package_name: p.name.clone(),
-                    package_version: p.version.clone(),
-                    duration_ms: duration_ms as u64,
-                },
-            );
-
-            return PackagePublishResult {
-                result: Ok(PackageReceipt {
-                    name: p.name.clone(),
-                    version: p.version.clone(),
-                    attempts: {
-                        let Ok(st) = st.lock() else {
-                            return poisoned_lock("execution state");
-                        };
-                        st.packages.get(&key).map_or(0, |p| p.attempts)
-                    },
-                    state: PackageState::Published,
-                    started_at,
-                    finished_at,
-                    duration_ms,
-                    evidence: PackageEvidence {
-                        attempts: attempt_evidence,
-                        readiness_checks: readiness_evidence,
-                    },
-                    compromised_at: None,
-                    compromised_by: None,
-                    superseded_by: None,
-                }),
-            };
-        } else {
-            let error_class_str = format!("{:?}", class);
-            let failed = PackageState::Failed {
-                class: class.clone(),
-                message: msg.clone(),
-            };
-            // Event: PackageFailed (final)
-            {
-                let Ok(mut log) = event_log.lock() else {
-                    return poisoned_lock("event log");
+            Ok(false) => {
+                let error_class_str = format!("{:?}", class);
+                let failed = PackageState::Failed {
+                    class: class.clone(),
+                    message: msg.clone(),
                 };
-                log.record(PublishEvent {
-                    timestamp: Utc::now(),
-                    event_type: EventType::PackageFailed {
-                        class: ErrorClass::Ambiguous,
+                // Event: PackageFailed (final)
+                {
+                    let Ok(mut log) = event_log.lock() else {
+                        return poisoned_lock("event log");
+                    };
+                    log.record(PublishEvent {
+                        timestamp: Utc::now(),
+                        event_type: EventType::PackageFailed {
+                            class: class.clone(),
+                            message: msg.clone(),
+                        },
+                        package: pkg_label.clone(),
+                    });
+                }
+                if let Err(e) =
+                    commit_pending_transition(st, state_dir, event_log, events_path, &key, failed)
+                {
+                    return PackagePublishResult { result: Err(e) };
+                }
+
+                // Send webhook notification: package failed
+                maybe_send_event(
+                    &opts.webhook,
+                    WebhookEvent::PublishFailed {
+                        plan_id: ws.plan.plan_id.clone(),
+                        package_name: p.name.clone(),
+                        package_version: p.version.clone(),
+                        error_class: error_class_str,
                         message: msg.clone(),
                     },
-                    package: pkg_label.clone(),
-                });
-            }
-            if let Err(e) =
-                commit_pending_transition(st, state_dir, event_log, events_path, &key, failed)
-            {
-                return PackagePublishResult { result: Err(e) };
-            }
+                );
 
-            // Send webhook notification: package failed
-            maybe_send_event(
-                &opts.webhook,
-                WebhookEvent::PublishFailed {
-                    plan_id: ws.plan.plan_id.clone(),
-                    package_name: p.name.clone(),
-                    package_version: p.version.clone(),
-                    error_class: error_class_str,
-                    message: msg.clone(),
-                },
-            );
+                return PackagePublishResult {
+                    result: Err(anyhow::anyhow!("{}@{}: failed: {}", p.name, p.version, msg)),
+                };
+            }
+            Err(error) => {
+                return PackagePublishResult {
+                    result: Err(anyhow::anyhow!(
+                        "{}@{}: failed to verify final visibility after last error: {error}",
+                        p.name,
+                        p.version
+                    )),
+                };
+            }
+        }
+    }
 
+    let (attempts, final_state) = {
+        let Ok(state) = st.lock() else {
+            return poisoned_lock("execution state");
+        };
+        let Some(progress) = state.packages.get(&key) else {
             return PackagePublishResult {
-                result: Err(anyhow::anyhow!("{}@{}: failed: {}", p.name, p.version, msg)),
+                result: Err(anyhow::anyhow!("missing package progress after execution")),
+            };
+        };
+        (progress.attempts, progress.state.clone())
+    };
+    match final_state {
+        PackageState::Published | PackageState::Skipped { .. } => {}
+        _ => {
+            return PackagePublishResult {
+                result: Err(anyhow::anyhow!(
+                    "{}@{}: publish terminated without terminal state {:?}",
+                    p.name,
+                    p.version,
+                    final_state
+                )),
             };
         }
     }
@@ -1604,18 +1653,6 @@ pub(crate) fn publish_package_with_timeout(
             duration_ms: duration_ms as u64,
         },
     );
-
-    let (attempts, final_state) = {
-        let Ok(state) = st.lock() else {
-            return poisoned_lock("execution state");
-        };
-        let Some(progress) = state.packages.get(&key) else {
-            return PackagePublishResult {
-                result: Err(anyhow::anyhow!("missing package progress after execution")),
-            };
-        };
-        (progress.attempts, progress.state.clone())
-    };
 
     PackagePublishResult {
         result: Ok(PackageReceipt {

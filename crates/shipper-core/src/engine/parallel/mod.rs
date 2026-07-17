@@ -277,7 +277,8 @@ pub fn run_publish_parallel(
     reporter: &mut dyn crate::engine::Reporter,
 ) -> Result<Vec<PackageReceipt>> {
     let api_base = reg.registry().api_base.trim_end_matches('/');
-    let reg_inner = shipper_registry::HttpRegistryClient::new(api_base);
+    let reg_inner =
+        shipper_registry::HttpRegistryClient::new(api_base).with_cache_dir(state_dir.join("cache"));
     let mut adapter = HostReporterAdapter { inner: reporter };
     run_publish_parallel_inner(ws, opts, st, state_dir, &reg_inner, &mut adapter)
 }

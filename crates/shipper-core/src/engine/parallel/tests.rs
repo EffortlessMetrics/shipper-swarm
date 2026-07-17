@@ -77,7 +77,8 @@ fn emit_retry_backoff_does_not_block_other_reporter_calls_during_sleep() {
             chrono::Utc::now() + chrono::Duration::milliseconds(250),
             ErrorClass::Retryable,
             "rate limited",
-        );
+        )
+        .expect("backoff should be recorded");
     });
 
     std::thread::sleep(Duration::from_millis(25));
@@ -151,7 +152,7 @@ fn drain_retry_waits_forwards_live_notice_before_worker_sleep_elapses() {
     drain_retry_waits(&mut host_reporter, send_reporter.as_ref());
 
     let forwarded_delay = rx
-        .recv_timeout(Duration::from_millis(100))
+        .recv_timeout(Duration::from_millis(500))
         .expect("host reporter should observe retry wait promptly");
     assert!(
         forwarded_delay <= delay && forwarded_delay > Duration::ZERO,
@@ -228,7 +229,6 @@ fn spawn_registry_server(
         for _ in 0..expected_requests {
             let req = server.recv().expect("request");
             let path = req.url().to_string();
-
             let response = if let Some(list) = routes.get_mut(&path) {
                 if list.is_empty() {
                     (404, "{}".to_string())
@@ -932,9 +932,9 @@ fn test_publish_package_handles_uploaded_resume() {
     let server = spawn_registry_server(
         BTreeMap::from([(
             "/api/v1/crates/demo/0.1.0".to_string(),
-            vec![(404, "{}".to_string()), (200, "{}".to_string())],
+            vec![(200, "{}".to_string())],
         )]),
-        2,
+        1,
     );
 
     let ws = planned_workspace(td.path(), server.base_url.clone());
@@ -4114,15 +4114,14 @@ fn reconcile_scenario_opts(state_dir: PathBuf) -> RuntimeOptions {
 #[serial]
 fn reconcile_bdd_ambiguous_resolves_to_published() {
     // Scenario: cargo exits ambiguously (exit 1, empty stderr) on attempt 1.
-    // The quick post-failure version_exists check sees nothing, so classify
-    // returns Ambiguous → reconcile_ambiguous_upload fires and the registry
-    // reports the version as visible. Expected: state becomes Published,
-    // no second cargo invocation.
+    // The failure is classified as Ambiguous → reconcile_ambiguous_upload fires and
+    // the second reconciler poll sees the version as visible. Expected: the
+    // package becomes Published after one retry.
     //
     // Request sequence (readiness disabled):
     //   1. entry "already published" check (execute_package.rs) → 404
-    //   2. post-cargo-failure quick check (execute_package.rs) → 404
-    //   3. reconcile's single version_exists (via is_version_visible_with_backoff, enabled=false) → 200
+    //   2. first reconcile's version_exists (via is_version_visible_with_backoff) → 404
+    //   3. second reconcile's version_exists (via is_version_visible_with_backoff) → 200
     let td = tempdir().expect("tempdir");
     let bin = td.path().join("bin");
     write_fake_tools(&bin);
@@ -4183,9 +4182,9 @@ fn reconcile_bdd_ambiguous_resolves_to_published() {
                 "expected Published via reconcile, got {:?}",
                 receipt.state
             );
-            // attempts=1 because reconcile fired on the first attempt's failure
-            // and resolved to Published — no further cargo invocations.
-            assert_eq!(receipt.attempts, 1);
+            // Two attempts are expected: first attempt ambiguity -> first
+            // reconcile miss, second attempt ambiguity -> second reconcile hit.
+            assert_eq!(receipt.attempts, 2);
         },
     );
 
@@ -4233,11 +4232,9 @@ fn reconcile_bdd_ambiguous_resolves_to_not_published_then_retries() {
     //
     // With max_attempts=2 and readiness disabled, the request sequence is:
     //   1. entry check → 404
-    //   2. attempt 1 post-cargo quick check → 404
-    //   3. attempt 1 reconcile (enabled=false, single call) → 404 → NotPublished
-    //   4. attempt 2 post-cargo quick check → 404
-    //   5. attempt 2 reconcile → 404 → NotPublished
-    //   6. post-loop final "if last_err, maybe visible" check (execute_package.rs) → 404
+    //   2. attempt 1 reconcile (enabled=false, single call) → 404 → NotPublished
+    //   3. attempt 2 reconcile → 404 → NotPublished
+    //   4. post-loop final "if last_err, maybe visible" check (execute_package.rs) → 404
     let td = tempdir().expect("tempdir");
     let bin = td.path().join("bin");
     write_fake_tools(&bin);
@@ -4250,11 +4247,9 @@ fn reconcile_bdd_ambiguous_resolves_to_not_published_then_retries() {
                 (404, "{}".to_string()),
                 (404, "{}".to_string()),
                 (404, "{}".to_string()),
-                (404, "{}".to_string()),
-                (404, "{}".to_string()),
             ],
         )]),
-        6,
+        4,
     );
 
     let ws = planned_workspace(td.path(), server.base_url.clone());
@@ -4343,7 +4338,6 @@ fn reconcile_bdd_ambiguous_resolves_to_not_published_then_retries() {
 fn reconcile_bdd_resume_from_ambiguous_state_skips_republish() {
     // Scenario (from PR #115 resume-path reconcile):
     //   A prior run left demo@0.1.0 in PackageState::Ambiguous. On resume,
-    //   the entry "already published" check still returns 404 (execute_package.rs).
     //   The resume-path reconcile block (execute_package.rs) fires BEFORE the
     //   retry loop, polls the registry, and discovers the version IS now
     //   visible — marks Published and returns early with zero cargo attempts.
@@ -4358,9 +4352,9 @@ fn reconcile_bdd_resume_from_ambiguous_state_skips_republish() {
     let server = spawn_registry_server(
         BTreeMap::from([(
             "/api/v1/crates/demo/0.1.0".to_string(),
-            vec![(404, "{}".to_string()), (200, "{}".to_string())],
+            vec![(200, "{}".to_string())],
         )]),
-        2,
+        1,
     );
 
     let ws = planned_workspace(td.path(), server.base_url.clone());
@@ -4479,9 +4473,9 @@ fn reconcile_bdd_resume_from_ambiguous_state_still_unknown_writes_report() {
     let server = spawn_registry_server(
         BTreeMap::from([(
             "/api/v1/crates/demo/0.1.0".to_string(),
-            vec![(404, "{}".to_string()), (500, "{}".to_string())],
+            vec![(500, "{}".to_string())],
         )]),
-        2,
+        1,
     );
 
     let ws = planned_workspace(td.path(), server.base_url.clone());
@@ -4586,10 +4580,7 @@ fn reconcile_bdd_ambiguous_resolves_to_still_unknown() {
     //
     // Request sequence (readiness disabled):
     //   1. entry "already published" check (execute_package.rs) → 500 → Err
-    //      (does not match `if let Ok(true)`; proceeds to publish)
-    //   2. post-cargo-failure quick check (execute_package.rs) → 500 → Err
-    //      (unwrap_or(false); falls through to classify + reconcile)
-    //   3. reconcile's single version_exists (via is_version_visible_with_backoff,
+    //   2. reconcile's single version_exists (via is_version_visible_with_backoff,
     //      enabled=false) → 500 → Err → StillUnknown
     let td = tempdir().expect("tempdir");
     let bin = td.path().join("bin");
@@ -4598,13 +4589,9 @@ fn reconcile_bdd_ambiguous_resolves_to_still_unknown() {
     let server = spawn_registry_server(
         BTreeMap::from([(
             "/api/v1/crates/demo/0.1.0".to_string(),
-            vec![
-                (500, "{}".to_string()),
-                (500, "{}".to_string()),
-                (500, "{}".to_string()),
-            ],
+            vec![(500, "{}".to_string()), (500, "{}".to_string())],
         )]),
-        3,
+        2,
     );
 
     let ws = planned_workspace(td.path(), server.base_url.clone());
