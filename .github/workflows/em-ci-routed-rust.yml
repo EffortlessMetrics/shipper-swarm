@@ -284,7 +284,7 @@ jobs:
       - name: Prepare CPX42 scratch
         run: |
           set -euo pipefail
-          ci-disk-guard /mnt/ci-scratch 45
+          ci-disk-guard /mnt/ci-scratch 10
           ci-disk-guard /mnt/ci-cache 10
           mkdir -p "$TMPDIR" "$CARGO_TARGET_DIR"
 
