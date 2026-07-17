@@ -654,72 +654,6 @@ pub(crate) fn publish_package_with_timeout(
         )
     };
 
-    if was_pending_initially {
-        match reg.version_exists(&p.name, &p.version) {
-            Ok(true) => {
-                reporter.info(&format!(
-                    "{}@{}: already published (skipping)",
-                    p.name, p.version
-                ));
-
-                let skipped = PackageState::Skipped {
-                    reason: "already published".to_string(),
-                };
-                if let Err(err) = commit_transition(
-                    st,
-                    state_dir,
-                    event_log,
-                    events_path,
-                    &key,
-                    skipped.clone(),
-                    PublishEvent {
-                        timestamp: Utc::now(),
-                        event_type: EventType::PackageSkipped {
-                            reason: "already published".to_string(),
-                        },
-                        package: pkg_label.clone(),
-                    },
-                ) {
-                    return PackagePublishResult {
-                        result: Err(anyhow::anyhow!(
-                            "{}@{}: failed to mark pending package as already published: {err}",
-                            p.name,
-                            p.version
-                        )),
-                    };
-                }
-
-                return PackagePublishResult {
-                    result: Ok(PackageReceipt {
-                        name: p.name.clone(),
-                        version: p.version.clone(),
-                        attempts: attempt,
-                        state: PackageState::Skipped {
-                            reason: "already published".to_string(),
-                        },
-                        started_at,
-                        finished_at: Utc::now(),
-                        duration_ms: start_instant.elapsed().as_millis(),
-                        evidence: PackageEvidence {
-                            attempts: vec![],
-                            readiness_checks: vec![],
-                        },
-                        compromised_at: None,
-                        compromised_by: None,
-                        superseded_by: None,
-                    }),
-                };
-            }
-            Ok(false) => {}
-            Err(error) => {
-                reporter.warn(&format!(
-                    "{}@{}: existing-version check failed before publish; continuing publish: {error}",
-                    p.name, p.version
-                ));
-            }
-        }
-    }
-
     reporter.info(&format!("{}@{}: publishing...", p.name, p.version));
     let mut last_err: Option<(ErrorClass, String)> = None;
     let mut attempt_evidence: Vec<AttemptEvidence> = Vec::new();
@@ -798,6 +732,15 @@ pub(crate) fn publish_package_with_timeout(
                     p.version,
                     reconciliation_report_path.display()
                 ));
+                maybe_send_event(
+                    &opts.webhook,
+                    WebhookEvent::PublishSucceeded {
+                        plan_id: ws.plan.plan_id.clone(),
+                        package_name: p.name.clone(),
+                        package_version: p.version.clone(),
+                        duration_ms: start_instant.elapsed().as_millis() as u64,
+                    },
+                );
                 return PackagePublishResult {
                     result: Ok(PackageReceipt {
                         name: p.name.clone(),
@@ -876,6 +819,143 @@ pub(crate) fn publish_package_with_timeout(
                         reason
                     )),
                 };
+            }
+        }
+    }
+
+    if was_uploaded {
+        reporter.info(&format!(
+            "{}@{}: resuming from uploaded (checking registry visibility)",
+            p.name, p.version
+        ));
+        match reg.version_exists(&p.name, &p.version) {
+            Ok(true) => {
+                if let Err(e) = commit_transition(
+                    st,
+                    state_dir,
+                    event_log,
+                    events_path,
+                    &key,
+                    PackageState::Published,
+                    PublishEvent {
+                        timestamp: Utc::now(),
+                        event_type: EventType::PackagePublished {
+                            duration_ms: start_instant.elapsed().as_millis() as u64,
+                        },
+                        package: pkg_label.clone(),
+                    },
+                ) {
+                    return PackagePublishResult {
+                        result: Err(anyhow::anyhow!(
+                            "{}@{}: failed to promote uploaded package to published: {e}",
+                            p.name,
+                            p.version
+                        )),
+                    };
+                }
+                maybe_send_event(
+                    &opts.webhook,
+                    WebhookEvent::PublishSucceeded {
+                        plan_id: ws.plan.plan_id.clone(),
+                        package_name: p.name.clone(),
+                        package_version: p.version.clone(),
+                        duration_ms: start_instant.elapsed().as_millis() as u64,
+                    },
+                );
+                return PackagePublishResult {
+                    result: Ok(PackageReceipt {
+                        name: p.name.clone(),
+                        version: p.version.clone(),
+                        attempts: attempt,
+                        state: PackageState::Published,
+                        started_at,
+                        finished_at: Utc::now(),
+                        duration_ms: start_instant.elapsed().as_millis(),
+                        evidence: PackageEvidence {
+                            attempts: vec![],
+                            readiness_checks: vec![],
+                        },
+                        compromised_at: None,
+                        compromised_by: None,
+                        superseded_by: None,
+                    }),
+                };
+            }
+            Ok(false) => {}
+            Err(error) => {
+                return PackagePublishResult {
+                    result: Err(anyhow::anyhow!(
+                        "{}@{}: failed to verify uploaded package visibility before publish: {error}",
+                        p.name,
+                        p.version
+                    )),
+                };
+            }
+        }
+    }
+
+    if was_pending_initially {
+        match reg.version_exists(&p.name, &p.version) {
+            Ok(true) => {
+                reporter.info(&format!(
+                    "{}@{}: already published (skipping)",
+                    p.name, p.version
+                ));
+
+                let skipped = PackageState::Skipped {
+                    reason: "already published".to_string(),
+                };
+                if let Err(err) = commit_transition(
+                    st,
+                    state_dir,
+                    event_log,
+                    events_path,
+                    &key,
+                    skipped.clone(),
+                    PublishEvent {
+                        timestamp: Utc::now(),
+                        event_type: EventType::PackageSkipped {
+                            reason: "already published".to_string(),
+                        },
+                        package: pkg_label.clone(),
+                    },
+                ) {
+                    return PackagePublishResult {
+                        result: Err(anyhow::anyhow!(
+                            "{}@{}: failed to mark pending package as already published: {err}",
+                            p.name,
+                            p.version
+                        )),
+                    };
+                }
+
+                return PackagePublishResult {
+                    result: Ok(PackageReceipt {
+                        name: p.name.clone(),
+                        version: p.version.clone(),
+                        attempts: attempt,
+                        state: PackageState::Skipped {
+                            reason: "already published".to_string(),
+                        },
+                        started_at,
+                        finished_at: Utc::now(),
+                        duration_ms: start_instant.elapsed().as_millis(),
+                        evidence: PackageEvidence {
+                            attempts: vec![],
+                            readiness_checks: vec![],
+                        },
+                        compromised_at: None,
+                        compromised_by: None,
+                        superseded_by: None,
+                    }),
+                };
+            }
+            Ok(false) => {}
+            Err(error) => {
+                reporter.warn(&format!(
+                    "{}@{}: existing-version check failed before publish; continuing publish: {error}",
+                    p.name, p.version
+                ));
             }
         }
     }
@@ -1451,35 +1531,37 @@ pub(crate) fn publish_package_with_timeout(
                     let message =
                         "published locally, but version not observed on registry within timeout";
                     last_err = Some((ErrorClass::Ambiguous, message.to_string()));
-                    let delay = backoff_delay(
-                        opts.base_delay,
-                        opts.max_delay,
-                        attempt,
-                        opts.retry_strategy,
-                        opts.retry_jitter,
-                    );
-                    let next_attempt_at = retry_next_attempt_at(delay);
-                    if let Err(err) = emit_retry_backoff(
-                        event_log,
-                        events_path,
-                        reporter,
-                        &pkg_label,
-                        &p.name,
-                        &p.version,
-                        attempt,
-                        opts.max_attempts,
-                        delay,
-                        next_attempt_at,
-                        ErrorClass::Ambiguous,
-                        message,
-                    ) {
-                        return PackagePublishResult {
-                            result: Err(anyhow::anyhow!(
-                                "{}@{}: failed to schedule retry backoff: {err}",
-                                p.name,
-                                p.version
-                            )),
-                        };
+                    if attempt < opts.max_attempts {
+                        let delay = backoff_delay(
+                            opts.base_delay,
+                            opts.max_delay,
+                            attempt,
+                            opts.retry_strategy,
+                            opts.retry_jitter,
+                        );
+                        let next_attempt_at = retry_next_attempt_at(delay);
+                        if let Err(err) = emit_retry_backoff(
+                            event_log,
+                            events_path,
+                            reporter,
+                            &pkg_label,
+                            &p.name,
+                            &p.version,
+                            attempt,
+                            opts.max_attempts,
+                            delay,
+                            next_attempt_at,
+                            ErrorClass::Ambiguous,
+                            message,
+                        ) {
+                            return PackagePublishResult {
+                                result: Err(anyhow::anyhow!(
+                                    "{}@{}: failed to schedule retry backoff: {err}",
+                                    p.name,
+                                    p.version
+                                )),
+                            };
+                        }
                     }
                 }
             }

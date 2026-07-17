@@ -515,7 +515,15 @@ jobs:
                       else:
                           failures.append(f"selected {name} job result was {value}")
               elif value != "skipped":
-                  failures.append(f"unselected {name} job result was {value}")
+                  if (
+                      name == "github"
+                      and target in {"cx43", "cpx42", "cx53"}
+                      and value == "success"
+                      and results[target] == "cancelled"
+                  ):
+                      print(f"github fallback succeeded for cancelled {target} lane")
+                  else:
+                      failures.append(f"unselected {name} job result was {value}")
 
           if failures:
               for failure in failures:
