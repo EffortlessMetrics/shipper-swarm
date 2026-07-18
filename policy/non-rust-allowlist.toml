@@ -382,6 +382,17 @@ created = "2026-05-13"
 review_after = "2026-08-13"
 
 [[file]]
+path = "scripts/ci/normalize-routed-rust-result.py"
+kind = "ci_policy_script"
+surface = "ci"
+classification = "script"
+owner = "release/ci"
+reason = "Normalize routed Rust workflow results into one deterministic blocking signal."
+covered_by = [".github/workflows/em-ci-routed-rust.yml", ".github/workflows/runner-routing-guard.yml"]
+created = "2026-07-18"
+review_after = "2026-10-18"
+
+[[file]]
 path = ".github/CODEOWNERS"
 kind = "github_codeowners"
 surface = "tooling"
