@@ -475,7 +475,7 @@ fn test_publish_package_publishes_successfully() {
                 persisted
                     .all_events()
                     .iter()
-                    .any(|event| matches!(event.event_type, EventType::ReadinessStarted { .. }))
+                    .any(|event| matches!(event.event_type, EventType::PackageUploaded { .. }))
             );
         },
     );

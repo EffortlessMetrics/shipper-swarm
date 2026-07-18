@@ -4048,7 +4048,7 @@ mod tests {
                 events
                     .all_events()
                     .iter()
-                    .any(|event| matches!(event.event_type, EventType::ReadinessStarted { .. }))
+                    .any(|event| matches!(event.event_type, EventType::PackageUploaded { .. }))
             );
             assert!(
                 events
