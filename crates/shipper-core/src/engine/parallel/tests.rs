@@ -451,6 +451,18 @@ fn init_state_for_workspace(plan: &PlannedWorkspace) -> ExecutionState {
     }
 }
 
+fn init_state_with_uploaded_checkpoint(
+    plan: &PlannedWorkspace,
+    uploaded_key: &str,
+) -> ExecutionState {
+    let mut state = init_state_for_workspace(plan);
+    if let Some(progress) = state.packages.get_mut(uploaded_key) {
+        progress.state = PackageState::Uploaded;
+        progress.attempts = 1;
+    }
+    state
+}
+
 #[test]
 #[serial]
 fn test_publish_package_skips_already_published() {
@@ -1292,6 +1304,145 @@ fn test_run_publish_mode_retry_parity_for_multi_level_plan() {
                 !seq_attempt_history.is_empty(),
                 "expected retry attempt history entries",
             );
+            assert_eq!(
+                seq_attempt_history.len(),
+                par_attempt_history.len(),
+                "attempt history length"
+            );
+
+            for (seq, par) in seq_attempt_history.iter().zip(par_attempt_history.iter()) {
+                assert_eq!(seq.package, par.package);
+                assert_eq!(seq.version, par.version);
+                assert_eq!(seq.attempt, par.attempt);
+                assert_eq!(seq.max_attempts, par.max_attempts);
+                assert_eq!(seq.error_class, par.error_class);
+                assert_eq!(seq.next_attempt_at.is_some(), par.next_attempt_at.is_some());
+            }
+        },
+    );
+
+    server_sequential.join();
+    server_parallel.join();
+}
+
+#[test]
+#[serial]
+fn test_run_publish_mode_parity_from_uploaded_checkpoint() {
+    let td = tempdir().expect("tempdir");
+    let bin = td.path().join("bin");
+    write_fake_tools(&bin);
+
+    let server_sequential = spawn_registry_server(
+        BTreeMap::from([
+            (
+                "/api/v1/crates/base/1.0.0".to_string(),
+                vec![(200, "{}".to_string())],
+            ),
+            (
+                "/api/v1/crates/dependent/2.0.0".to_string(),
+                vec![(404, "{}".to_string()), (200, "{}".to_string())],
+            ),
+        ]),
+        3,
+    );
+    let ws_seq = planned_workspace_with_dependency(td.path(), server_sequential.base_url.clone());
+    let reg_seq = test_registry_client(&ws_seq);
+    let state_dir_seq = td.path().join(".shipper-seq");
+    fs::create_dir_all(&state_dir_seq).expect("mkdir");
+    let mut opts_seq = default_opts(state_dir_seq.clone());
+    opts_seq.parallel.enabled = false;
+    opts_seq.readiness.enabled = false;
+    opts_seq.max_attempts = 2;
+
+    let server_parallel = spawn_registry_server(
+        BTreeMap::from([
+            (
+                "/api/v1/crates/base/1.0.0".to_string(),
+                vec![(200, "{}".to_string())],
+            ),
+            (
+                "/api/v1/crates/dependent/2.0.0".to_string(),
+                vec![(404, "{}".to_string()), (200, "{}".to_string())],
+            ),
+        ]),
+        3,
+    );
+    let ws_par = planned_workspace_with_dependency(td.path(), server_parallel.base_url.clone());
+    let reg_par = test_registry_client(&ws_par);
+    let state_dir_par = td.path().join(".shipper-par");
+    fs::create_dir_all(&state_dir_par).expect("mkdir");
+    let mut opts_par = default_opts(state_dir_par.clone());
+    opts_par.readiness.enabled = false;
+    opts_par.max_attempts = 2;
+
+    let mut state_seq = init_state_with_uploaded_checkpoint(&ws_seq, &pkg_key("base", "1.0.0"));
+    let mut state_par = init_state_with_uploaded_checkpoint(&ws_par, &pkg_key("base", "1.0.0"));
+    let seq_events_path = events::events_path(&state_dir_seq);
+    let mut seq_event_log = events::EventLog::new();
+    let mut seq_reporter = CollectingReporter::default();
+
+    let mut par_reporter = CollectingReporter::default();
+
+    temp_env::with_vars(
+        [
+            (
+                "SHIPPER_CARGO_BIN",
+                Some(fake_cargo_path(&bin).to_str().expect("utf8")),
+            ),
+            ("SHIPPER_CARGO_EXIT", Some("0")),
+        ],
+        || {
+            let seq_receipts = crate::engine::execute_package::run_sequential_scheduler(
+                &ws_seq,
+                &opts_seq,
+                &mut state_seq,
+                &state_dir_seq,
+                &reg_seq,
+                &mut seq_event_log,
+                &seq_events_path,
+                &mut seq_reporter,
+            )
+            .expect("sequential publish");
+
+            let mut par_receipts = run_publish_parallel(
+                &ws_par,
+                &opts_par,
+                &mut state_par,
+                &state_dir_par,
+                &reg_par,
+                &mut par_reporter,
+            )
+            .expect("parallel publish");
+
+            let mut seq_receipts = seq_receipts;
+            seq_receipts.sort_by(|a, b| a.name.cmp(&b.name));
+            par_receipts.sort_by(|a, b| a.name.cmp(&b.name));
+
+            assert_eq!(
+                seq_receipts.len(),
+                par_receipts.len(),
+                "receipt counts match"
+            );
+
+            for (seq, par) in seq_receipts.iter().zip(par_receipts.iter()) {
+                assert_eq!(seq.name, par.name);
+                assert_eq!(seq.version, par.version);
+                assert_eq!(seq.state, par.state);
+                assert_eq!(seq.attempts, par.attempts);
+            }
+
+            for key in ["base@1.0.0", "dependent@2.0.0"] {
+                let seq_pkg = state_seq.packages.get(key).expect("sequential state");
+                let par_pkg = state_par.packages.get(key).expect("parallel state");
+                assert_eq!(seq_pkg.state, par_pkg.state);
+                assert_eq!(seq_pkg.attempts, par_pkg.attempts);
+            }
+
+            let mut seq_attempt_history = state_seq.attempt_history.clone();
+            let mut par_attempt_history = state_par.attempt_history.clone();
+            sort_attempt_history_by_fields(&mut seq_attempt_history);
+            sort_attempt_history_by_fields(&mut par_attempt_history);
+
             assert_eq!(
                 seq_attempt_history.len(),
                 par_attempt_history.len(),
