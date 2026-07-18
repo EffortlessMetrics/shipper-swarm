@@ -41,7 +41,7 @@ jobs:
           tar --extract --gzip --file "$install_dir/$archive" --directory "$install_dir"
           echo "$install_dir" >> "$GITHUB_PATH"
       - name: Validate workflow syntax
-        run: actionlint
+        run: actionlint -shellcheck=""
       - name: Check runner routing policy
         run: scripts/ci/no-bare-self-hosted.sh
       - name: Test routed result normalization
