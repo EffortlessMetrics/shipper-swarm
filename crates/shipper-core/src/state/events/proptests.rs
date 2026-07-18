@@ -90,6 +90,7 @@ fn arb_event_type() -> impl Strategy<Value = EventType> {
         arb_execution_result().prop_map(|result| EventType::ExecutionFinished { result }),
         arb_auth_evidence().prop_map(|evidence| EventType::AuthEvidenceRecorded { evidence }),
         (".*", ".*").prop_map(|(name, version)| EventType::PackageStarted { name, version }),
+        Just(EventType::PackageUploaded),
         (1..100u32, ".*")
             .prop_map(|(attempt, command)| EventType::PackageAttempted { attempt, command }),
         (".*", ".*").prop_map(|(stdout_tail, stderr_tail)| EventType::PackageOutput {

@@ -12,41 +12,38 @@ use crate::registry::RegistryClient;
 #[cfg(test)]
 use crate::runtime::environment;
 #[cfg(test)]
+use crate::runtime::execution::backoff_delay;
+#[cfg(test)]
 use crate::runtime::execution::short_state;
 #[cfg(test)]
 use crate::runtime::execution::update_state;
-use crate::runtime::execution::{
-    backoff_delay, classify_cargo_failure, pkg_key, registry_aware_backoff, resolve_state_dir,
-    retry_after_delay, retry_next_attempt_at,
-};
+use crate::runtime::execution::{classify_cargo_failure, pkg_key, resolve_state_dir};
 use crate::state::events;
 use crate::state::execution_state as state;
 #[cfg(test)]
 use crate::types::ExecutionResult;
 use crate::types::{
-    AttemptDetail, AttemptEvidence, ErrorClass, EventType, ExecutionState, PackageProgress,
-    PackageReceipt, PackageState, PreflightReport, PublishEvent, PublishRegime, ReadinessEvidence,
-    Receipt, ReconciliationOutcome, Registry, RuntimeOptions,
+    ErrorClass, EventType, ExecutionState, PackageProgress, PackageState, PreflightReport,
+    PublishEvent, Receipt, Registry, RuntimeOptions,
 };
 #[cfg(test)]
 use crate::types::{Finishability, PreflightPackage};
-use crate::webhook::{self, WebhookEvent};
 
+pub(crate) mod execute_package;
 mod preflight;
 mod publish;
+#[cfg(test)]
 mod readiness;
 mod rehearsal;
-mod retry;
 pub(crate) mod transition;
 
+#[cfg(test)]
+use crate::types::{
+    AttemptEvidence, PackageReceipt, PublishRegime, ReadinessEvidence, ReconciliationOutcome,
+};
 pub use preflight::PreflightRunOptions;
 #[cfg(test)]
 use readiness::verify_published;
-use readiness::verify_published_after_started;
-use retry::{
-    emit_retry_backoff_event, record_rate_limit_observed_event, record_retry_backoff_event,
-    wait_after_retry,
-};
 
 pub trait Reporter {
     fn info(&mut self, msg: &str);
@@ -88,22 +85,6 @@ pub trait Reporter {
 
 pub(crate) fn policy_effects(opts: &RuntimeOptions) -> crate::runtime::policy::PolicyEffects {
     crate::runtime::policy::policy_effects(opts)
-}
-
-fn write_reconciliation_report_best_effort(
-    state_dir: &Path,
-    ws: &PlannedWorkspace,
-    events_path: &Path,
-    reporter: &mut dyn Reporter,
-) {
-    if let Err(err) = crate::state::reconciliation::write_report_from_events(
-        state_dir,
-        &ws.plan.plan_id,
-        &ws.plan.registry,
-        events_path,
-    ) {
-        reporter.warn(&format!("failed to write reconciliation report: {err}"));
-    }
 }
 
 fn init_registry_client(registry: Registry, state_dir: &Path) -> Result<RegistryClient> {
@@ -245,10 +226,7 @@ pub fn run_publish(
     opts: &RuntimeOptions,
     reporter: &mut dyn Reporter,
 ) -> Result<Receipt> {
-    let workspace_root = &ws.workspace_root;
     publish::bootstrap::validate_resume_target(ws, opts)?;
-    let effects = policy_effects(opts);
-
     let publish::bootstrap::PublishBootstrap {
         state_dir,
         _lock,
@@ -261,11 +239,6 @@ pub fn run_publish(
         state: mut st,
         run_started,
     } = publish::bootstrap::prepare_publish_run(ws, opts, reporter)?;
-
-    let mut receipts: Vec<PackageReceipt> = Vec::new();
-
-    // Track if we've reached the resume point if one was specified
-    let mut reached_resume_point = opts.resume_from.is_none();
 
     // Check for parallel mode
     if opts.parallel.enabled {
@@ -289,781 +262,16 @@ pub fn run_publish(
         );
     }
 
-    for p in &ws.plan.packages {
-        let key = pkg_key(&p.name, &p.version);
-        let pkg_label = format!("{}@{}", p.name, p.version);
-        let progress = st
-            .packages
-            .get(&key)
-            .context("missing package progress in state")?
-            .clone();
-
-        if matches!(
-            publish::resume::apply_resume_from_gate(
-                p,
-                &progress,
-                opts,
-                &mut reached_resume_point,
-                reporter,
-            ),
-            publish::resume::ResumeGate::Skip
-        ) {
-            if matches!(
-                progress.state,
-                PackageState::Published | PackageState::Skipped { .. }
-            ) {
-                publish::resume::record_terminal_resume_skip_event(
-                    &progress,
-                    &pkg_label,
-                    &events_path,
-                    &mut event_log,
-                )?;
-            }
-            continue;
-        }
-
-        // Track whether cargo publish already succeeded (e.g. from Uploaded state on resume)
-        let mut cargo_succeeded = false;
-
-        match progress.state.clone() {
-            PackageState::Published | PackageState::Skipped { .. } => {
-                publish::resume::record_terminal_resume_skip(
-                    p,
-                    &progress,
-                    &pkg_label,
-                    &events_path,
-                    &mut event_log,
-                    reporter,
-                )?;
-                continue;
-            }
-            PackageState::Uploaded => {
-                reporter.info(&format!(
-                    "{}@{}: resuming from uploaded (skipping cargo publish)",
-                    p.name, p.version
-                ));
-                cargo_succeeded = true;
-            }
-            PackageState::Ambiguous {
-                message: prior_reason,
-            } => {
-                publish::ambiguous::resolve_ambiguous_resume_state(
-                    ws,
-                    opts,
-                    &reg,
-                    &state_dir,
-                    &events_path,
-                    &mut event_log,
-                    &mut st,
-                    &p.name,
-                    &p.version,
-                    &prior_reason,
-                    reporter,
-                )?;
-                if matches!(
-                    st.packages
-                        .get(&key)
-                        .context(
-                            "missing package progress in state after ambiguous reconciliation"
-                        )?
-                        .state,
-                    PackageState::Published
-                ) {
-                    continue;
-                }
-            }
-            _ => {}
-        }
-
-        // Event: PackageStarted
-        event_log.record(PublishEvent {
-            timestamp: Utc::now(),
-            event_type: EventType::PackageStarted {
-                name: p.name.clone(),
-                version: p.version.clone(),
-            },
-            package: pkg_label.clone(),
-        });
-
-        let started_at = Utc::now();
-        let start_instant = Instant::now();
-
-        // First, check if the version is already present.
-        if reg.version_exists(&p.name, &p.version)? {
-            reporter.info(&format!(
-                "{}@{}: already published (skipping)",
-                p.name, p.version
-            ));
-            let skipped = PackageState::Skipped {
-                reason: "already published".into(),
-            };
-            transition::commit(
-                &mut st,
-                &state_dir,
-                &mut event_log,
-                &events_path,
-                &key,
-                skipped.clone(),
-                PublishEvent {
-                    timestamp: Utc::now(),
-                    event_type: EventType::PackageSkipped {
-                        reason: "already published".to_string(),
-                    },
-                    package: pkg_label.clone(),
-                },
-            )?;
-
-            let progress = st
-                .packages
-                .get(&key)
-                .context("missing package progress in state for skipped package")?;
-            receipts.push(PackageReceipt {
-                name: p.name.clone(),
-                version: p.version.clone(),
-                attempts: progress.attempts,
-                state: progress.state.clone(),
-                started_at,
-                finished_at: Utc::now(),
-                duration_ms: start_instant.elapsed().as_millis(),
-                evidence: crate::types::PackageEvidence {
-                    attempts: vec![],
-                    readiness_checks: vec![],
-                },
-                compromised_at: None,
-                compromised_by: None,
-                superseded_by: None,
-            });
-            continue;
-        }
-
-        reporter.info(&format!("{}@{}: publishing...", p.name, p.version));
-
-        // Registry-aware backoff (#94 / #106 PR 1): prefer the `PublishRegime`
-        // that preflight stamped onto the `PlannedPackage`. That answer is
-        // authoritative; when present, we never re-query the registry
-        // mid-retry.
-        //
-        // `None` here means the plan predates the regime field (old
-        // state.json, legacy test harness). In that case we fall back to the
-        // historical lazy-cached behavior for backward compatibility.
-        let mut is_new_crate_cached: Option<bool> = p.regime.map(PublishRegime::is_new_crate);
-
-        let mut attempt = st
-            .packages
-            .get(&key)
-            .context("missing package progress in state for publish")?
-            .attempts;
-        let mut last_err: Option<(ErrorClass, String)> = None;
-        let mut attempt_evidence: Vec<AttemptEvidence> = Vec::new();
-        let mut readiness_evidence: Vec<ReadinessEvidence> = Vec::new();
-
-        while attempt < opts.max_attempts {
-            attempt += 1;
-
-            let command = format!(
-                "cargo publish -p {} --registry {}",
-                p.name, ws.plan.registry.name
-            );
-
-            reporter.info(&format!(
-                "{}@{}: attempt {}/{}",
-                p.name, p.version, attempt, opts.max_attempts
-            ));
-
-            if !cargo_succeeded {
-                let attempt_started_at = Utc::now();
-                transition::commit_attempt(
-                    &mut st,
-                    &state_dir,
-                    &mut event_log,
-                    &events_path,
-                    &key,
-                    attempt,
-                    PublishEvent {
-                        timestamp: attempt_started_at,
-                        event_type: EventType::PackageAttempted {
-                            attempt,
-                            command: command.clone(),
-                        },
-                        package: pkg_label.clone(),
-                    },
-                )?;
-
-                let out = cargo::cargo_publish(
-                    workspace_root,
-                    &p.name,
-                    &ws.plan.registry.name,
-                    opts.allow_dirty,
-                    opts.no_verify,
-                    opts.output_lines,
-                    None, // sequential mode: no per-package timeout
-                )?;
-                let attempt_ended_at = Utc::now();
-
-                // Collect attempt evidence
-                attempt_evidence.push(AttemptEvidence {
-                    attempt_number: attempt,
-                    command: command.clone(),
-                    exit_code: out.exit_code,
-                    stdout_tail: out.stdout_tail.clone(),
-                    stderr_tail: out.stderr_tail.clone(),
-                    timestamp: attempt_ended_at,
-                    duration: out.duration,
-                });
-
-                // Event: PackageOutput
-                event_log.record(PublishEvent {
-                    timestamp: Utc::now(),
-                    event_type: EventType::PackageOutput {
-                        stdout_tail: out.stdout_tail.clone(),
-                        stderr_tail: out.stderr_tail.clone(),
-                    },
-                    package: pkg_label.clone(),
-                });
-                event_log.write_to_file(&events_path)?;
-                event_log.clear();
-
-                if out.exit_code == 0 {
-                    let attempt_detail = AttemptDetail {
-                        package: p.name.clone(),
-                        version: p.version.clone(),
-                        attempt,
-                        max_attempts: opts.max_attempts,
-                        started_at: attempt_started_at,
-                        ended_at: attempt_ended_at,
-                        error_class: None,
-                        next_attempt_at: None,
-                        redacted_message: None,
-                    };
-                    cargo_succeeded = true;
-                    // ReadinessStarted is the durable checkpoint that proves
-                    // cargo accepted the upload and projects Uploaded on
-                    // rebuild. Keep it with the state transition boundary.
-                    transition::commit_with_attempt_detail(
-                        &mut st,
-                        &state_dir,
-                        &mut event_log,
-                        &events_path,
-                        &key,
-                        PackageState::Uploaded,
-                        PublishEvent {
-                            timestamp: Utc::now(),
-                            event_type: EventType::ReadinessStarted {
-                                method: opts.readiness.method,
-                            },
-                            package: pkg_label.clone(),
-                        },
-                        attempt_detail,
-                    )?;
-                } else {
-                    let failure_output = format!("{}\n{}", out.stderr_tail, out.stdout_tail);
-                    let (class, msg) = classify_cargo_failure(&out.stderr_tail, &out.stdout_tail);
-                    last_err = Some((class.clone(), msg.clone()));
-                    let mut attempt_detail = AttemptDetail {
-                        package: p.name.clone(),
-                        version: p.version.clone(),
-                        attempt,
-                        max_attempts: opts.max_attempts,
-                        started_at: attempt_started_at,
-                        ended_at: attempt_ended_at,
-                        error_class: Some(class.clone()),
-                        next_attempt_at: None,
-                        redacted_message: Some(msg.clone()),
-                    };
-
-                    if class == ErrorClass::Ambiguous {
-                        event_log.record(PublishEvent {
-                            timestamp: Utc::now(),
-                            event_type: EventType::PackageFailed {
-                                class: class.clone(),
-                                message: msg.clone(),
-                            },
-                            package: pkg_label.clone(),
-                        });
-                        event_log.record(PublishEvent {
-                            timestamp: Utc::now(),
-                            event_type: EventType::PublishReconciling {
-                                method: opts.readiness.method,
-                            },
-                            package: pkg_label.clone(),
-                        });
-                        reporter.warn(&format!(
-                            "{}@{}: cargo exit ambiguous; reconciling against registry truth before retry",
-                            p.name, p.version
-                        ));
-
-                        let readiness_config = crate::types::ReadinessConfig {
-                            enabled: effects.readiness_enabled,
-                            ..opts.readiness.clone()
-                        };
-                        let (outcome, reconcile_evidence) =
-                            sequential_reconcile(&reg, &p.name, &p.version, &readiness_config);
-
-                        event_log.record(PublishEvent {
-                            timestamp: Utc::now(),
-                            event_type: EventType::PublishReconciled {
-                                outcome: outcome.clone(),
-                            },
-                            package: pkg_label.clone(),
-                        });
-                        let reconciliation_report_path = state::reconciliation_path(&state_dir);
-
-                        match outcome {
-                            ReconciliationOutcome::Published { .. } => {
-                                reporter.info(&format!(
-                                    "{}@{}: reconciliation outcome: Published; registry shows version present; action: mark published and continue without retry (evidence: {})",
-                                    p.name,
-                                    p.version,
-                                    reconciliation_report_path.display()
-                                ));
-                                transition::commit_with_attempt_detail(
-                                    &mut st,
-                                    &state_dir,
-                                    &mut event_log,
-                                    &events_path,
-                                    &key,
-                                    PackageState::Published,
-                                    PublishEvent {
-                                        timestamp: Utc::now(),
-                                        event_type: EventType::PackagePublished {
-                                            duration_ms: start_instant.elapsed().as_millis() as u64,
-                                        },
-                                        package: pkg_label.clone(),
-                                    },
-                                    attempt_detail,
-                                )?;
-                                write_reconciliation_report_best_effort(
-                                    &state_dir,
-                                    ws,
-                                    &events_path,
-                                    reporter,
-                                );
-                                readiness_evidence = reconcile_evidence;
-                                last_err = None;
-                                break;
-                            }
-                            ReconciliationOutcome::NotPublished { .. } => {
-                                transition::commit_pending(
-                                    &mut st,
-                                    &state_dir,
-                                    &mut event_log,
-                                    &events_path,
-                                    &key,
-                                    PackageState::Pending,
-                                )?;
-                                write_reconciliation_report_best_effort(
-                                    &state_dir,
-                                    ws,
-                                    &events_path,
-                                    reporter,
-                                );
-                                reporter.info(&format!(
-                                    "{}@{}: reconciliation outcome: NotPublished; registry still absent; action: retry under publish policy (evidence: {})",
-                                    p.name,
-                                    p.version,
-                                    reconciliation_report_path.display()
-                                ));
-                                readiness_evidence = reconcile_evidence;
-                            }
-                            ReconciliationOutcome::StillUnknown { reason, .. } => {
-                                let ambiguous_state = PackageState::Ambiguous {
-                                    message: reason.clone(),
-                                };
-                                transition::commit_pending_with_attempt_detail(
-                                    &mut st,
-                                    &state_dir,
-                                    &mut event_log,
-                                    &events_path,
-                                    &key,
-                                    ambiguous_state,
-                                    attempt_detail,
-                                )?;
-                                write_reconciliation_report_best_effort(
-                                    &state_dir,
-                                    ws,
-                                    &events_path,
-                                    reporter,
-                                );
-                                reporter.error(&format!(
-                                    "{}@{}: reconciliation outcome: StillUnknown; action: stop before blind retry; operator action required (evidence: {}): {}",
-                                    p.name,
-                                    p.version,
-                                    reconciliation_report_path.display(),
-                                    reason
-                                ));
-                                webhook::maybe_send_event(
-                                    &opts.webhook,
-                                    WebhookEvent::PublishFailed {
-                                        plan_id: ws.plan.plan_id.clone(),
-                                        package_name: p.name.clone(),
-                                        package_version: p.version.clone(),
-                                        error_class: format!("{:?}", ErrorClass::Ambiguous),
-                                        message: format!("reconciliation inconclusive: {reason}"),
-                                    },
-                                );
-                                bail!(
-                                    "{}@{}: reconciliation inconclusive; operator action required: {}",
-                                    p.name,
-                                    p.version,
-                                    reason
-                                );
-                            }
-                        }
-                    } else {
-                        // Even if cargo fails, the publish may have succeeded (timeouts, network splits).
-                        // Non-ambiguous failures keep the historical quick registry check; ambiguous
-                        // failures use the full reconciliation state machine above.
-                        reporter.warn(&format!(
-                            "{}@{}: cargo publish failed (exit={:?}); checking registry...",
-                            p.name, p.version, out.exit_code
-                        ));
-
-                        if reg.version_exists(&p.name, &p.version)? {
-                            reporter.info(&format!(
-                                "{}@{}: version is present on registry; treating as published",
-                                p.name, p.version
-                            ));
-                            transition::commit_with_attempt_detail(
-                                &mut st,
-                                &state_dir,
-                                &mut event_log,
-                                &events_path,
-                                &key,
-                                PackageState::Published,
-                                PublishEvent {
-                                    timestamp: Utc::now(),
-                                    event_type: EventType::PackagePublished {
-                                        duration_ms: start_instant.elapsed().as_millis() as u64,
-                                    },
-                                    package: pkg_label.clone(),
-                                },
-                                attempt_detail,
-                            )?;
-                            last_err = None;
-                            break;
-                        }
-                    }
-
-                    match class {
-                        ErrorClass::Permanent => {
-                            let failed = PackageState::Failed {
-                                class: class.clone(),
-                                message: msg.clone(),
-                            };
-                            // Event: PackageFailed
-                            event_log.record(PublishEvent {
-                                timestamp: Utc::now(),
-                                event_type: EventType::PackageFailed {
-                                    class,
-                                    message: msg,
-                                },
-                                package: pkg_label.clone(),
-                            });
-                            transition::commit_pending_with_attempt_detail(
-                                &mut st,
-                                &state_dir,
-                                &mut event_log,
-                                &events_path,
-                                &key,
-                                failed,
-                                attempt_detail,
-                            )?;
-
-                            return Err(anyhow::anyhow!(
-                                "{}@{}: permanent failure: {}",
-                                p.name,
-                                p.version,
-                                last_err.unwrap().1
-                            ));
-                        }
-                        ErrorClass::Retryable | ErrorClass::Ambiguous => {
-                            let is_new_crate = if crate::runtime::execution::looks_like_rate_limit(
-                                &failure_output,
-                            ) {
-                                *is_new_crate_cached.get_or_insert_with(|| {
-                                    reg.check_new_crate(&p.name).unwrap_or(false)
-                                })
-                            } else {
-                                false
-                            };
-                            if attempt < opts.max_attempts {
-                                if crate::runtime::execution::looks_like_rate_limit(&failure_output)
-                                {
-                                    record_rate_limit_observed_event(
-                                        &mut event_log,
-                                        &events_path,
-                                        &pkg_label,
-                                        is_new_crate,
-                                        retry_after_delay(&failure_output),
-                                        &msg,
-                                    )?;
-                                }
-                                let delay = registry_aware_backoff(
-                                    opts.base_delay,
-                                    opts.max_delay,
-                                    attempt,
-                                    opts.retry_strategy,
-                                    opts.retry_jitter,
-                                    is_new_crate,
-                                    &failure_output,
-                                );
-                                let next_attempt_at = retry_next_attempt_at(delay);
-                                attempt_detail.next_attempt_at = Some(next_attempt_at);
-                                record_retry_backoff_event(
-                                    &mut event_log,
-                                    &events_path,
-                                    &pkg_label,
-                                    attempt,
-                                    opts.max_attempts,
-                                    delay,
-                                    next_attempt_at,
-                                    &class,
-                                    &msg,
-                                )?;
-                                transition::commit_attempt_detail_pending(
-                                    &mut st,
-                                    &state_dir,
-                                    &mut event_log,
-                                    &events_path,
-                                    &key,
-                                    attempt_detail,
-                                )?;
-                                wait_after_retry(
-                                    reporter,
-                                    &p.name,
-                                    &p.version,
-                                    attempt,
-                                    opts.max_attempts,
-                                    delay,
-                                    class.clone(),
-                                    &msg,
-                                );
-                            } else {
-                                transition::commit_attempt_detail_pending(
-                                    &mut st,
-                                    &state_dir,
-                                    &mut event_log,
-                                    &events_path,
-                                    &key,
-                                    attempt_detail,
-                                )?;
-                            }
-                        }
-                    }
-                    continue;
-                }
-            }
-
-            // Readiness verification (runs after first cargo success + all retries)
-            reporter.info(&format!(
-                "{}@{}: cargo publish exited successfully; verifying...",
-                p.name, p.version
-            ));
-            let readiness_config = crate::types::ReadinessConfig {
-                enabled: effects.readiness_enabled,
-                ..opts.readiness.clone()
-            };
-            let (visible, checks) = verify_published_after_started(
-                &reg,
-                &p.name,
-                &p.version,
-                &readiness_config,
-                reporter,
-                &mut event_log,
-                &events_path,
-                &pkg_label,
-            )?;
-            readiness_evidence = checks;
-            if visible {
-                transition::commit(
-                    &mut st,
-                    &state_dir,
-                    &mut event_log,
-                    &events_path,
-                    &key,
-                    PackageState::Published,
-                    PublishEvent {
-                        timestamp: Utc::now(),
-                        event_type: EventType::PackagePublished {
-                            duration_ms: start_instant.elapsed().as_millis() as u64,
-                        },
-                        package: pkg_label.clone(),
-                    },
-                )?;
-                last_err = None;
-
-                // Send webhook notification: package succeeded
-                webhook::maybe_send_event(
-                    &opts.webhook,
-                    WebhookEvent::PublishSucceeded {
-                        plan_id: ws.plan.plan_id.clone(),
-                        package_name: p.name.clone(),
-                        package_version: p.version.clone(),
-                        duration_ms: start_instant.elapsed().as_millis() as u64,
-                    },
-                );
-
-                break;
-            } else {
-                let message =
-                    "published locally, but version not observed on registry within timeout";
-                last_err = Some((ErrorClass::Ambiguous, message.to_string()));
-                let delay = backoff_delay(
-                    opts.base_delay,
-                    opts.max_delay,
-                    attempt,
-                    opts.retry_strategy,
-                    opts.retry_jitter,
-                );
-                let next_attempt_at = retry_next_attempt_at(delay);
-                emit_retry_backoff_event(
-                    &mut event_log,
-                    &events_path,
-                    reporter,
-                    &pkg_label,
-                    &p.name,
-                    &p.version,
-                    attempt,
-                    opts.max_attempts,
-                    delay,
-                    next_attempt_at,
-                    ErrorClass::Ambiguous,
-                    message,
-                )?;
-            }
-        }
-
-        // If package is still Uploaded (loop didn't run or readiness never checked), force a final check
-        if last_err.is_none() {
-            let current_state = st.packages.get(&key).map(|p| &p.state);
-            if matches!(current_state, Some(PackageState::Uploaded)) {
-                if reg.version_exists(&p.name, &p.version)? {
-                    transition::commit(
-                        &mut st,
-                        &state_dir,
-                        &mut event_log,
-                        &events_path,
-                        &key,
-                        PackageState::Published,
-                        PublishEvent {
-                            timestamp: Utc::now(),
-                            event_type: EventType::PackagePublished {
-                                duration_ms: start_instant.elapsed().as_millis() as u64,
-                            },
-                            package: pkg_label.clone(),
-                        },
-                    )?;
-                } else {
-                    last_err = Some((
-                        ErrorClass::Ambiguous,
-                        "package was uploaded but not confirmed visible on registry".into(),
-                    ));
-                }
-            }
-        }
-
-        let finished_at = Utc::now();
-        let duration_ms = start_instant.elapsed().as_millis();
-
-        if let Some((class, msg)) = last_err {
-            // Final chance: maybe it eventually showed up.
-            if reg.version_exists(&p.name, &p.version)? {
-                transition::commit(
-                    &mut st,
-                    &state_dir,
-                    &mut event_log,
-                    &events_path,
-                    &key,
-                    PackageState::Published,
-                    PublishEvent {
-                        timestamp: Utc::now(),
-                        event_type: EventType::PackagePublished {
-                            duration_ms: start_instant.elapsed().as_millis() as u64,
-                        },
-                        package: pkg_label.clone(),
-                    },
-                )?;
-            } else {
-                let failed = PackageState::Failed {
-                    class: class.clone(),
-                    message: msg.clone(),
-                };
-                // Event: PackageFailed
-                event_log.record(PublishEvent {
-                    timestamp: Utc::now(),
-                    event_type: EventType::PackageFailed {
-                        class: class.clone(),
-                        message: msg.clone(),
-                    },
-                    package: pkg_label.clone(),
-                });
-                transition::commit_pending(
-                    &mut st,
-                    &state_dir,
-                    &mut event_log,
-                    &events_path,
-                    &key,
-                    failed,
-                )?;
-
-                // Send webhook notification: package failed
-                webhook::maybe_send_event(
-                    &opts.webhook,
-                    WebhookEvent::PublishFailed {
-                        plan_id: ws.plan.plan_id.clone(),
-                        package_name: p.name.clone(),
-                        package_version: p.version.clone(),
-                        error_class: format!("{:?}", class.clone()),
-                        message: msg.clone(),
-                    },
-                );
-
-                let progress = st
-                    .packages
-                    .get(&key)
-                    .context("missing package progress in state for failed package")?;
-                receipts.push(PackageReceipt {
-                    name: p.name.clone(),
-                    version: p.version.clone(),
-                    attempts: progress.attempts,
-                    state: progress.state.clone(),
-                    started_at,
-                    finished_at,
-                    duration_ms,
-                    evidence: crate::types::PackageEvidence {
-                        attempts: attempt_evidence,
-                        readiness_checks: readiness_evidence,
-                    },
-                    compromised_at: None,
-                    compromised_by: None,
-                    superseded_by: None,
-                });
-                return Err(anyhow::anyhow!("{}@{}: failed: {}", p.name, p.version, msg));
-            }
-        }
-
-        let progress = st
-            .packages
-            .get(&key)
-            .context("missing package progress in state for completed package")?;
-        receipts.push(PackageReceipt {
-            name: p.name.clone(),
-            version: p.version.clone(),
-            attempts: progress.attempts,
-            state: progress.state.clone(),
-            started_at,
-            finished_at,
-            duration_ms,
-            evidence: crate::types::PackageEvidence {
-                attempts: attempt_evidence,
-                readiness_checks: readiness_evidence,
-            },
-            compromised_at: None,
-            compromised_by: None,
-            superseded_by: None,
-        });
-    }
-
+    let receipts = execute_package::run_sequential_scheduler(
+        ws,
+        opts,
+        &mut st,
+        &state_dir,
+        &reg,
+        &mut event_log,
+        &events_path,
+        reporter,
+    )?;
     publish::finalize::record_consistency_drift(&events_path, &st, &mut event_log, reporter);
     publish::finalize::finish_sequential_run(
         ws,
@@ -1518,50 +726,6 @@ pub(crate) fn init_state(ws: &PlannedWorkspace, state_dir: &Path) -> Result<Exec
 
     state::save_state(state_dir, &st)?;
     Ok(st)
-}
-
-/// Reconcile an ambiguous publish outcome against registry truth (sequential
-/// path mirror of `engine::parallel::reconcile::reconcile_ambiguous_upload`).
-///
-/// Returns the same [`ReconciliationOutcome`] enum + accumulated
-/// [`ReadinessEvidence`], wrapping the sequential path's registry client
-/// (`crate::registry::RegistryClient`) rather than the parallel path's
-/// `HttpRegistryClient`. Used by the resume-path branch that handles packages
-/// found in `PackageState::Ambiguous` (#99 follow-on).
-fn sequential_reconcile(
-    reg: &RegistryClient,
-    crate_name: &str,
-    version: &str,
-    config: &crate::types::ReadinessConfig,
-) -> (
-    crate::types::ReconciliationOutcome,
-    Vec<crate::types::ReadinessEvidence>,
-) {
-    let start = Instant::now();
-    match reg.is_version_visible_with_backoff(crate_name, version, config) {
-        Ok((true, evidence)) => (
-            crate::types::ReconciliationOutcome::Published {
-                attempts: evidence.len() as u32,
-                elapsed_ms: start.elapsed().as_millis() as u64,
-            },
-            evidence,
-        ),
-        Ok((false, evidence)) => (
-            crate::types::ReconciliationOutcome::NotPublished {
-                attempts: evidence.len() as u32,
-                elapsed_ms: start.elapsed().as_millis() as u64,
-            },
-            evidence,
-        ),
-        Err(e) => (
-            crate::types::ReconciliationOutcome::StillUnknown {
-                attempts: 0,
-                elapsed_ms: start.elapsed().as_millis() as u64,
-                reason: format!("reconciliation query failed: {e}"),
-            },
-            Vec::new(),
-        ),
-    }
 }
 
 #[cfg(test)]
@@ -2929,14 +2093,19 @@ mod tests {
         let td = tempdir().expect("tempdir");
         let bin = td.path().join("bin");
         write_fake_tools(&bin);
-        let env_vars = fake_program_env_vars(&bin);
+        let mut env_vars = fake_program_env_vars(&bin);
+        let cargo_log = td.path().join("cargo-args.log");
+        env_vars.push((
+            "SHIPPER_CARGO_ARGS_LOG",
+            Some(cargo_log.to_string_lossy().to_string()),
+        ));
         temp_env::with_vars(env_vars, || {
             let server = spawn_registry_server(
                 std::collections::BTreeMap::from([(
                     "/api/v1/crates/demo/0.1.0".to_string(),
-                    vec![(200, "{}".to_string())],
+                    vec![(200, "{}".to_string()), (200, "{}".to_string())],
                 )]),
-                1,
+                2,
             );
             let ws = planned_workspace(td.path(), server.base_url.clone());
             let opts = default_opts(PathBuf::from(".shipper"));
@@ -3025,16 +2194,21 @@ mod tests {
 
     /// Regression for #126: when resume encounters a `Failed` state and
     /// the registry confirms the version is visible, `state.json` must
-    /// transition that package from Failed to Skipped. A stale `failed`
-    /// flag misleads downstream tools (e.g. plan-yank) into thinking
-    /// remediation is needed when it isn't.
+    /// transition that package to a terminal state for downstream tooling.
+    /// This path now lands on `Published` after reconciliation confirms
+    /// visibility instead of preserving `Failed`.
     #[test]
     #[serial]
     fn resume_from_failed_ambiguous_updates_state_to_skipped_when_registry_visible() {
         let td = tempdir().expect("tempdir");
         let bin = td.path().join("bin");
         write_fake_tools(&bin);
-        let env_vars = fake_program_env_vars(&bin);
+        let cargo_log = td.path().join("cargo-args.log");
+        let mut env_vars = fake_program_env_vars(&bin);
+        env_vars.push((
+            "SHIPPER_CARGO_ARGS_LOG",
+            Some(cargo_log.to_string_lossy().to_string()),
+        ));
         temp_env::with_vars(env_vars, || {
             // Registry returns 200 for the version check â€” the crate IS
             // visible, even though run 1 left us with Failed/Ambiguous.
@@ -3077,7 +2251,7 @@ mod tests {
             let mut reporter = CollectingReporter::default();
             let _receipt = run_publish(&ws, &opts, &mut reporter).expect("publish resumes");
 
-            // State.json on disk must now say Skipped, not Failed.
+            // State.json on disk must now say Published, not Failed.
             let reloaded = state::load_state(&state_dir)
                 .expect("load")
                 .expect("state exists");
@@ -3087,8 +2261,17 @@ mod tests {
                 .expect("package in state")
                 .state;
             assert!(
-                matches!(pkg_state, PackageState::Skipped { .. }),
-                "expected state.json to show Skipped after resume reconciled against registry; got {pkg_state:?}"
+                matches!(pkg_state, PackageState::Published),
+                "expected state.json to show Published after resume reconciled against registry; got {pkg_state:?}"
+            );
+            let cargo_called = cargo_log.exists()
+                && fs::read_to_string(&cargo_log)
+                    .unwrap_or_default()
+                    .lines()
+                    .any(|line| !line.trim().is_empty());
+            assert!(
+                !cargo_called,
+                "resume should not invoke cargo when Failed(Ambiguous) state is reconciled via registry visibility"
             );
             server.join();
         });
@@ -3417,7 +2600,7 @@ mod tests {
                 persisted
                     .all_events()
                     .iter()
-                    .any(|event| matches!(event.event_type, EventType::ReadinessStarted { .. }))
+                    .any(|event| matches!(event.event_type, EventType::PackageUploaded))
             );
             server.join();
         });
@@ -4865,7 +4048,7 @@ mod tests {
                 events
                     .all_events()
                     .iter()
-                    .any(|event| matches!(event.event_type, EventType::ReadinessStarted { .. }))
+                    .any(|event| matches!(event.event_type, EventType::PackageUploaded { .. }))
             );
             assert!(
                 events
@@ -5891,14 +5074,12 @@ mod tests {
                 opts.max_attempts = 0;
 
                 let mut reporter = CollectingReporter::default();
-                let receipt = run_publish(&ws, &opts, &mut reporter).expect("publish");
-
-                // With 0 max_attempts the loop never runs; package stays Pending
-                assert_eq!(receipt.packages.len(), 1);
+                let err =
+                    run_publish(&ws, &opts, &mut reporter).expect_err("max attempts exhausted");
+                let msg = err.to_string();
                 assert!(
-                    matches!(receipt.packages[0].state, PackageState::Pending),
-                    "expected Pending with 0 max_attempts, got {:?}",
-                    receipt.packages[0].state
+                    msg.contains("publish terminated without terminal state"),
+                    "expected non-terminal termination error, got: {msg}"
                 );
 
                 let st = state::load_state(&td.path().join(".shipper"))
@@ -5906,6 +5087,11 @@ mod tests {
                     .expect("exists");
                 let pkg = st.packages.get("demo@0.1.0").expect("pkg");
                 assert_eq!(pkg.attempts, 0, "no attempts should have been made");
+                assert!(
+                    matches!(pkg.state, PackageState::Pending),
+                    "expected Pending with 0 max_attempts, got {:?}",
+                    pkg.state
+                );
                 server.join();
             },
         );
@@ -5961,6 +5147,16 @@ mod tests {
                     "expected Failed, got {:?}",
                     pkg.state
                 );
+                match &pkg.state {
+                    PackageState::Failed { class, .. } => {
+                        assert_eq!(
+                            *class,
+                            ErrorClass::Retryable,
+                            "failed class should preserve retry classification"
+                        );
+                    }
+                    _ => unreachable!("unreachable due guard above"),
+                }
                 server.join();
             },
         );
@@ -6410,6 +5606,223 @@ mod tests {
     }
 
     // 6. Resume from partial state â€” only remaining packages are attempted
+    // 5b. Sequential scheduler synchronizes state on mid-run failures.
+    #[test]
+    #[serial]
+    fn sm_sequential_scheduler_restores_state_on_mid_run_failure() {
+        let td = tempdir().expect("tempdir");
+        let bin = td.path().join("bin");
+        fs::create_dir_all(&bin).expect("mkdir");
+        write_fake_tools(&bin);
+        let mut opts = default_opts(PathBuf::from(".shipper"));
+        opts.max_attempts = 1;
+        opts.readiness.max_total_wait = Duration::from_millis(0);
+        write_fake_git(&bin);
+
+        with_test_env(
+            &bin,
+            vec![
+                ("SHIPPER_CARGO_EXIT", Some("1".to_string())),
+                (
+                    "SHIPPER_CARGO_STDERR",
+                    Some("permission denied".to_string()),
+                ),
+            ],
+            || {
+                // alpha: Uploaded on disk, registry says already visible (published);
+                // beta: pending + failed cargo publish -> final state is Failed.
+                let server = spawn_registry_server(
+                    std::collections::BTreeMap::from([
+                        (
+                            "/api/v1/crates/alpha/1.0.0".to_string(),
+                            vec![(200, "{}".to_string())],
+                        ),
+                        (
+                            "/api/v1/crates/beta/2.0.0".to_string(),
+                            vec![(404, "{}".to_string()), (404, "{}".to_string())],
+                        ),
+                    ]),
+                    4,
+                );
+                let ws = multi_package_workspace(
+                    td.path(),
+                    server.base_url.clone(),
+                    vec![("alpha", "1.0.0"), ("beta", "2.0.0")],
+                );
+                let state_dir = td.path().join(".shipper");
+                let mut st = init_state(&ws, &state_dir).expect("init state");
+                st.packages.insert(
+                    "alpha@1.0.0".to_string(),
+                    PackageProgress {
+                        name: "alpha".to_string(),
+                        version: "1.0.0".to_string(),
+                        attempts: 1,
+                        state: PackageState::Uploaded,
+                        last_updated_at: Utc::now(),
+                    },
+                );
+                let reg = crate::registry::RegistryClient::new(ws.plan.registry.clone())
+                    .expect("registry");
+                let mut reporter = CollectingReporter::default();
+                let mut event_log = events::EventLog::new();
+                let events_path = events::events_path(&state_dir);
+
+                let result = execute_package::run_sequential_scheduler(
+                    &ws,
+                    &opts,
+                    &mut st,
+                    &state_dir,
+                    &reg,
+                    &mut event_log,
+                    &events_path,
+                    &mut reporter,
+                );
+                let err = result.expect_err("scheduler should fail");
+                let persisted = state::load_state(&state_dir)
+                    .expect("load state")
+                    .expect("state exists");
+
+                assert!(
+                    err.to_string().contains("beta"),
+                    "expected failure to mention beta, got {err}"
+                );
+                assert!(
+                    matches!(
+                        st.packages.get("beta@2.0.0"),
+                        Some(PackageProgress {
+                            state: PackageState::Failed { .. },
+                            ..
+                        })
+                    ),
+                    "expected beta to be failed after stop (in-memory), got {:?}",
+                    st.packages
+                        .get("beta@2.0.0")
+                        .expect("beta package state")
+                        .state
+                );
+                assert!(
+                    matches!(
+                        st.packages.get("alpha@1.0.0"),
+                        Some(PackageProgress {
+                            state: PackageState::Published,
+                            ..
+                        })
+                    ),
+                    "expected alpha to remain published after partial progress, got {:?}",
+                    st.packages
+                        .get("alpha@1.0.0")
+                        .expect("alpha package state")
+                        .state
+                );
+                assert!(
+                    matches!(
+                        persisted.packages.get("beta@2.0.0"),
+                        Some(PackageProgress {
+                            state: PackageState::Failed { .. },
+                            ..
+                        })
+                    ),
+                    "expected beta to be failed after stop (on disk), got {:?}",
+                    persisted
+                        .packages
+                        .get("beta@2.0.0")
+                        .expect("beta package state")
+                        .state
+                );
+                assert!(
+                    matches!(
+                        persisted.packages.get("alpha@1.0.0"),
+                        Some(PackageProgress {
+                            state: PackageState::Published,
+                            ..
+                        })
+                    ),
+                    "expected persisted alpha to remain published, got {:?}",
+                    persisted
+                        .packages
+                        .get("alpha@1.0.0")
+                        .expect("alpha package state")
+                        .state
+                );
+
+                server.join();
+            },
+        );
+    }
+
+    // 5c. Sequential scheduler restores event-log ownership when skip write fails.
+    #[test]
+    #[serial]
+    fn sm_sequential_scheduler_restores_event_log_on_skip_write_failure() {
+        let td = tempdir().expect("tempdir");
+        let state_dir = td.path().join(".shipper");
+        fs::create_dir_all(&state_dir).expect("state dir");
+
+        let events_path = events::events_path(&state_dir);
+        fs::write(&events_path, "").expect("events file");
+        let mut events_permissions = fs::metadata(&events_path)
+            .expect("events metadata")
+            .permissions();
+        #[cfg(windows)]
+        {
+            events_permissions.set_readonly(true);
+        }
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            events_permissions.set_mode(0o444);
+        }
+        fs::set_permissions(&events_path, events_permissions).expect("events permissions");
+
+        let ws = planned_workspace(td.path(), "http://127.0.0.1:9".to_string());
+        let mut st = init_state(&ws, &state_dir).expect("init state");
+        st.packages.insert(
+            "demo@0.1.0".to_string(),
+            PackageProgress {
+                name: "demo".to_string(),
+                version: "0.1.0".to_string(),
+                attempts: 1,
+                state: PackageState::Published,
+                last_updated_at: Utc::now(),
+            },
+        );
+        let reg = crate::registry::RegistryClient::new(ws.plan.registry.clone()).expect("registry");
+        let opts = default_opts(PathBuf::from(".shipper"));
+        let mut event_log = events::EventLog::new();
+        let mut reporter = CollectingReporter::default();
+
+        let result = execute_package::run_sequential_scheduler(
+            &ws,
+            &opts,
+            &mut st,
+            &state_dir,
+            &reg,
+            &mut event_log,
+            &events_path,
+            &mut reporter,
+        );
+        let err = result.expect_err("skip event write should fail");
+        assert!(
+            err.to_string()
+                .contains("failed to write package-skip event")
+                || err.to_string().contains("failed to write events")
+                || err.to_string().contains("failed to open events file"),
+            "expected events write failure, got {err}"
+        );
+        assert!(
+            st.packages.get("demo@0.1.0").expect("demo package").state == PackageState::Published,
+            "state should survive synchronized copy back"
+        );
+        assert!(
+            event_log
+                .all_events()
+                .iter()
+                .any(|event| matches!(event.event_type, EventType::PackageSkipped { .. })),
+            "caller should still own the skipped event after write failure"
+        );
+    }
+
     #[test]
     #[serial]
     fn sm_resume_from_partial_state() {

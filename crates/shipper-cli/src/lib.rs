@@ -4056,6 +4056,7 @@ fn event_type_name(event_type: &EventType) -> &'static str {
         EventType::PackageStarted { .. } => "package_started",
         EventType::PackageAttempted { .. } => "package_attempted",
         EventType::PackageOutput { .. } => "package_output",
+        EventType::PackageUploaded => "package_uploaded",
         EventType::PackagePublished { .. } => "package_published",
         EventType::PackageFailed { .. } => "package_failed",
         EventType::PackageSkipped { .. } => "package_skipped",
@@ -4100,6 +4101,7 @@ fn summarize_event(event: &PublishEvent) -> String {
         EventType::PackagePublished { duration_ms } => {
             format!("published in {}", format_millis(*duration_ms))
         }
+        EventType::PackageUploaded => "upload accepted by cargo".to_string(),
         EventType::PackageFailed { class, message } => format!("failed ({:?}): {}", class, message),
         EventType::PackageSkipped { reason } => format!("skipped: {}", reason),
         EventType::PublishWaiting {

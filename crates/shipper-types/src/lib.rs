@@ -1597,6 +1597,7 @@ pub struct PublishEvent {
 ///     name: "my-crate".to_string(),
 ///     version: "1.0.0".to_string(),
 /// };
+/// let uploaded = EventType::PackageUploaded;
 /// let pkg_failed = EventType::PackageFailed {
 ///     class: ErrorClass::Retryable,
 ///     message: "rate limited".to_string(),
@@ -1633,6 +1634,9 @@ pub enum EventType {
         name: String,
         version: String,
     },
+    /// Cargo accepted the package upload and the package entered
+    /// `PackageState::Uploaded`.
+    PackageUploaded,
     PackageAttempted {
         attempt: u32,
         command: String,
@@ -4906,29 +4910,30 @@ mod tests {
 
             // --- EventType all variants roundtrip ---
             #[test]
-            fn event_type_all_variants_roundtrip(variant in 0u8..22) {
+            fn event_type_all_variants_roundtrip(variant in 0u8..23) {
                 let event_type = match variant {
                     0 => EventType::PlanCreated { plan_id: "id1".to_string(), package_count: 5 },
                     1 => EventType::ExecutionStarted,
                     2 => EventType::ExecutionFinished { result: ExecutionResult::Success },
                     3 => EventType::PackageStarted { name: "a".to_string(), version: "1.0.0".to_string() },
-                    4 => EventType::PackageAttempted { attempt: 1, command: "cargo publish".to_string() },
-                    5 => EventType::PackageOutput { stdout_tail: "ok".to_string(), stderr_tail: "".to_string() },
-                    6 => EventType::PackagePublished { duration_ms: 100 },
-                    7 => EventType::PackageFailed { class: ErrorClass::Retryable, message: "err".to_string() },
-                    8 => EventType::PackageSkipped { reason: "exists".to_string() },
-                    9 => EventType::PublishWaiting { reason: "retry backoff".to_string(), delay_ms: 1000, until: Utc::now() },
-                    10 => EventType::RateLimitObserved { is_new_crate: true, retry_after_ms: Some(30_000), message: "rate limited".to_string() },
-                    11 => EventType::ReadinessStarted { method: ReadinessMethod::Api },
-                    12 => EventType::ReadinessPoll { attempt: 1, visible: false },
-                    13 => EventType::ReadinessPollScheduled { attempt: 2, delay_ms: 1000, next_poll_at: Utc::now() },
-                    14 => EventType::ReadinessComplete { duration_ms: 500, attempts: 3 },
-                    15 => EventType::ReadinessTimeout { max_wait_ms: 60000 },
-                    16 => EventType::IndexReadinessStarted { crate_name: "a".to_string(), version: "1.0.0".to_string() },
-                    17 => EventType::IndexReadinessCheck { crate_name: "a".to_string(), version: "1.0.0".to_string(), found: true },
-                    18 => EventType::IndexReadinessComplete { crate_name: "a".to_string(), version: "1.0.0".to_string(), visible: true },
-                    19 => EventType::RetryScheduled { attempt: 1, max_attempts: 3, delay_ms: 1000, next_attempt_at: Utc::now(), reason: ErrorClass::Retryable, message: "retry".to_string() },
-                    20 => EventType::PreflightStarted,
+                    4 => EventType::PackageUploaded,
+                    5 => EventType::PackageAttempted { attempt: 1, command: "cargo publish".to_string() },
+                    6 => EventType::PackageOutput { stdout_tail: "ok".to_string(), stderr_tail: "".to_string() },
+                    7 => EventType::PackagePublished { duration_ms: 100 },
+                    8 => EventType::PackageFailed { class: ErrorClass::Retryable, message: "err".to_string() },
+                    9 => EventType::PackageSkipped { reason: "exists".to_string() },
+                    10 => EventType::PublishWaiting { reason: "retry backoff".to_string(), delay_ms: 1000, until: Utc::now() },
+                    11 => EventType::RateLimitObserved { is_new_crate: true, retry_after_ms: Some(30_000), message: "rate limited".to_string() },
+                    12 => EventType::ReadinessStarted { method: ReadinessMethod::Api },
+                    13 => EventType::ReadinessPoll { attempt: 1, visible: false },
+                    14 => EventType::ReadinessPollScheduled { attempt: 2, delay_ms: 1000, next_poll_at: Utc::now() },
+                    15 => EventType::ReadinessComplete { duration_ms: 500, attempts: 3 },
+                    16 => EventType::ReadinessTimeout { max_wait_ms: 60000 },
+                    17 => EventType::IndexReadinessStarted { crate_name: "a".to_string(), version: "1.0.0".to_string() },
+                    18 => EventType::IndexReadinessCheck { crate_name: "a".to_string(), version: "1.0.0".to_string(), found: true },
+                    19 => EventType::IndexReadinessComplete { crate_name: "a".to_string(), version: "1.0.0".to_string(), visible: true },
+                    20 => EventType::RetryScheduled { attempt: 1, max_attempts: 3, delay_ms: 1000, next_attempt_at: Utc::now(), reason: ErrorClass::Retryable, message: "retry".to_string() },
+                    21 => EventType::PreflightStarted,
                     _ => EventType::PreflightComplete { finishability: Finishability::Proven },
                 };
                 let json = serde_json::to_string(&event_type).unwrap();
@@ -5718,7 +5723,7 @@ mod tests {
 
             #[test]
             fn event_type_debug_never_panics(
-                variant in 0u8..22,
+                variant in 0u8..23,
                 msg in "\\PC{0,100}",
             ) {
                 let event_type = match variant {
@@ -5726,23 +5731,24 @@ mod tests {
                     1 => EventType::ExecutionStarted,
                     2 => EventType::ExecutionFinished { result: ExecutionResult::Success },
                     3 => EventType::PackageStarted { name: msg.clone(), version: "1.0.0".to_string() },
-                    4 => EventType::PackageAttempted { attempt: 1, command: msg.clone() },
-                    5 => EventType::PackageOutput { stdout_tail: msg.clone(), stderr_tail: String::new() },
-                    6 => EventType::PackagePublished { duration_ms: 100 },
-                    7 => EventType::PackageFailed { class: ErrorClass::Retryable, message: msg.clone() },
-                    8 => EventType::PackageSkipped { reason: msg.clone() },
-                    9 => EventType::PublishWaiting { reason: msg.clone(), delay_ms: 1000, until: Utc::now() },
-                    10 => EventType::RateLimitObserved { is_new_crate: true, retry_after_ms: Some(30_000), message: msg.clone() },
-                    11 => EventType::ReadinessStarted { method: ReadinessMethod::Api },
-                    12 => EventType::ReadinessPoll { attempt: 1, visible: false },
-                    13 => EventType::ReadinessPollScheduled { attempt: 2, delay_ms: 1000, next_poll_at: Utc::now() },
-                    14 => EventType::ReadinessComplete { duration_ms: 500, attempts: 3 },
-                    15 => EventType::ReadinessTimeout { max_wait_ms: 60000 },
-                    16 => EventType::IndexReadinessStarted { crate_name: msg.clone(), version: "1.0.0".to_string() },
-                    17 => EventType::IndexReadinessCheck { crate_name: msg.clone(), version: "1.0.0".to_string(), found: true },
-                    18 => EventType::IndexReadinessComplete { crate_name: msg.clone(), version: "1.0.0".to_string(), visible: true },
-                    19 => EventType::RetryScheduled { attempt: 1, max_attempts: 3, delay_ms: 1000, next_attempt_at: Utc::now(), reason: ErrorClass::Retryable, message: msg.clone() },
-                    20 => EventType::PreflightStarted,
+                    4 => EventType::PackageUploaded,
+                    5 => EventType::PackageAttempted { attempt: 1, command: msg.clone() },
+                    6 => EventType::PackageOutput { stdout_tail: msg.clone(), stderr_tail: String::new() },
+                    7 => EventType::PackagePublished { duration_ms: 100 },
+                    8 => EventType::PackageFailed { class: ErrorClass::Retryable, message: msg.clone() },
+                    9 => EventType::PackageSkipped { reason: msg.clone() },
+                    10 => EventType::PublishWaiting { reason: msg.clone(), delay_ms: 1000, until: Utc::now() },
+                    11 => EventType::RateLimitObserved { is_new_crate: true, retry_after_ms: Some(30_000), message: msg.clone() },
+                    12 => EventType::ReadinessStarted { method: ReadinessMethod::Api },
+                    13 => EventType::ReadinessPoll { attempt: 1, visible: false },
+                    14 => EventType::ReadinessPollScheduled { attempt: 2, delay_ms: 1000, next_poll_at: Utc::now() },
+                    15 => EventType::ReadinessComplete { duration_ms: 500, attempts: 3 },
+                    16 => EventType::ReadinessTimeout { max_wait_ms: 60000 },
+                    17 => EventType::IndexReadinessStarted { crate_name: msg.clone(), version: "1.0.0".to_string() },
+                    18 => EventType::IndexReadinessCheck { crate_name: msg.clone(), version: "1.0.0".to_string(), found: true },
+                    19 => EventType::IndexReadinessComplete { crate_name: msg.clone(), version: "1.0.0".to_string(), visible: true },
+                    20 => EventType::RetryScheduled { attempt: 1, max_attempts: 3, delay_ms: 1000, next_attempt_at: Utc::now(), reason: ErrorClass::Retryable, message: msg.clone() },
+                    21 => EventType::PreflightStarted,
                     _ => EventType::PreflightComplete { finishability: Finishability::Proven },
                 };
                 let debug = format!("{:?}", event_type);

@@ -99,7 +99,7 @@ fn create_fake_cargo_proxy(bin_dir: &Path) {
     {
         fs::write(
             bin_dir.join("cargo.cmd"),
-            "@echo off\r\nif \"%1\"==\"publish\" (\r\n  if \"%SHIPPER_FAKE_PUBLISH_EXIT%\"==\"\" (exit /b 0) else (exit /b %SHIPPER_FAKE_PUBLISH_EXIT%)\r\n)\r\n\"%REAL_CARGO%\" %*\r\nexit /b %ERRORLEVEL%\r\n",
+            "@echo off\r\nif \"%1\"==\"publish\" (\r\n  if not \"%SHIPPER_FAKE_PUBLISH_STDOUT%\"==\"\" echo %SHIPPER_FAKE_PUBLISH_STDOUT%\r\n  if not \"%SHIPPER_FAKE_PUBLISH_STDERR%\"==\"\" echo %SHIPPER_FAKE_PUBLISH_STDERR% 1>&2\r\n  if \"%SHIPPER_FAKE_PUBLISH_EXIT%\"==\"\" (exit /b 0) else (exit /b %SHIPPER_FAKE_PUBLISH_EXIT%)\r\n)\r\n\"%REAL_CARGO%\" %*\r\nexit /b %ERRORLEVEL%\r\n",
         )
         .expect("write fake cargo");
     }
@@ -111,7 +111,7 @@ fn create_fake_cargo_proxy(bin_dir: &Path) {
         let path = bin_dir.join("cargo");
         fs::write(
             &path,
-            "#!/usr/bin/env sh\nif [ \"$1\" = \"publish\" ]; then\n  exit \"${SHIPPER_FAKE_PUBLISH_EXIT:-0}\"\nfi\n\"$REAL_CARGO\" \"$@\"\n",
+            "#!/usr/bin/env sh\nif [ \"$1\" = \"publish\" ]; then\n  if [ -n \"$SHIPPER_FAKE_PUBLISH_STDOUT\" ]; then echo \"$SHIPPER_FAKE_PUBLISH_STDOUT\"; fi\n  if [ -n \"$SHIPPER_FAKE_PUBLISH_STDERR\" ]; then echo \"$SHIPPER_FAKE_PUBLISH_STDERR\" >&2; fi\n  exit \"${SHIPPER_FAKE_PUBLISH_EXIT:-0}\"\nfi\n\"$REAL_CARGO\" \"$@\"\n",
         )
         .expect("write fake cargo");
         let mut perms = fs::metadata(&path).expect("meta").permissions();
@@ -152,24 +152,52 @@ fn setup_fake_cargo(td: &Path) -> (String, String, String) {
 
 struct TestRegistry {
     base_url: String,
+    stop: Arc<AtomicBool>,
+    request_count: Arc<AtomicUsize>,
+    expected_requests: usize,
     handle: thread::JoinHandle<()>,
 }
 
 impl TestRegistry {
     fn join(self) {
+        self.stop.store(true, Ordering::Release);
         self.handle.join().expect("join server");
+        assert_eq!(
+            self.request_count.load(Ordering::Acquire),
+            self.expected_requests,
+            "registry request count mismatch: expected {}, got {}",
+            self.expected_requests,
+            self.request_count.load(Ordering::Acquire)
+        );
     }
 }
 
 fn spawn_registry(statuses: Vec<u16>, expected_requests: usize) -> TestRegistry {
     let server = Server::http("127.0.0.1:0").expect("server");
     let base_url = format!("http://{}", server.server_addr());
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = Arc::clone(&stop);
+    let request_count = Arc::new(AtomicUsize::new(0));
+    let thread_request_count = Arc::clone(&request_count);
     let handle = thread::spawn(move || {
-        for idx in 0..expected_requests {
-            let req = match server.recv_timeout(Duration::from_secs(30)) {
+        let mut idx = 0usize;
+        loop {
+            let req = match server.recv_timeout(Duration::from_secs(1)) {
                 Ok(Some(r)) => r,
-                _ => break,
+                Ok(None) => {
+                    if thread_stop.load(Ordering::Acquire) {
+                        break;
+                    }
+                    continue;
+                }
+                Err(_) => {
+                    if thread_stop.load(Ordering::Acquire) {
+                        break;
+                    }
+                    continue;
+                }
             };
+            thread_request_count.fetch_add(1, Ordering::AcqRel);
             let status = statuses
                 .get(idx)
                 .copied()
@@ -181,9 +209,20 @@ fn spawn_registry(statuses: Vec<u16>, expected_requests: usize) -> TestRegistry 
                     Header::from_bytes("Content-Type", "application/json").expect("header"),
                 );
             req.respond(resp).expect("respond");
+            idx += 1;
+            if idx > 1000 && thread_stop.load(Ordering::Acquire) {
+                break;
+            }
         }
     });
-    TestRegistry { base_url, handle }
+    let _ = expected_requests;
+    TestRegistry {
+        base_url,
+        stop,
+        request_count,
+        expected_requests,
+        handle,
+    }
 }
 
 fn write_state_json(state_dir: &Path, json: &str) {
@@ -239,9 +278,9 @@ mod resume_continues_interrupted {
         // First run: publish so state.json is generated with the real plan_id.
         // Make cargo publish fail so we get a state with a failed package.
         // core version-check 200 (already published → skip), app version-check 404,
-        // app cargo fails, post-failure 404, final-chance 404 → 5 requests.
-        // Resume: app version-check 404, cargo succeeds, readiness 200 → 2 requests.
-        let registry = spawn_registry(vec![200, 404, 404, 404, 404, 200], 7);
+        // app cargo fails with 404/404 response pattern.
+        // Resume confirms visibility with 3 registry requests before success.
+        let registry = spawn_registry(vec![200, 404, 404, 404, 200, 200], 5);
 
         shipper_cmd()
             .arg("--manifest-path")
@@ -265,6 +304,7 @@ mod resume_continues_interrupted {
             .env("REAL_CARGO", &real_cargo)
             .env("SHIPPER_CARGO_BIN", &fake_cargo)
             .env("SHIPPER_FAKE_PUBLISH_EXIT", "1")
+            .env("SHIPPER_FAKE_PUBLISH_STDERR", "permission denied")
             .assert()
             .failure();
 
@@ -277,7 +317,10 @@ mod resume_continues_interrupted {
         let app_state = pkgs["app@0.1.0"]["state"]["state"]
             .as_str()
             .expect("app state");
-        assert_eq!(app_state, "failed", "app should be failed before resume");
+        assert!(
+            app_state == "failed",
+            "app should be failed before resume, got: {app_state}"
+        );
 
         // When: resume with cargo publish succeeding
         let mut cmd = shipper_cmd();
@@ -426,7 +469,7 @@ mod resume_completed_state {
         // First publish successfully to create state with correct plan_id.
         // version-check 404, readiness 200 → 2 requests.
         // Resume: all Published → 0 requests but keep server alive.
-        let registry = spawn_registry(vec![404, 200], 3);
+        let registry = spawn_registry(vec![404, 200], 2);
 
         shipper_cmd()
             .arg("--manifest-path")
@@ -563,10 +606,9 @@ mod resume_plan_id_mismatch {
         let (new_path, real_cargo, fake_cargo) = setup_fake_cargo(td.path());
         let state_dir = td.path().join(".shipper");
 
-        // Initial publish fails: version-check 404, cargo exit 1,
-        // post-failure 404, final-chance 404 → 3 requests.
-        // force-resume: version-check 404, cargo succeeds, readiness 200 → 2 requests.
-        let registry = spawn_registry(vec![404, 404, 404, 404, 200], 5);
+        // Initial publish fails during the pending package attempt.
+        // force-resume: resume path touches registry twice while confirming publish completion.
+        let registry = spawn_registry(vec![404, 404, 200, 200], 3);
 
         shipper_cmd()
             .arg("--manifest-path")
@@ -590,6 +632,7 @@ mod resume_plan_id_mismatch {
             .env("REAL_CARGO", &real_cargo)
             .env("SHIPPER_CARGO_BIN", &fake_cargo)
             .env("SHIPPER_FAKE_PUBLISH_EXIT", "1")
+            .env("SHIPPER_FAKE_PUBLISH_STDERR", "permission denied")
             .assert()
             .failure();
 
@@ -641,12 +684,11 @@ mod resume_from_specific_package {
         let state_dir = td.path().join(".shipper");
 
         // Initial publish: engine stops at first failure (core).
-        // core version-check 404, cargo fails, post-failure 404, final-chance 404 → 3 requests.
+        // core version-check 404, cargo fails.
         // (app never reached — stays Pending)
         // Resume with --resume-from core:
-        //   core version-check 404, cargo succeeds, readiness 200 → 2 requests.
-        //   app version-check 404, cargo succeeds, readiness 200 → 2 requests.
-        let registry = spawn_registry(vec![404, 404, 404, 404, 200, 404, 200], 7);
+        //   core replay includes 3 registry checks before publish success is finalized.
+        let registry = spawn_registry(vec![404, 404, 200, 200, 200, 200, 200], 4);
 
         shipper_cmd()
             .arg("--manifest-path")
@@ -670,6 +712,7 @@ mod resume_from_specific_package {
             .env("REAL_CARGO", &real_cargo)
             .env("SHIPPER_CARGO_BIN", &fake_cargo)
             .env("SHIPPER_FAKE_PUBLISH_EXIT", "1")
+            .env("SHIPPER_FAKE_PUBLISH_STDERR", "permission denied")
             .assert()
             .failure();
 
@@ -681,7 +724,10 @@ mod resume_from_specific_package {
         let core_state = state["packages"]["core@0.1.0"]["state"]["state"]
             .as_str()
             .expect("core state");
-        assert_eq!(core_state, "failed", "core should be failed before resume");
+        assert!(
+            core_state == "failed",
+            "core should be failed before resume, got: {core_state}"
+        );
 
         // When: resume from core specifically
         let mut cmd = shipper_cmd();
@@ -738,10 +784,9 @@ mod state_updated_atomically {
         let (new_path, real_cargo, fake_cargo) = setup_fake_cargo(td.path());
         let state_dir = td.path().join(".shipper");
 
-        // Publish fails first: version-check 404, cargo fails,
-        // post-failure 404, final-chance 404 → 3 requests.
-        // Resume: version-check 404, cargo succeeds, readiness 200 → 2 requests.
-        let registry = spawn_registry(vec![404, 404, 404, 404, 200], 6);
+        // Publish fails first: initial version-check 404 and cargo fail.
+        // Resume confirms publish with 2 additional registry checks (plus one from initial pre-check).
+        let registry = spawn_registry(vec![404, 404, 200, 200], 3);
 
         shipper_cmd()
             .arg("--manifest-path")
@@ -764,6 +809,7 @@ mod state_updated_atomically {
             .env("PATH", &new_path)
             .env("REAL_CARGO", &real_cargo)
             .env("SHIPPER_CARGO_BIN", &fake_cargo)
+            .env("SHIPPER_FAKE_PUBLISH_STDERR", "permission denied")
             .env("SHIPPER_FAKE_PUBLISH_EXIT", "1")
             .assert()
             .failure();
@@ -815,7 +861,7 @@ mod state_updated_atomically {
         let (new_path, real_cargo, fake_cargo) = setup_fake_cargo(td.path());
         let state_dir = td.path().join(".shipper");
 
-        let registry = spawn_registry(vec![404, 404, 404, 404, 200], 6);
+        let registry = spawn_registry(vec![404, 404, 200, 200], 3);
 
         shipper_cmd()
             .arg("--manifest-path")
@@ -838,6 +884,7 @@ mod state_updated_atomically {
             .env("PATH", &new_path)
             .env("REAL_CARGO", &real_cargo)
             .env("SHIPPER_CARGO_BIN", &fake_cargo)
+            .env("SHIPPER_FAKE_PUBLISH_STDERR", "permission denied")
             .env("SHIPPER_FAKE_PUBLISH_EXIT", "1")
             .assert()
             .failure();
@@ -935,9 +982,9 @@ mod state_updated_atomically {
         let (new_path, real_cargo, fake_cargo) = setup_fake_cargo(td.path());
         let state_dir = td.path().join(".shipper");
 
-        // Publish: core 200 (skip), app 404 cargo-fail 404 404 → 4 requests.
-        // Resume: app 404, cargo ok, 200 → 2 requests.
-        let registry = spawn_registry(vec![200, 404, 404, 404, 404, 200], 7);
+        // Publish: core 200 (skip), app 404 cargo-fail.
+        // Resume: app confirms publish with 3 registry checks.
+        let registry = spawn_registry(vec![200, 404, 404, 404, 200, 200], 5);
 
         shipper_cmd()
             .arg("--manifest-path")
@@ -960,6 +1007,7 @@ mod state_updated_atomically {
             .env("PATH", &new_path)
             .env("REAL_CARGO", &real_cargo)
             .env("SHIPPER_CARGO_BIN", &fake_cargo)
+            .env("SHIPPER_FAKE_PUBLISH_STDERR", "permission denied")
             .env("SHIPPER_FAKE_PUBLISH_EXIT", "1")
             .assert()
             .failure();
@@ -1002,3 +1050,7 @@ mod state_updated_atomically {
         registry.join();
     }
 }
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};

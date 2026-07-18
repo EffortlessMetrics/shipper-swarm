@@ -113,10 +113,16 @@ fn apply_event(
             progress.state = PackageState::Pending;
             progress.last_updated_at = event.timestamp;
         }
-        // A readiness check starts only after Cargo has accepted the upload.
+        // A package upload starts only after Cargo has accepted the upload.
         // This is the durable, backward-compatible checkpoint for Uploaded;
         // a later PackagePublished event advances the projection to Published.
         EventType::ReadinessStarted { .. } => {
+            if let Some(progress) = ensure_event_package(packages, event, event.timestamp) {
+                progress.state = PackageState::Uploaded;
+                progress.last_updated_at = event.timestamp;
+            }
+        }
+        EventType::PackageUploaded => {
             if let Some(progress) = ensure_event_package(packages, event, event.timestamp) {
                 progress.state = PackageState::Uploaded;
                 progress.last_updated_at = event.timestamp;
@@ -345,7 +351,43 @@ mod tests {
     }
 
     #[test]
-    fn rebuild_readiness_started_projects_uploaded_until_published() {
+    fn rebuild_package_uploaded_projects_uploaded_until_published() {
+        let td = tempdir().expect("tempdir");
+        let events_path = td.path().join("events.jsonl");
+        write_events(
+            &events_path,
+            vec![
+                event(
+                    0,
+                    "all",
+                    EventType::PlanCreated {
+                        plan_id: "plan-123".to_string(),
+                        package_count: 1,
+                    },
+                ),
+                event(1, "demo@0.1.0", EventType::PackageUploaded),
+            ],
+        );
+
+        let state = rebuild_state_from_events(&events_path, options()).expect("rebuild");
+        let progress = state.packages.get("demo@0.1.0").expect("package");
+        assert_eq!(progress.state, PackageState::Uploaded);
+        assert_eq!(progress.last_updated_at, ts(1));
+
+        write_events(
+            &events_path,
+            vec![event(
+                2,
+                "demo@0.1.0",
+                EventType::PackagePublished { duration_ms: 10 },
+            )],
+        );
+        let state = rebuild_state_from_events(&events_path, options()).expect("rebuild");
+        assert_eq!(state.packages["demo@0.1.0"].state, PackageState::Published);
+    }
+
+    #[test]
+    fn rebuild_readiness_started_still_projects_uploaded_for_compatibility() {
         let td = tempdir().expect("tempdir");
         let events_path = td.path().join("events.jsonl");
         write_events(
@@ -373,17 +415,6 @@ mod tests {
         let progress = state.packages.get("demo@0.1.0").expect("package");
         assert_eq!(progress.state, PackageState::Uploaded);
         assert_eq!(progress.last_updated_at, ts(1));
-
-        write_events(
-            &events_path,
-            vec![event(
-                2,
-                "demo@0.1.0",
-                EventType::PackagePublished { duration_ms: 10 },
-            )],
-        );
-        let state = rebuild_state_from_events(&events_path, options()).expect("rebuild");
-        assert_eq!(state.packages["demo@0.1.0"].state, PackageState::Published);
     }
 
     #[test]
