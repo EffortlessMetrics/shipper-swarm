@@ -18,10 +18,32 @@ use crate::registry::RegistryClient;
 use crate::runtime::execution::{pkg_key, update_state_locked};
 use crate::state::events;
 use shipper_types::{
-    ErrorClass, EventType, ExecutionState, PackageEvidence, PackageProgress, PackageReceipt,
-    PackageState, PlannedPackage, PublishLevel, ReadinessConfig, Registry, ReleasePlan,
-    RuntimeOptions,
+    AttemptDetail, ErrorClass, EventType, ExecutionState, PackageEvidence, PackageProgress,
+    PackageReceipt, PackageState, PlannedPackage, PublishLevel, ReadinessConfig, Registry,
+    ReleasePlan, RuntimeOptions,
 };
+
+fn error_class_rank(error_class: &Option<ErrorClass>) -> u8 {
+    match error_class {
+        Some(ErrorClass::Retryable) => 0,
+        Some(ErrorClass::Permanent) => 1,
+        Some(ErrorClass::Ambiguous) => 2,
+        None => 3,
+    }
+}
+
+fn sort_attempt_history_by_fields(history: &mut Vec<AttemptDetail>) {
+    history.sort_by_key(|entry| {
+        (
+            entry.package.clone(),
+            entry.version.clone(),
+            entry.attempt,
+            entry.max_attempts,
+            error_class_rank(&entry.error_class),
+            entry.next_attempt_at,
+        )
+    });
+}
 
 fn test_registry_client(ws: &PlannedWorkspace) -> RegistryClient {
     RegistryClient::new(ws.plan.registry.clone()).expect("registry client")
@@ -39,6 +61,20 @@ struct CollectingReporter {
 }
 
 impl Reporter for CollectingReporter {
+    fn info(&mut self, msg: &str) {
+        self.infos.push(msg.to_string());
+    }
+
+    fn warn(&mut self, msg: &str) {
+        self.warns.push(msg.to_string());
+    }
+
+    fn error(&mut self, msg: &str) {
+        self.errors.push(msg.to_string());
+    }
+}
+
+impl crate::engine::Reporter for CollectingReporter {
     fn info(&mut self, msg: &str) {
         self.infos.push(msg.to_string());
     }
@@ -355,6 +391,76 @@ fn init_state_for_package(
         attempt_history: Vec::new(),
         packages,
     }
+}
+
+fn planned_workspace_with_dependency(workspace_root: &Path, api_base: String) -> PlannedWorkspace {
+    PlannedWorkspace {
+        workspace_root: workspace_root.to_path_buf(),
+        plan: ReleasePlan {
+            plan_version: "1".to_string(),
+            plan_id: "plan-multi-level".to_string(),
+            created_at: Utc::now(),
+            registry: Registry {
+                name: "crates-io".to_string(),
+                api_base,
+                index_base: None,
+            },
+            packages: vec![
+                PlannedPackage {
+                    name: "base".to_string(),
+                    version: "1.0.0".to_string(),
+                    manifest_path: workspace_root.join("base").join("Cargo.toml"),
+                    regime: None,
+                },
+                PlannedPackage {
+                    name: "dependent".to_string(),
+                    version: "2.0.0".to_string(),
+                    manifest_path: workspace_root.join("dependent").join("Cargo.toml"),
+                    regime: None,
+                },
+            ],
+            dependencies: BTreeMap::from([("dependent".to_string(), vec!["base".to_string()])]),
+        },
+        skipped: vec![],
+    }
+}
+
+fn init_state_for_workspace(plan: &PlannedWorkspace) -> ExecutionState {
+    let mut packages = BTreeMap::new();
+    for p in &plan.plan.packages {
+        packages.insert(
+            pkg_key(&p.name, &p.version),
+            PackageProgress {
+                name: p.name.clone(),
+                version: p.version.clone(),
+                attempts: 0,
+                state: PackageState::Pending,
+                last_updated_at: Utc::now(),
+            },
+        );
+    }
+
+    ExecutionState {
+        state_version: crate::state::execution_state::CURRENT_STATE_VERSION.to_string(),
+        plan_id: plan.plan.plan_id.clone(),
+        registry: plan.plan.registry.clone(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        attempt_history: Vec::new(),
+        packages,
+    }
+}
+
+fn init_state_with_uploaded_checkpoint(
+    plan: &PlannedWorkspace,
+    uploaded_key: &str,
+) -> ExecutionState {
+    let mut state = init_state_for_workspace(plan);
+    if let Some(progress) = state.packages.get_mut(uploaded_key) {
+        progress.state = PackageState::Uploaded;
+        progress.attempts = 1;
+    }
+    state
 }
 
 #[test]
@@ -923,6 +1029,439 @@ fn test_run_publish_parallel_multiple_levels() {
         },
     );
     server.join();
+}
+
+#[test]
+#[serial]
+fn test_run_publish_mode_parity_for_multi_level_plan() {
+    let td = tempdir().expect("tempdir");
+    let bin = td.path().join("bin");
+    write_fake_tools(&bin);
+
+    let server_sequential = spawn_registry_server(
+        BTreeMap::from([
+            (
+                "/api/v1/crates/base/1.0.0".to_string(),
+                vec![(404, "{}".to_string()), (200, "{}".to_string())],
+            ),
+            (
+                "/api/v1/crates/dependent/2.0.0".to_string(),
+                vec![(404, "{}".to_string()), (200, "{}".to_string())],
+            ),
+        ]),
+        4,
+    );
+    let ws_seq = planned_workspace_with_dependency(td.path(), server_sequential.base_url.clone());
+    let reg_seq = test_registry_client(&ws_seq);
+    let state_dir_seq = td.path().join(".shipper-seq");
+    fs::create_dir_all(&state_dir_seq).expect("mkdir");
+    let mut opts_seq = default_opts(state_dir_seq.clone());
+    opts_seq.parallel.enabled = false;
+
+    let server_parallel = spawn_registry_server(
+        BTreeMap::from([
+            (
+                "/api/v1/crates/base/1.0.0".to_string(),
+                vec![(404, "{}".to_string()), (200, "{}".to_string())],
+            ),
+            (
+                "/api/v1/crates/dependent/2.0.0".to_string(),
+                vec![(404, "{}".to_string()), (200, "{}".to_string())],
+            ),
+        ]),
+        4,
+    );
+    let ws_par = planned_workspace_with_dependency(td.path(), server_parallel.base_url.clone());
+    let reg_par = test_registry_client(&ws_par);
+    let state_dir_par = td.path().join(".shipper-par");
+    fs::create_dir_all(&state_dir_par).expect("mkdir");
+    let opts_par = default_opts(state_dir_par.clone());
+
+    let mut state_seq = init_state_for_workspace(&ws_seq);
+    let mut state_par = init_state_for_workspace(&ws_par);
+    let seq_events_path = events::events_path(&state_dir_seq);
+    let mut seq_event_log = events::EventLog::new();
+    let mut seq_reporter = CollectingReporter::default();
+
+    let mut par_reporter = CollectingReporter::default();
+
+    temp_env::with_var(
+        "SHIPPER_CARGO_BIN",
+        Some(fake_cargo_path(&bin).to_str().expect("utf8")),
+        || {
+            let seq_receipts = crate::engine::execute_package::run_sequential_scheduler(
+                &ws_seq,
+                &opts_seq,
+                &mut state_seq,
+                &state_dir_seq,
+                &reg_seq,
+                &mut seq_event_log,
+                &seq_events_path,
+                &mut seq_reporter,
+            )
+            .expect("sequential publish");
+
+            let mut par_receipts = run_publish_parallel(
+                &ws_par,
+                &opts_par,
+                &mut state_par,
+                &state_dir_par,
+                &reg_par,
+                &mut par_reporter,
+            )
+            .expect("parallel publish");
+
+            let mut seq_receipts = seq_receipts;
+            seq_receipts.sort_by(|a, b| a.name.cmp(&b.name));
+            par_receipts.sort_by(|a, b| a.name.cmp(&b.name));
+
+            assert_eq!(
+                seq_receipts.len(),
+                par_receipts.len(),
+                "receipt counts must match"
+            );
+            assert_eq!(
+                state_seq.packages.len(),
+                state_par.packages.len(),
+                "package count"
+            );
+
+            for (seq, par) in seq_receipts.iter().zip(par_receipts.iter()) {
+                assert_eq!(seq.name, par.name);
+                assert_eq!(seq.version, par.version);
+                assert_eq!(seq.state, par.state);
+                assert_eq!(seq.attempts, par.attempts);
+            }
+
+            for key in ["base@1.0.0", "dependent@2.0.0"] {
+                let seq_pkg = state_seq.packages.get(key).expect("sequential state");
+                let par_pkg = state_par.packages.get(key).expect("parallel state");
+                assert_eq!(seq_pkg.state, par_pkg.state);
+                assert_eq!(seq_pkg.attempts, par_pkg.attempts);
+            }
+
+            let mut seq_attempt_history = state_seq.attempt_history.clone();
+            let mut par_attempt_history = state_par.attempt_history.clone();
+            sort_attempt_history_by_fields(&mut seq_attempt_history);
+            sort_attempt_history_by_fields(&mut par_attempt_history);
+
+            assert_eq!(
+                seq_attempt_history.len(),
+                par_attempt_history.len(),
+                "attempt history length"
+            );
+
+            for (seq, par) in seq_attempt_history.iter().zip(par_attempt_history.iter()) {
+                assert_eq!(seq.package, par.package);
+                assert_eq!(seq.version, par.version);
+                assert_eq!(seq.attempt, par.attempt);
+                assert_eq!(seq.max_attempts, par.max_attempts);
+                assert_eq!(seq.error_class, par.error_class);
+                assert_eq!(seq.next_attempt_at.is_some(), par.next_attempt_at.is_some());
+            }
+        },
+    );
+
+    server_sequential.join();
+    server_parallel.join();
+}
+
+#[test]
+#[serial]
+fn test_run_publish_mode_retry_parity_for_multi_level_plan() {
+    let td = tempdir().expect("tempdir");
+    let bin = td.path().join("bin");
+    write_fake_tools(&bin);
+
+    let transient_responses = vec![
+        (404, "{}".to_string()),
+        (404, "{}".to_string()),
+        (200, "{}".to_string()),
+    ];
+
+    let server_sequential = spawn_registry_server(
+        BTreeMap::from([
+            (
+                "/api/v1/crates/base/1.0.0".to_string(),
+                transient_responses.clone(),
+            ),
+            (
+                "/api/v1/crates/dependent/2.0.0".to_string(),
+                transient_responses.clone(),
+            ),
+        ]),
+        6,
+    );
+    let ws_seq = planned_workspace_with_dependency(td.path(), server_sequential.base_url.clone());
+    let reg_seq = test_registry_client(&ws_seq);
+    let state_dir_seq = td.path().join(".shipper-seq");
+    fs::create_dir_all(&state_dir_seq).expect("mkdir");
+    let mut opts_seq = default_opts(state_dir_seq.clone());
+    opts_seq.parallel.enabled = false;
+    opts_seq.max_attempts = 2;
+
+    let server_parallel = spawn_registry_server(
+        BTreeMap::from([
+            (
+                "/api/v1/crates/base/1.0.0".to_string(),
+                transient_responses.clone(),
+            ),
+            (
+                "/api/v1/crates/dependent/2.0.0".to_string(),
+                transient_responses.clone(),
+            ),
+        ]),
+        6,
+    );
+    let ws_par = planned_workspace_with_dependency(td.path(), server_parallel.base_url.clone());
+    let reg_par = test_registry_client(&ws_par);
+    let state_dir_par = td.path().join(".shipper-par");
+    fs::create_dir_all(&state_dir_par).expect("mkdir");
+    let mut opts_par = default_opts(state_dir_par.clone());
+    opts_par.max_attempts = 2;
+
+    let mut state_seq = init_state_for_workspace(&ws_seq);
+    let mut state_par = init_state_for_workspace(&ws_par);
+    let seq_events_path = events::events_path(&state_dir_seq);
+    let mut seq_event_log = events::EventLog::new();
+    let mut seq_reporter = CollectingReporter::default();
+
+    let mut par_reporter = CollectingReporter::default();
+
+    temp_env::with_vars(
+        [
+            (
+                "SHIPPER_CARGO_BIN",
+                Some(fake_cargo_path(&bin).to_str().expect("utf8")),
+            ),
+            ("SHIPPER_CARGO_EXIT", Some("1")),
+            ("SHIPPER_CARGO_STDERR", Some("timeout talking to server")),
+            ("SHIPPER_CARGO_STDOUT", Some("")),
+        ],
+        || {
+            let seq_receipts = crate::engine::execute_package::run_sequential_scheduler(
+                &ws_seq,
+                &opts_seq,
+                &mut state_seq,
+                &state_dir_seq,
+                &reg_seq,
+                &mut seq_event_log,
+                &seq_events_path,
+                &mut seq_reporter,
+            )
+            .expect("sequential publish");
+
+            let mut par_receipts = run_publish_parallel(
+                &ws_par,
+                &opts_par,
+                &mut state_par,
+                &state_dir_par,
+                &reg_par,
+                &mut par_reporter,
+            )
+            .expect("parallel publish");
+
+            let mut seq_receipts = seq_receipts;
+            seq_receipts.sort_by(|a, b| {
+                a.name
+                    .cmp(&b.name)
+                    .then_with(|| a.version.cmp(&b.version))
+                    .then_with(|| a.attempts.cmp(&b.attempts))
+            });
+            par_receipts.sort_by(|a, b| {
+                a.name
+                    .cmp(&b.name)
+                    .then_with(|| a.version.cmp(&b.version))
+                    .then_with(|| a.attempts.cmp(&b.attempts))
+            });
+
+            assert_eq!(
+                seq_receipts.len(),
+                par_receipts.len(),
+                "receipt counts must match"
+            );
+
+            for (seq, par) in seq_receipts.iter().zip(par_receipts.iter()) {
+                assert_eq!(seq.name, par.name);
+                assert_eq!(seq.version, par.version);
+                assert_eq!(seq.state, par.state);
+                assert_eq!(seq.attempts, par.attempts);
+            }
+
+            for key in ["base@1.0.0", "dependent@2.0.0"] {
+                let seq_pkg = state_seq.packages.get(key).expect("sequential state");
+                let par_pkg = state_par.packages.get(key).expect("parallel state");
+                assert_eq!(seq_pkg.state, par_pkg.state);
+                assert_eq!(seq_pkg.attempts, par_pkg.attempts);
+            }
+
+            let mut seq_attempt_history = state_seq.attempt_history.clone();
+            let mut par_attempt_history = state_par.attempt_history.clone();
+            sort_attempt_history_by_fields(&mut seq_attempt_history);
+            sort_attempt_history_by_fields(&mut par_attempt_history);
+
+            assert!(
+                !seq_attempt_history.is_empty(),
+                "expected retry attempt history entries",
+            );
+            assert_eq!(
+                seq_attempt_history.len(),
+                par_attempt_history.len(),
+                "attempt history length"
+            );
+
+            for (seq, par) in seq_attempt_history.iter().zip(par_attempt_history.iter()) {
+                assert_eq!(seq.package, par.package);
+                assert_eq!(seq.version, par.version);
+                assert_eq!(seq.attempt, par.attempt);
+                assert_eq!(seq.max_attempts, par.max_attempts);
+                assert_eq!(seq.error_class, par.error_class);
+                assert_eq!(seq.next_attempt_at.is_some(), par.next_attempt_at.is_some());
+            }
+        },
+    );
+
+    server_sequential.join();
+    server_parallel.join();
+}
+
+#[test]
+#[serial]
+fn test_run_publish_mode_parity_from_uploaded_checkpoint() {
+    let td = tempdir().expect("tempdir");
+    let bin = td.path().join("bin");
+    write_fake_tools(&bin);
+
+    let server_sequential = spawn_registry_server(
+        BTreeMap::from([
+            (
+                "/api/v1/crates/base/1.0.0".to_string(),
+                vec![(200, "{}".to_string())],
+            ),
+            (
+                "/api/v1/crates/dependent/2.0.0".to_string(),
+                vec![(404, "{}".to_string()), (200, "{}".to_string())],
+            ),
+        ]),
+        3,
+    );
+    let ws_seq = planned_workspace_with_dependency(td.path(), server_sequential.base_url.clone());
+    let reg_seq = test_registry_client(&ws_seq);
+    let state_dir_seq = td.path().join(".shipper-seq");
+    fs::create_dir_all(&state_dir_seq).expect("mkdir");
+    let mut opts_seq = default_opts(state_dir_seq.clone());
+    opts_seq.parallel.enabled = false;
+    opts_seq.readiness.enabled = false;
+    opts_seq.max_attempts = 2;
+
+    let server_parallel = spawn_registry_server(
+        BTreeMap::from([
+            (
+                "/api/v1/crates/base/1.0.0".to_string(),
+                vec![(200, "{}".to_string())],
+            ),
+            (
+                "/api/v1/crates/dependent/2.0.0".to_string(),
+                vec![(404, "{}".to_string()), (200, "{}".to_string())],
+            ),
+        ]),
+        3,
+    );
+    let ws_par = planned_workspace_with_dependency(td.path(), server_parallel.base_url.clone());
+    let reg_par = test_registry_client(&ws_par);
+    let state_dir_par = td.path().join(".shipper-par");
+    fs::create_dir_all(&state_dir_par).expect("mkdir");
+    let mut opts_par = default_opts(state_dir_par.clone());
+    opts_par.readiness.enabled = false;
+    opts_par.max_attempts = 2;
+
+    let mut state_seq = init_state_with_uploaded_checkpoint(&ws_seq, &pkg_key("base", "1.0.0"));
+    let mut state_par = init_state_with_uploaded_checkpoint(&ws_par, &pkg_key("base", "1.0.0"));
+    let seq_events_path = events::events_path(&state_dir_seq);
+    let mut seq_event_log = events::EventLog::new();
+    let mut seq_reporter = CollectingReporter::default();
+
+    let mut par_reporter = CollectingReporter::default();
+
+    temp_env::with_vars(
+        [
+            (
+                "SHIPPER_CARGO_BIN",
+                Some(fake_cargo_path(&bin).to_str().expect("utf8")),
+            ),
+            ("SHIPPER_CARGO_EXIT", Some("0")),
+        ],
+        || {
+            let seq_receipts = crate::engine::execute_package::run_sequential_scheduler(
+                &ws_seq,
+                &opts_seq,
+                &mut state_seq,
+                &state_dir_seq,
+                &reg_seq,
+                &mut seq_event_log,
+                &seq_events_path,
+                &mut seq_reporter,
+            )
+            .expect("sequential publish");
+
+            let mut par_receipts = run_publish_parallel(
+                &ws_par,
+                &opts_par,
+                &mut state_par,
+                &state_dir_par,
+                &reg_par,
+                &mut par_reporter,
+            )
+            .expect("parallel publish");
+
+            let mut seq_receipts = seq_receipts;
+            seq_receipts.sort_by(|a, b| a.name.cmp(&b.name));
+            par_receipts.sort_by(|a, b| a.name.cmp(&b.name));
+
+            assert_eq!(
+                seq_receipts.len(),
+                par_receipts.len(),
+                "receipt counts match"
+            );
+
+            for (seq, par) in seq_receipts.iter().zip(par_receipts.iter()) {
+                assert_eq!(seq.name, par.name);
+                assert_eq!(seq.version, par.version);
+                assert_eq!(seq.state, par.state);
+                assert_eq!(seq.attempts, par.attempts);
+            }
+
+            for key in ["base@1.0.0", "dependent@2.0.0"] {
+                let seq_pkg = state_seq.packages.get(key).expect("sequential state");
+                let par_pkg = state_par.packages.get(key).expect("parallel state");
+                assert_eq!(seq_pkg.state, par_pkg.state);
+                assert_eq!(seq_pkg.attempts, par_pkg.attempts);
+            }
+
+            let mut seq_attempt_history = state_seq.attempt_history.clone();
+            let mut par_attempt_history = state_par.attempt_history.clone();
+            sort_attempt_history_by_fields(&mut seq_attempt_history);
+            sort_attempt_history_by_fields(&mut par_attempt_history);
+
+            assert_eq!(
+                seq_attempt_history.len(),
+                par_attempt_history.len(),
+                "attempt history length"
+            );
+
+            for (seq, par) in seq_attempt_history.iter().zip(par_attempt_history.iter()) {
+                assert_eq!(seq.package, par.package);
+                assert_eq!(seq.version, par.version);
+                assert_eq!(seq.attempt, par.attempt);
+                assert_eq!(seq.max_attempts, par.max_attempts);
+                assert_eq!(seq.error_class, par.error_class);
+                assert_eq!(seq.next_attempt_at.is_some(), par.next_attempt_at.is_some());
+            }
+        },
+    );
+
+    server_sequential.join();
+    server_parallel.join();
 }
 
 #[test]
