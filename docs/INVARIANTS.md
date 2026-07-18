@@ -41,12 +41,12 @@ Never derive critical decisions from CLI stdout alone. Stdout is a human-facing 
 
 ## Uploaded recovery checkpoint
 
-`EventType::ReadinessStarted` is emitted only after Cargo has accepted an
-upload. It is therefore the durable checkpoint for `PackageState::Uploaded`:
-state rebuild maps that event to `uploaded`, and a later
-`package_published` event advances the projection to `published`. This keeps
-the event vocabulary backward-compatible while making interruption between
-Cargo completion and registry readiness mechanically recoverable.
+`EventType::PackageUploaded` is emitted only after Cargo has accepted an
+upload. It is now the durable checkpoint for `PackageState::Uploaded`:
+state rebuild maps that event to `uploaded`, and a later `package_published`
+event advances the projection to `published`. `EventType::ReadinessStarted`
+continues to map to `uploaded` for backward compatibility with historical
+event logs.
 
 Attempt details are appended to `state.json` through the same event-first
 transition boundary as the matching terminal, reconciliation, or retry event.

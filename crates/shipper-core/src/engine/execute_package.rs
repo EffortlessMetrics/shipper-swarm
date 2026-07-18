@@ -1099,8 +1099,10 @@ pub(crate) fn publish_package_with_timeout(
                     redacted_message: None,
                 };
                 cargo_succeeded = true;
-                // ReadinessStarted is the durable checkpoint that proves
-                // cargo accepted the upload and projects Uploaded on rebuild.
+                // PackageUploaded is the durable checkpoint that proves cargo
+                // accepted the upload and projects Uploaded on rebuild.
+                // Keep the older ReadinessStarted mapping as a compatibility
+                // bridge for historical event logs that predate this seam.
                 if let Err(e) = commit_with_attempt_detail_transition(
                     st,
                     state_dir,
@@ -1110,9 +1112,7 @@ pub(crate) fn publish_package_with_timeout(
                     PackageState::Uploaded,
                     PublishEvent {
                         timestamp: Utc::now(),
-                        event_type: EventType::ReadinessStarted {
-                            method: readiness_config.method,
-                        },
+                        event_type: EventType::PackageUploaded,
                         package: pkg_label.clone(),
                     },
                     attempt_detail,
