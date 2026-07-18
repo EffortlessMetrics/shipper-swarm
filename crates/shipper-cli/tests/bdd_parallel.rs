@@ -193,7 +193,7 @@ fn spawn_registry(statuses: Vec<u16>, expected_requests: usize) -> TestRegistry 
     let base_url = format!("http://{}", server.server_addr());
     let handle = thread::spawn(move || {
         for idx in 0..expected_requests {
-            let req = match server.recv_timeout(Duration::from_secs(30)) {
+            let req = match server.recv_timeout(Duration::from_secs(5)) {
                 Ok(Some(r)) => r,
                 _ => break,
             };
@@ -538,6 +538,10 @@ mod failure_stops_subsequent_levels {
             .arg("0ms")
             .arg("--verify-poll")
             .arg("0ms")
+            .arg("--readiness-timeout")
+            .arg("250ms")
+            .arg("--readiness-poll")
+            .arg("10ms")
             .arg("--max-attempts")
             .arg("1")
             .arg("--state-dir")

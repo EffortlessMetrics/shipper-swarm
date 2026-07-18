@@ -133,6 +133,8 @@ fn normalize_stderr(raw: &str) -> String {
 
     normalized = normalized
         .replace("\r\n", "\n")
+        .replace("Temp/.tmp", "<TMPDIR>/")
+        .replace("temp/.tmp", "<TMPDIR>/")
         // Order matters: strip `shipper-cli.exe` → `shipper-cli` before
         // `shipper.exe` → `shipper`, otherwise the second rule eats the
         // first's prefix and we lose the `-cli` suffix.
@@ -156,6 +158,7 @@ fn normalize_stderr(raw: &str) -> String {
 }
 
 fn normalize_tempdir_paths(raw: &str, tempdir: &Path) -> String {
+    let raw = raw.replace('\\', "/");
     let native = tempdir.to_string_lossy();
     let slash_path = native.replace('\\', "/");
     let mut normalized = raw
@@ -175,6 +178,29 @@ fn normalize_tempdir_paths(raw: &str, tempdir: &Path) -> String {
     {
         let drive_stripped = &slash_path[3..];
         normalized = normalized.replace(drive_stripped, "<TMPDIR>");
+    }
+
+    if let Some(leaf_name) = tempdir.file_name().and_then(|name| name.to_str()) {
+        let variants = [format!("Temp/{leaf_name}"), format!("temp/{leaf_name}")];
+        for variant in variants {
+            normalized = normalized.replace(&variant, "<TMPDIR>");
+        }
+    }
+
+    for marker in ["Temp/.tmp", "temp/.tmp"] {
+        let mut cursor = 0;
+        while let Some(offset) = normalized[cursor..].find(marker) {
+            let start = cursor + offset;
+            let after_marker = start + marker.len();
+            if let Some(slash_rel) = normalized[after_marker..].find('/') {
+                let end = after_marker + slash_rel;
+                normalized.replace_range(start..end, "<TMPDIR>");
+                cursor = start + "<TMPDIR>".len();
+            } else {
+                normalized.replace_range(start.., "<TMPDIR>");
+                cursor = normalized.len();
+            }
+        }
     }
 
     normalized

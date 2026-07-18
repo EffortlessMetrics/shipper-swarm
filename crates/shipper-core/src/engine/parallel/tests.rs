@@ -14,14 +14,18 @@ use super::publish::{emit_retry_backoff, publish_package, run_publish_level};
 use super::run_publish_parallel_inner as run_publish_parallel;
 use super::*;
 use crate::plan::PlannedWorkspace;
+use crate::registry::RegistryClient;
 use crate::runtime::execution::{pkg_key, update_state_locked};
 use crate::state::events;
-use shipper_registry::HttpRegistryClient as RegistryClient;
 use shipper_types::{
     ErrorClass, EventType, ExecutionState, PackageEvidence, PackageProgress, PackageReceipt,
     PackageState, PlannedPackage, PublishLevel, ReadinessConfig, Registry, ReleasePlan,
     RuntimeOptions,
 };
+
+fn test_registry_client(ws: &PlannedWorkspace) -> RegistryClient {
+    RegistryClient::new(ws.plan.registry.clone()).expect("registry client")
+}
 
 fn make_send_reporter() -> Arc<SendReporter> {
     Arc::new(SendReporter::default())
@@ -77,7 +81,8 @@ fn emit_retry_backoff_does_not_block_other_reporter_calls_during_sleep() {
             chrono::Utc::now() + chrono::Duration::milliseconds(250),
             ErrorClass::Retryable,
             "rate limited",
-        );
+        )
+        .expect("backoff should be recorded");
     });
 
     std::thread::sleep(Duration::from_millis(25));
@@ -151,7 +156,7 @@ fn drain_retry_waits_forwards_live_notice_before_worker_sleep_elapses() {
     drain_retry_waits(&mut host_reporter, send_reporter.as_ref());
 
     let forwarded_delay = rx
-        .recv_timeout(Duration::from_millis(100))
+        .recv_timeout(Duration::from_millis(500))
         .expect("host reporter should observe retry wait promptly");
     assert!(
         forwarded_delay <= delay && forwarded_delay > Duration::ZERO,
@@ -228,7 +233,6 @@ fn spawn_registry_server(
         for _ in 0..expected_requests {
             let req = server.recv().expect("request");
             let path = req.url().to_string();
-
             let response = if let Some(list) = routes.get_mut(&path) {
                 if list.is_empty() {
                     (404, "{}".to_string())
@@ -370,7 +374,7 @@ fn test_publish_package_skips_already_published() {
     );
 
     let ws = planned_workspace(td.path(), server.base_url.clone());
-    let reg = RegistryClient::new(ws.plan.registry.api_base.as_str());
+    let reg = test_registry_client(&ws);
     let opts = default_opts(PathBuf::from(".shipper"));
     let state_dir = td.path().join(".shipper");
     let st = Arc::new(Mutex::new(init_state_for_package(
@@ -429,7 +433,7 @@ fn test_publish_package_publishes_successfully() {
     );
 
     let ws = planned_workspace(td.path(), server.base_url.clone());
-    let reg = RegistryClient::new(ws.plan.registry.api_base.as_str());
+    let reg = test_registry_client(&ws);
     let opts = default_opts(PathBuf::from(".shipper"));
     let state_dir = td.path().join(".shipper");
     let st = Arc::new(Mutex::new(init_state_for_package(
@@ -471,7 +475,7 @@ fn test_publish_package_publishes_successfully() {
                 persisted
                     .all_events()
                     .iter()
-                    .any(|event| matches!(event.event_type, EventType::ReadinessStarted { .. }))
+                    .any(|event| matches!(event.event_type, EventType::PackageUploaded { .. }))
             );
         },
     );
@@ -495,7 +499,7 @@ fn test_publish_package_handles_permanent_failure() {
     );
 
     let ws = planned_workspace(td.path(), server.base_url.clone());
-    let reg = RegistryClient::new(ws.plan.registry.api_base.as_str());
+    let reg = test_registry_client(&ws);
     let opts = default_opts(PathBuf::from(".shipper"));
     let state_dir = td.path().join(".shipper");
     let st = Arc::new(Mutex::new(init_state_for_package(
@@ -570,7 +574,7 @@ fn test_publish_package_retries_on_transient() {
     );
 
     let ws = planned_workspace(td.path(), server.base_url.clone());
-    let reg = RegistryClient::new(ws.plan.registry.api_base.as_str());
+    let reg = test_registry_client(&ws);
     let mut opts = default_opts(PathBuf::from(".shipper"));
     opts.max_attempts = 2;
     let state_dir = td.path().join(".shipper");
@@ -667,7 +671,7 @@ fn test_run_publish_level_processes_packages() {
         skipped: vec![],
     };
 
-    let reg = RegistryClient::new(ws.plan.registry.api_base.as_str());
+    let reg = test_registry_client(&ws);
     let opts = default_opts(PathBuf::from(".shipper"));
     let state_dir = td.path().join(".shipper");
     let mut packages = BTreeMap::new();
@@ -782,7 +786,7 @@ fn test_run_publish_parallel_single_package() {
     );
 
     let ws = planned_workspace(td.path(), server.base_url.clone());
-    let reg = RegistryClient::new(ws.plan.registry.api_base.as_str());
+    let reg = test_registry_client(&ws);
     let state_dir = td.path().join(".shipper");
     let opts = default_opts(state_dir.clone());
     let mut st = init_state_for_package(&ws.plan.plan_id, &ws.plan.registry, "demo", "0.1.0");
@@ -859,7 +863,7 @@ fn test_run_publish_parallel_multiple_levels() {
         skipped: vec![],
     };
 
-    let reg = RegistryClient::new(ws.plan.registry.api_base.as_str());
+    let reg = test_registry_client(&ws);
     let state_dir = td.path().join(".shipper");
     let opts = default_opts(state_dir.clone());
 
@@ -932,13 +936,13 @@ fn test_publish_package_handles_uploaded_resume() {
     let server = spawn_registry_server(
         BTreeMap::from([(
             "/api/v1/crates/demo/0.1.0".to_string(),
-            vec![(404, "{}".to_string()), (200, "{}".to_string())],
+            vec![(200, "{}".to_string())],
         )]),
-        2,
+        1,
     );
 
     let ws = planned_workspace(td.path(), server.base_url.clone());
-    let reg = RegistryClient::new(ws.plan.registry.api_base.as_str());
+    let reg = test_registry_client(&ws);
     let state_dir = td.path().join(".shipper");
     let opts = default_opts(state_dir.clone());
 
@@ -1023,7 +1027,7 @@ fn test_publish_package_records_attempt_evidence() {
     );
 
     let ws = planned_workspace(td.path(), server.base_url.clone());
-    let reg = RegistryClient::new(ws.plan.registry.api_base.as_str());
+    let reg = test_registry_client(&ws);
     let state_dir = td.path().join(".shipper");
     let opts = default_opts(state_dir.clone());
     let st = Arc::new(Mutex::new(init_state_for_package(
@@ -1139,7 +1143,7 @@ fn test_run_publish_level_respects_max_concurrent() {
         skipped: vec![],
     };
 
-    let reg = RegistryClient::new(ws.plan.registry.api_base.as_str());
+    let reg = test_registry_client(&ws);
     let state_dir = td.path().join(".shipper");
     let mut opts = default_opts(state_dir.clone());
     // Limit concurrency to 2 (with 4 packages, should chunk into 2 batches)
@@ -1292,7 +1296,7 @@ fn test_levels_execute_in_dependency_order() {
     assert_eq!(levels[1].packages[0].name, "b");
     assert_eq!(levels[2].packages[0].name, "c");
 
-    let reg = RegistryClient::new(ws.plan.registry.api_base.as_str());
+    let reg = test_registry_client(&ws);
     let state_dir = td.path().join(".shipper");
     let opts = default_opts(state_dir.clone());
     let mut packages = BTreeMap::new();
@@ -1399,7 +1403,7 @@ fn test_failed_level_stops_subsequent_levels() {
         skipped: vec![],
     };
 
-    let reg = RegistryClient::new(ws.plan.registry.api_base.as_str());
+    let reg = test_registry_client(&ws);
     let state_dir = td.path().join(".shipper");
     let mut opts = default_opts(state_dir.clone());
     opts.max_attempts = 1; // fail fast
@@ -1520,7 +1524,7 @@ fn test_partial_success_within_level() {
         skipped: vec![],
     };
 
-    let reg = RegistryClient::new(ws.plan.registry.api_base.as_str());
+    let reg = test_registry_client(&ws);
     let state_dir = td.path().join(".shipper");
     let mut opts = default_opts(state_dir.clone());
     opts.max_attempts = 1;
@@ -1653,7 +1657,7 @@ fn test_webhook_events_sent_on_publish() {
     });
 
     let ws = planned_workspace(td.path(), registry_server.base_url.clone());
-    let reg = RegistryClient::new(ws.plan.registry.api_base.as_str());
+    let reg = test_registry_client(&ws);
     let state_dir = td.path().join(".shipper");
     let mut opts = default_opts(state_dir.clone());
     opts.webhook = shipper_webhook::WebhookConfig {
@@ -1736,7 +1740,7 @@ fn test_resume_from_skips_earlier_levels() {
         skipped: vec![],
     };
 
-    let reg = RegistryClient::new(ws.plan.registry.api_base.as_str());
+    let reg = test_registry_client(&ws);
     let state_dir = td.path().join(".shipper");
     let mut opts = default_opts(state_dir.clone());
     opts.resume_from = Some("dependent".to_string());
@@ -1935,7 +1939,7 @@ fn test_all_packages_already_published() {
         skipped: vec![],
     };
 
-    let reg = RegistryClient::new(ws.plan.registry.api_base.as_str());
+    let reg = test_registry_client(&ws);
     let state_dir = td.path().join(".shipper");
     let opts = default_opts(state_dir.clone());
 
@@ -2058,7 +2062,7 @@ fn test_max_concurrency_one_serializes_execution() {
         skipped: vec![],
     };
 
-    let reg = RegistryClient::new(ws.plan.registry.api_base.as_str());
+    let reg = test_registry_client(&ws);
     let state_dir = td.path().join(".shipper");
     let mut opts = default_opts(state_dir.clone());
     opts.parallel.max_concurrent = 1; // force serialization
@@ -2251,7 +2255,7 @@ fn test_resume_from_nonexistent_skips_all_levels() {
     );
 
     let ws = planned_workspace(td.path(), server.base_url.clone());
-    let reg = RegistryClient::new(ws.plan.registry.api_base.as_str());
+    let reg = test_registry_client(&ws);
     let state_dir = td.path().join(".shipper");
     let mut opts = default_opts(state_dir.clone());
     opts.resume_from = Some("nonexistent-pkg".to_string());
@@ -2951,7 +2955,7 @@ fn test_error_in_first_level_prevents_all_subsequent() {
         skipped: vec![],
     };
 
-    let reg = RegistryClient::new(ws.plan.registry.api_base.as_str());
+    let reg = test_registry_client(&ws);
     let state_dir = td.path().join(".shipper");
     let mut opts = default_opts(state_dir.clone());
     opts.max_attempts = 1;
@@ -3041,7 +3045,7 @@ fn test_empty_plan_produces_no_receipts() {
         skipped: vec![],
     };
 
-    let reg = RegistryClient::new(ws.plan.registry.api_base.as_str());
+    let reg = test_registry_client(&ws);
     let state_dir = td.path().join(".shipper");
     let opts = default_opts(state_dir.clone());
     let mut st = ExecutionState {
@@ -3230,7 +3234,7 @@ fn test_max_concurrent_exceeds_package_count() {
         skipped: vec![],
     };
 
-    let reg = RegistryClient::new(ws.plan.registry.api_base.as_str());
+    let reg = test_registry_client(&ws);
     let state_dir = td.path().join(".shipper");
     let mut opts = default_opts(state_dir.clone());
     opts.parallel.max_concurrent = 100; // far exceeds 2 packages
@@ -3344,7 +3348,7 @@ fn test_independent_failures_both_reported() {
         skipped: vec![],
     };
 
-    let reg = RegistryClient::new(ws.plan.registry.api_base.as_str());
+    let reg = test_registry_client(&ws);
     let state_dir = td.path().join(".shipper");
     let mut opts = default_opts(state_dir.clone());
     opts.max_attempts = 1;
@@ -3460,7 +3464,7 @@ fn test_concurrent_state_updates_consistent() {
         skipped: vec![],
     };
 
-    let reg = RegistryClient::new(ws.plan.registry.api_base.as_str());
+    let reg = test_registry_client(&ws);
     let state_dir = td.path().join(".shipper");
     let mut opts = default_opts(state_dir.clone());
     opts.parallel.max_concurrent = 4; // all run concurrently
@@ -3768,7 +3772,7 @@ fn test_level_message_includes_max_concurrent() {
         skipped: vec![],
     };
 
-    let reg = RegistryClient::new(ws.plan.registry.api_base.as_str());
+    let reg = test_registry_client(&ws);
     let state_dir = td.path().join(".shipper");
     let mut opts = default_opts(state_dir.clone());
     opts.parallel.max_concurrent = 2;
@@ -3860,7 +3864,7 @@ fn test_state_persisted_to_disk_after_level() {
         ..ws
     };
 
-    let reg = RegistryClient::new(ws.plan.registry.api_base.as_str());
+    let reg = test_registry_client(&ws);
     let state_dir = td.path().join(".shipper");
     let opts = default_opts(state_dir.clone());
     let mut st = init_state_for_package(&ws.plan.plan_id, &ws.plan.registry, "saved", "0.1.0");
@@ -4114,15 +4118,14 @@ fn reconcile_scenario_opts(state_dir: PathBuf) -> RuntimeOptions {
 #[serial]
 fn reconcile_bdd_ambiguous_resolves_to_published() {
     // Scenario: cargo exits ambiguously (exit 1, empty stderr) on attempt 1.
-    // The quick post-failure version_exists check sees nothing, so classify
-    // returns Ambiguous → reconcile_ambiguous_upload fires and the registry
-    // reports the version as visible. Expected: state becomes Published,
-    // no second cargo invocation.
+    // The failure is classified as Ambiguous → reconcile_ambiguous_upload fires and
+    // the second reconciler poll sees the version as visible. Expected: the
+    // package becomes Published after one retry.
     //
     // Request sequence (readiness disabled):
-    //   1. entry "already published" check (publish.rs:136) → 404
-    //   2. post-cargo-failure quick check (publish.rs:~446) → 404
-    //   3. reconcile's single version_exists (via is_version_visible_with_backoff, enabled=false) → 200
+    //   1. entry "already published" check (execute_package.rs) → 404
+    //   2. first reconcile's version_exists (via is_version_visible_with_backoff) → 404
+    //   3. second reconcile's version_exists (via is_version_visible_with_backoff) → 200
     let td = tempdir().expect("tempdir");
     let bin = td.path().join("bin");
     write_fake_tools(&bin);
@@ -4140,7 +4143,7 @@ fn reconcile_bdd_ambiguous_resolves_to_published() {
     );
 
     let ws = planned_workspace(td.path(), server.base_url.clone());
-    let reg = RegistryClient::new(ws.plan.registry.api_base.as_str());
+    let reg = test_registry_client(&ws);
     let opts = reconcile_scenario_opts(PathBuf::from(".shipper"));
     let state_dir = td.path().join(".shipper");
     let st = Arc::new(Mutex::new(init_state_for_package(
@@ -4183,9 +4186,9 @@ fn reconcile_bdd_ambiguous_resolves_to_published() {
                 "expected Published via reconcile, got {:?}",
                 receipt.state
             );
-            // attempts=1 because reconcile fired on the first attempt's failure
-            // and resolved to Published — no further cargo invocations.
-            assert_eq!(receipt.attempts, 1);
+            // Two attempts are expected: first attempt ambiguity -> first
+            // reconcile miss, second attempt ambiguity -> second reconcile hit.
+            assert_eq!(receipt.attempts, 2);
         },
     );
 
@@ -4233,11 +4236,9 @@ fn reconcile_bdd_ambiguous_resolves_to_not_published_then_retries() {
     //
     // With max_attempts=2 and readiness disabled, the request sequence is:
     //   1. entry check → 404
-    //   2. attempt 1 post-cargo quick check → 404
-    //   3. attempt 1 reconcile (enabled=false, single call) → 404 → NotPublished
-    //   4. attempt 2 post-cargo quick check → 404
-    //   5. attempt 2 reconcile → 404 → NotPublished
-    //   6. post-loop final "if last_err, maybe visible" check (publish.rs:~817) → 404
+    //   2. attempt 1 reconcile (enabled=false, single call) → 404 → NotPublished
+    //   3. attempt 2 reconcile → 404 → NotPublished
+    //   4. post-loop final "if last_err, maybe visible" check (execute_package.rs) → 404
     let td = tempdir().expect("tempdir");
     let bin = td.path().join("bin");
     write_fake_tools(&bin);
@@ -4250,15 +4251,13 @@ fn reconcile_bdd_ambiguous_resolves_to_not_published_then_retries() {
                 (404, "{}".to_string()),
                 (404, "{}".to_string()),
                 (404, "{}".to_string()),
-                (404, "{}".to_string()),
-                (404, "{}".to_string()),
             ],
         )]),
-        6,
+        4,
     );
 
     let ws = planned_workspace(td.path(), server.base_url.clone());
-    let reg = RegistryClient::new(ws.plan.registry.api_base.as_str());
+    let reg = test_registry_client(&ws);
     let mut opts = reconcile_scenario_opts(PathBuf::from(".shipper"));
     opts.max_attempts = 2;
     let state_dir = td.path().join(".shipper");
@@ -4308,6 +4307,16 @@ fn reconcile_bdd_ambiguous_resolves_to_not_published_then_retries() {
             let state = st.lock().unwrap();
             let progress = state.packages.get("demo@0.1.0").expect("package progress");
             assert_eq!(progress.attempts, 2, "expected 2 cargo attempts");
+            match &progress.state {
+                PackageState::Failed { class, .. } => {
+                    assert_eq!(
+                        *class,
+                        ErrorClass::Ambiguous,
+                        "expected ambiguous failure class after retry exhaustion"
+                    );
+                }
+                other => panic!("expected failed state, got {:?}", other),
+            }
         },
     );
 
@@ -4340,11 +4349,94 @@ fn reconcile_bdd_ambiguous_resolves_to_not_published_then_retries() {
 
 #[test]
 #[serial]
+fn publish_package_retry_exhaustion_preserves_retryable_class() {
+    let td = tempdir().expect("tempdir");
+    let bin = td.path().join("bin");
+    write_fake_tools(&bin);
+
+    let server = spawn_registry_server(
+        BTreeMap::from([(
+            "/api/v1/crates/demo/0.1.0".to_string(),
+            vec![
+                (404, "{}".to_string()),
+                (404, "{}".to_string()),
+                (404, "{}".to_string()),
+                (404, "{}".to_string()),
+            ],
+        )]),
+        4,
+    );
+
+    let ws = planned_workspace(td.path(), server.base_url.clone());
+    let reg = test_registry_client(&ws);
+    let mut opts = reconcile_scenario_opts(PathBuf::from(".shipper"));
+    opts.max_attempts = 2;
+    let state_dir = td.path().join(".shipper");
+    let st = Arc::new(Mutex::new(init_state_for_package(
+        &ws.plan.plan_id,
+        &ws.plan.registry,
+        "demo",
+        "0.1.0",
+    )));
+    let event_log = Arc::new(Mutex::new(events::EventLog::new()));
+    let events_path = events::events_path(&state_dir);
+    let reporter = make_send_reporter();
+
+    temp_env::with_vars(
+        [
+            (
+                "SHIPPER_CARGO_BIN",
+                Some(fake_cargo_path(&bin).to_str().expect("utf8")),
+            ),
+            ("SHIPPER_CARGO_EXIT", Some("1")),
+            ("SHIPPER_CARGO_STDERR", Some("HTTP 503 service unavailable")),
+            ("SHIPPER_CARGO_STDOUT", Some("")),
+        ],
+        || {
+            let result = publish_package(
+                &ws.plan.packages[0],
+                &ws,
+                &opts,
+                &reg,
+                &st,
+                &state_dir,
+                &event_log,
+                &events_path,
+                &reporter,
+            );
+
+            let err = result.result.expect_err("retry should eventually fail");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("failed"),
+                "expected failure message, got: {msg}"
+            );
+
+            let state = st.lock().unwrap();
+            let progress = state.packages.get("demo@0.1.0").expect("package progress");
+            assert_eq!(progress.attempts, 2, "expected 2 cargo attempts");
+            match &progress.state {
+                PackageState::Failed { class, .. } => {
+                    assert_eq!(
+                        *class,
+                        ErrorClass::Retryable,
+                        "expected retryable failure class after retry exhaustion"
+                    );
+                }
+                other => panic!("expected failed state, got {:?}", other),
+            }
+        },
+    );
+
+    server.join();
+}
+
+#[test]
+#[serial]
 fn reconcile_bdd_resume_from_ambiguous_state_skips_republish() {
     // Scenario (from PR #115 resume-path reconcile):
     //   A prior run left demo@0.1.0 in PackageState::Ambiguous. On resume,
-    //   the entry "already published" check still returns 404 (publish.rs:136).
-    //   The resume-path reconcile block (publish.rs:~248) fires BEFORE the
+    //   The resume-path reconcile block (execute_package.rs) fires BEFORE the
     //   retry loop, polls the registry, and discovers the version IS now
     //   visible — marks Published and returns early with zero cargo attempts.
     //
@@ -4358,13 +4450,13 @@ fn reconcile_bdd_resume_from_ambiguous_state_skips_republish() {
     let server = spawn_registry_server(
         BTreeMap::from([(
             "/api/v1/crates/demo/0.1.0".to_string(),
-            vec![(404, "{}".to_string()), (200, "{}".to_string())],
+            vec![(200, "{}".to_string())],
         )]),
-        2,
+        1,
     );
 
     let ws = planned_workspace(td.path(), server.base_url.clone());
-    let reg = RegistryClient::new(ws.plan.registry.api_base.as_str());
+    let reg = test_registry_client(&ws);
     let opts = reconcile_scenario_opts(PathBuf::from(".shipper"));
     let state_dir = td.path().join(".shipper");
 
@@ -4479,13 +4571,13 @@ fn reconcile_bdd_resume_from_ambiguous_state_still_unknown_writes_report() {
     let server = spawn_registry_server(
         BTreeMap::from([(
             "/api/v1/crates/demo/0.1.0".to_string(),
-            vec![(404, "{}".to_string()), (500, "{}".to_string())],
+            vec![(500, "{}".to_string())],
         )]),
-        2,
+        1,
     );
 
     let ws = planned_workspace(td.path(), server.base_url.clone());
-    let reg = RegistryClient::new(ws.plan.registry.api_base.as_str());
+    let reg = test_registry_client(&ws);
     let opts = reconcile_scenario_opts(PathBuf::from(".shipper"));
     let state_dir = td.path().join(".shipper");
 
@@ -4585,11 +4677,8 @@ fn reconcile_bdd_ambiguous_resolves_to_still_unknown() {
     // `PublishReconciled { outcome: StillUnknown }` event is persisted.
     //
     // Request sequence (readiness disabled):
-    //   1. entry "already published" check (publish.rs:136) → 500 → Err
-    //      (does not match `if let Ok(true)`; proceeds to publish)
-    //   2. post-cargo-failure quick check (publish.rs:~452) → 500 → Err
-    //      (unwrap_or(false); falls through to classify + reconcile)
-    //   3. reconcile's single version_exists (via is_version_visible_with_backoff,
+    //   1. entry "already published" check (execute_package.rs) → 500 → Err
+    //   2. reconcile's single version_exists (via is_version_visible_with_backoff,
     //      enabled=false) → 500 → Err → StillUnknown
     let td = tempdir().expect("tempdir");
     let bin = td.path().join("bin");
@@ -4598,17 +4687,13 @@ fn reconcile_bdd_ambiguous_resolves_to_still_unknown() {
     let server = spawn_registry_server(
         BTreeMap::from([(
             "/api/v1/crates/demo/0.1.0".to_string(),
-            vec![
-                (500, "{}".to_string()),
-                (500, "{}".to_string()),
-                (500, "{}".to_string()),
-            ],
+            vec![(500, "{}".to_string()), (500, "{}".to_string())],
         )]),
-        3,
+        2,
     );
 
     let ws = planned_workspace(td.path(), server.base_url.clone());
-    let reg = RegistryClient::new(ws.plan.registry.api_base.as_str());
+    let reg = test_registry_client(&ws);
     let opts = reconcile_scenario_opts(PathBuf::from(".shipper"));
     let state_dir = td.path().join(".shipper");
     let st = Arc::new(Mutex::new(init_state_for_package(
@@ -4730,7 +4815,7 @@ fn reconcile_bdd_ambiguous_resolves_to_still_unknown() {
 }
 
 /// Regression test for #418: the "final chance after error" fallback branch
-/// (`publish.rs` ~`:1131`) must emit `PackagePublished` to `events.jsonl`,
+/// (`execute_package.rs`) must emit `PackagePublished` to `events.jsonl`,
 /// not just advance `state.json`. Without it, `state.json` says Published
 /// while `events.jsonl` has no projection for the package — a drift the
 /// finalization consistency check rejects loudly.
@@ -4761,7 +4846,7 @@ fn publish_package_final_chance_success_emits_package_published_event() {
     );
 
     let ws = planned_workspace(td.path(), server.base_url.clone());
-    let reg = RegistryClient::new(ws.plan.registry.api_base.as_str());
+    let reg = test_registry_client(&ws);
     let mut opts = default_opts(PathBuf::from(".shipper"));
     opts.max_attempts = 1;
     let state_dir = td.path().join(".shipper");

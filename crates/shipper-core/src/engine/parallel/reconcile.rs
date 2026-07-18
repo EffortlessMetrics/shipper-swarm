@@ -25,7 +25,7 @@
 
 use std::time::Instant;
 
-use shipper_registry::HttpRegistryClient as RegistryClient;
+use crate::registry::RegistryClient;
 use shipper_types::{ReadinessConfig, ReadinessEvidence, ReconciliationOutcome};
 
 use super::readiness::is_version_visible_with_backoff;
@@ -37,12 +37,13 @@ use super::readiness::is_version_visible_with_backoff;
 /// plus the accumulated [`ReadinessEvidence`] so the caller can attach it to
 /// the package receipt for audit.
 ///
-/// Callers (the retry loop in [`super::publish`]) MUST honor the outcome:
+/// Callers (the retry loop in [`crate::engine::execute_package`]) MUST honor
+/// the outcome:
 /// - `Published` → advance; no further retry of `cargo publish` for this crate.
 /// - `NotPublished` → it's safe to enter the normal retry path.
 /// - `StillUnknown` → do not retry; escalate to operator (mark the package
 ///   state `Ambiguous` and halt).
-pub(super) fn reconcile_ambiguous_upload(
+pub(crate) fn reconcile_ambiguous_upload(
     reg: &RegistryClient,
     crate_name: &str,
     version: &str,

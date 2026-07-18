@@ -43,34 +43,6 @@ pub(crate) fn verify_published(
     )
 }
 
-/// Verify a package after the caller has durably recorded `ReadinessStarted`.
-///
-/// The publish engine uses the readiness-start event as the durable checkpoint
-/// that projects `PackageState::Uploaded`; keeping the event emission at the
-/// transition boundary prevents an interruption between cargo success and
-/// readiness polling from leaving an un-rebuildable state.
-pub(crate) fn verify_published_after_started(
-    reg: &RegistryClient,
-    crate_name: &str,
-    version: &str,
-    config: &crate::types::ReadinessConfig,
-    reporter: &mut dyn Reporter,
-    event_log: &mut events::EventLog,
-    events_path: &Path,
-    pkg_label: &str,
-) -> Result<(bool, Vec<ReadinessEvidence>)> {
-    verify_published_inner(
-        reg,
-        crate_name,
-        version,
-        config,
-        reporter,
-        event_log,
-        events_path,
-        pkg_label,
-    )
-}
-
 fn verify_published_inner(
     reg: &RegistryClient,
     crate_name: &str,
