@@ -25,7 +25,7 @@
 
 use std::time::Instant;
 
-use shipper_registry::HttpRegistryClient as RegistryClient;
+use crate::registry::RegistryClient;
 use shipper_types::{ReadinessConfig, ReadinessEvidence, ReconciliationOutcome};
 
 use super::readiness::is_version_visible_with_backoff;

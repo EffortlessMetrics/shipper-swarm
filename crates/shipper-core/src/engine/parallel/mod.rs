@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 
 use crate::plan::PlannedWorkspace;
+use crate::registry::RegistryClient;
 use crate::state::events;
-use shipper_registry::HttpRegistryClient as RegistryClient;
 use shipper_types::{ExecutionState, PackageReceipt, RuntimeOptions};
 
 mod flow;
@@ -265,25 +265,22 @@ pub(crate) fn drain_retry_waits_to_host(
 /// host crate's types (`crate::registry::RegistryClient`, `crate::engine::Reporter`)
 /// into the inner ones expected by the parallel engine.
 ///
-/// Constructs a fresh `shipper_registry::RegistryClient` from the host
-/// registry's configuration so the call works regardless of which `registry`
-/// impl variant is active (micro wrapper vs. in-tree legacy).
+/// Preserves the preconfigured registry client (including cache directory and
+/// transport configuration) while adapting host reporters for parallel
+/// execution.
 pub fn run_publish_parallel(
     ws: &crate::plan::PlannedWorkspace,
     opts: &RuntimeOptions,
     st: &mut ExecutionState,
     state_dir: &Path,
-    reg: &crate::registry::RegistryClient,
+    reg: &RegistryClient,
     reporter: &mut dyn crate::engine::Reporter,
 ) -> Result<Vec<PackageReceipt>> {
-    let api_base = reg.registry().api_base.trim_end_matches('/');
-    let reg_inner =
-        shipper_registry::HttpRegistryClient::new(api_base).with_cache_dir(state_dir.join("cache"));
     let mut adapter = HostReporterAdapter { inner: reporter };
-    run_publish_parallel_inner(ws, opts, st, state_dir, &reg_inner, &mut adapter)
+    run_publish_parallel_inner(ws, opts, st, state_dir, reg, &mut adapter)
 }
 
-/// Inner entry point operating on `shipper_registry::RegistryClient` and the
+/// Inner entry point operating on `crate::registry::RegistryClient` and the
 /// local `Reporter` trait. Kept `pub` for tests inside this module.
 pub(crate) fn run_publish_parallel_inner(
     ws: &PlannedWorkspace,

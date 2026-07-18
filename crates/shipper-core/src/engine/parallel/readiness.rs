@@ -6,10 +6,10 @@
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::registry::RegistryClient;
 use anyhow::Result;
 use chrono::Utc;
 
-use shipper_registry::HttpRegistryClient as RegistryClient;
 use shipper_types::{EventType, PublishEvent, ReadinessConfig, ReadinessEvidence, ReadinessMethod};
 
 /// Check readiness visibility with exponential backoff and optional sparse-index fallback.
@@ -132,19 +132,18 @@ fn is_version_visible_via_index(
     version: &str,
     config: &ReadinessConfig,
 ) -> Result<bool> {
-    let content = if let Some(path) = &config.index_path {
-        std::fs::read_to_string(path).map_err(|e| {
+    if let Some(path) = &config.index_path {
+        let content = std::fs::read_to_string(path).map_err(|e| {
             anyhow::anyhow!(
                 "failed to read local sparse-index path {}: {}",
                 path.display(),
                 e
             )
-        })?
+        })?;
+        Ok(shipper_sparse_index::contains_version(&content, version))
     } else {
-        reg.fetch_sparse_index_file(reg.base_url(), crate_name)?
-    };
-
-    Ok(shipper_sparse_index::contains_version(&content, version))
+        reg.check_index_visibility(crate_name, version)
+    }
 }
 
 fn readiness_poll_event(package: &str, attempt: u32, visible: bool) -> PublishEvent {
@@ -171,6 +170,8 @@ fn readiness_poll_scheduled_event(package: &str, attempt: u32, delay: Duration) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shipper_types::Registry;
+
     use std::io::Write;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -284,12 +285,21 @@ mod tests {
         path
     }
 
+    fn test_registry_client(api_base: &str) -> RegistryClient {
+        let registry = Registry {
+            name: "mock-registry".to_string(),
+            api_base: api_base.to_string(),
+            index_base: Some(format!("{}/index", api_base.trim_end_matches('/'))),
+        };
+        RegistryClient::new(registry).expect("registry client")
+    }
+
     // ── Disabled fast path ──────────────────────────────────────────
 
     #[test]
     fn disabled_returns_immediately_with_single_evidence_visible() {
         let server = spawn_mock_registry(vec![(200, "{}".to_string())]);
-        let reg = RegistryClient::new(&server.base_url);
+        let reg = test_registry_client(&server.base_url);
 
         let (visible, evidence) =
             is_version_visible_with_backoff(&reg, "serde", "1.0.0", &config_disabled())
@@ -305,7 +315,7 @@ mod tests {
     #[test]
     fn disabled_returns_immediately_with_single_evidence_not_visible() {
         let server = spawn_mock_registry(vec![(404, "{}".to_string())]);
-        let reg = RegistryClient::new(&server.base_url);
+        let reg = test_registry_client(&server.base_url);
 
         let (visible, evidence) =
             is_version_visible_with_backoff(&reg, "demo", "0.0.1", &config_disabled()).expect("ok");
@@ -319,7 +329,7 @@ mod tests {
     #[test]
     fn api_method_succeeds_on_first_attempt() {
         let server = spawn_mock_registry(vec![(200, "{}".to_string())]);
-        let reg = RegistryClient::new(&server.base_url);
+        let reg = test_registry_client(&server.base_url);
 
         let (visible, evidence) = is_version_visible_with_backoff(
             &reg,
@@ -337,7 +347,7 @@ mod tests {
     #[test]
     fn api_method_returns_false_after_max_total_wait() {
         let server = spawn_mock_registry(vec![(404, "{}".to_string())]);
-        let reg = RegistryClient::new(&server.base_url);
+        let reg = test_registry_client(&server.base_url);
 
         let mut cfg = config_enabled(ReadinessMethod::Api);
         cfg.max_total_wait = Duration::from_millis(50);
@@ -361,7 +371,7 @@ mod tests {
         let path = write_sparse_index(td.path(), &["0.1.0", "1.2.3"]);
 
         let server = spawn_mock_registry(vec![(404, "{}".to_string())]);
-        let reg = RegistryClient::new(&server.base_url);
+        let reg = test_registry_client(&server.base_url);
 
         let mut cfg = config_enabled(ReadinessMethod::Index);
         cfg.index_path = Some(path);
@@ -383,7 +393,7 @@ mod tests {
         let path = write_sparse_index(td.path(), &["0.1.0"]);
 
         let server = spawn_mock_registry(vec![(404, "{}".to_string())]);
-        let reg = RegistryClient::new(&server.base_url);
+        let reg = test_registry_client(&server.base_url);
 
         let mut cfg = config_enabled(ReadinessMethod::Index);
         cfg.index_path = Some(path);
@@ -398,7 +408,7 @@ mod tests {
     #[test]
     fn is_version_visible_via_index_returns_error_when_local_path_missing() {
         let server = spawn_mock_registry(vec![(404, "{}".to_string())]);
-        let reg = RegistryClient::new(&server.base_url);
+        let reg = test_registry_client(&server.base_url);
 
         let mut cfg = config_enabled(ReadinessMethod::Index);
         cfg.index_path = Some(PathBuf::from("/this/path/definitely/does/not/exist.json"));
@@ -420,7 +430,7 @@ mod tests {
         let path = write_sparse_index(td.path(), &["1.0.0"]);
 
         let server = spawn_mock_registry(vec![(404, "{}".to_string())]);
-        let reg = RegistryClient::new(&server.base_url);
+        let reg = test_registry_client(&server.base_url);
 
         let mut cfg = config_enabled(ReadinessMethod::Both);
         cfg.prefer_index = true;
@@ -443,7 +453,7 @@ mod tests {
         let path = write_sparse_index(td.path(), &["0.1.0"]);
 
         let server = spawn_mock_registry(vec![(200, "{}".to_string())]);
-        let reg = RegistryClient::new(&server.base_url);
+        let reg = test_registry_client(&server.base_url);
 
         let mut cfg = config_enabled(ReadinessMethod::Both);
         cfg.prefer_index = true;
@@ -465,7 +475,7 @@ mod tests {
         let path = write_sparse_index(td.path(), &["1.0.0"]);
 
         let server = spawn_mock_registry(vec![(200, "{}".to_string())]);
-        let reg = RegistryClient::new(&server.base_url);
+        let reg = test_registry_client(&server.base_url);
 
         let mut cfg = config_enabled(ReadinessMethod::Both);
         cfg.prefer_index = false;
@@ -486,7 +496,7 @@ mod tests {
     #[test]
     fn first_attempt_records_zero_pre_delay() {
         let server = spawn_mock_registry(vec![(200, "{}".to_string())]);
-        let reg = RegistryClient::new(&server.base_url);
+        let reg = test_registry_client(&server.base_url);
 
         let cfg = config_enabled(ReadinessMethod::Api);
         let (_, evidence) =
@@ -503,7 +513,7 @@ mod tests {
             (404, "{}".to_string()),
             (200, "{}".to_string()),
         ]);
-        let reg = RegistryClient::new(&server.base_url);
+        let reg = test_registry_client(&server.base_url);
 
         let mut cfg = config_enabled(ReadinessMethod::Api);
         cfg.max_total_wait = Duration::from_secs(5);

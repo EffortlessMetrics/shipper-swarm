@@ -10,8 +10,8 @@ use anyhow::{Result, bail};
 use crate::engine::execute_package::{PackagePublishResult, publish_package};
 use crate::plan::PlannedWorkspace;
 use crate::plan::chunking::chunk_by_max_concurrent;
+use crate::registry::RegistryClient;
 use crate::state::events;
-use shipper_registry::HttpRegistryClient as RegistryClient;
 use shipper_types::{ExecutionState, PackageReceipt, PublishLevel, RuntimeOptions};
 
 use super::{Reporter, SendReporter, drain_retry_waits};

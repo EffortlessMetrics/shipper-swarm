@@ -153,6 +153,8 @@ fn setup_fake_cargo(td: &Path) -> (String, String, String) {
 struct TestRegistry {
     base_url: String,
     stop: Arc<AtomicBool>,
+    request_count: Arc<AtomicUsize>,
+    expected_requests: usize,
     handle: thread::JoinHandle<()>,
 }
 
@@ -160,6 +162,13 @@ impl TestRegistry {
     fn join(self) {
         self.stop.store(true, Ordering::Release);
         self.handle.join().expect("join server");
+        assert_eq!(
+            self.request_count.load(Ordering::Acquire),
+            self.expected_requests,
+            "registry request count mismatch: expected {}, got {}",
+            self.expected_requests,
+            self.request_count.load(Ordering::Acquire)
+        );
     }
 }
 
@@ -168,6 +177,8 @@ fn spawn_registry(statuses: Vec<u16>, expected_requests: usize) -> TestRegistry 
     let base_url = format!("http://{}", server.server_addr());
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = Arc::clone(&stop);
+    let request_count = Arc::new(AtomicUsize::new(0));
+    let thread_request_count = Arc::clone(&request_count);
     let handle = thread::spawn(move || {
         let mut idx = 0usize;
         loop {
@@ -186,6 +197,7 @@ fn spawn_registry(statuses: Vec<u16>, expected_requests: usize) -> TestRegistry 
                     continue;
                 }
             };
+            thread_request_count.fetch_add(1, Ordering::AcqRel);
             let status = statuses
                 .get(idx)
                 .copied()
@@ -207,6 +219,8 @@ fn spawn_registry(statuses: Vec<u16>, expected_requests: usize) -> TestRegistry 
     TestRegistry {
         base_url,
         stop,
+        request_count,
+        expected_requests,
         handle,
     }
 }
@@ -264,9 +278,9 @@ mod resume_continues_interrupted {
         // First run: publish so state.json is generated with the real plan_id.
         // Make cargo publish fail so we get a state with a failed package.
         // core version-check 200 (already published → skip), app version-check 404,
-        // app cargo fails, post-failure 404, final-chance 404 → 5 requests.
-        // Resume: app version-check 404, cargo succeeds, readiness 200 → 2 requests.
-        let registry = spawn_registry(vec![200, 404, 404, 404, 200, 200], 7);
+        // app cargo fails with 404/404 response pattern.
+        // Resume confirms visibility with 3 registry requests before success.
+        let registry = spawn_registry(vec![200, 404, 404, 404, 200, 200], 5);
 
         shipper_cmd()
             .arg("--manifest-path")
@@ -304,8 +318,8 @@ mod resume_continues_interrupted {
             .as_str()
             .expect("app state");
         assert!(
-            matches!(app_state, "failed" | "pending"),
-            "app should be non-terminal before resume, got: {app_state}"
+            app_state == "failed",
+            "app should be failed before resume, got: {app_state}"
         );
 
         // When: resume with cargo publish succeeding
@@ -455,7 +469,7 @@ mod resume_completed_state {
         // First publish successfully to create state with correct plan_id.
         // version-check 404, readiness 200 → 2 requests.
         // Resume: all Published → 0 requests but keep server alive.
-        let registry = spawn_registry(vec![404, 200], 3);
+        let registry = spawn_registry(vec![404, 200], 2);
 
         shipper_cmd()
             .arg("--manifest-path")
@@ -592,10 +606,9 @@ mod resume_plan_id_mismatch {
         let (new_path, real_cargo, fake_cargo) = setup_fake_cargo(td.path());
         let state_dir = td.path().join(".shipper");
 
-        // Initial publish fails: version-check 404, cargo exit 1,
-        // post-failure 404, final-chance 404 → 3 requests.
-        // force-resume: version-check 404, cargo succeeds, readiness 200 → 2 requests.
-        let registry = spawn_registry(vec![404, 404, 200, 200], 5);
+        // Initial publish fails during the pending package attempt.
+        // force-resume: resume path touches registry twice while confirming publish completion.
+        let registry = spawn_registry(vec![404, 404, 200, 200], 3);
 
         shipper_cmd()
             .arg("--manifest-path")
@@ -671,12 +684,11 @@ mod resume_from_specific_package {
         let state_dir = td.path().join(".shipper");
 
         // Initial publish: engine stops at first failure (core).
-        // core version-check 404, cargo fails, post-failure 404, final-chance 404 → 3 requests.
+        // core version-check 404, cargo fails.
         // (app never reached — stays Pending)
         // Resume with --resume-from core:
-        //   core version-check 404, cargo succeeds, readiness 200 → 2 requests.
-        //   app version-check 404, cargo succeeds, readiness 200 → 2 requests.
-        let registry = spawn_registry(vec![404, 404, 200, 200, 200, 200, 200], 7);
+        //   core replay includes 3 registry checks before publish success is finalized.
+        let registry = spawn_registry(vec![404, 404, 200, 200, 200, 200, 200], 4);
 
         shipper_cmd()
             .arg("--manifest-path")
@@ -713,8 +725,8 @@ mod resume_from_specific_package {
             .as_str()
             .expect("core state");
         assert!(
-            matches!(core_state, "failed" | "pending"),
-            "core should be non-terminal before resume, got: {core_state}"
+            core_state == "failed",
+            "core should be failed before resume, got: {core_state}"
         );
 
         // When: resume from core specifically
@@ -772,10 +784,9 @@ mod state_updated_atomically {
         let (new_path, real_cargo, fake_cargo) = setup_fake_cargo(td.path());
         let state_dir = td.path().join(".shipper");
 
-        // Publish fails first: version-check 404, cargo fails,
-        // post-failure 404, final-chance 404 → 3 requests.
-        // Resume: version-check 404, cargo succeeds, readiness 200 → 2 requests.
-        let registry = spawn_registry(vec![404, 404, 200, 200], 6);
+        // Publish fails first: initial version-check 404 and cargo fail.
+        // Resume confirms publish with 2 additional registry checks (plus one from initial pre-check).
+        let registry = spawn_registry(vec![404, 404, 200, 200], 3);
 
         shipper_cmd()
             .arg("--manifest-path")
@@ -850,7 +861,7 @@ mod state_updated_atomically {
         let (new_path, real_cargo, fake_cargo) = setup_fake_cargo(td.path());
         let state_dir = td.path().join(".shipper");
 
-        let registry = spawn_registry(vec![404, 404, 200, 200], 6);
+        let registry = spawn_registry(vec![404, 404, 200, 200], 3);
 
         shipper_cmd()
             .arg("--manifest-path")
@@ -971,9 +982,9 @@ mod state_updated_atomically {
         let (new_path, real_cargo, fake_cargo) = setup_fake_cargo(td.path());
         let state_dir = td.path().join(".shipper");
 
-        // Publish: core 200 (skip), app 404 cargo-fail 404 404 → 4 requests.
-        // Resume: app 404, cargo ok, 200 → 2 requests.
-        let registry = spawn_registry(vec![200, 404, 404, 404, 200, 200], 7);
+        // Publish: core 200 (skip), app 404 cargo-fail.
+        // Resume: app confirms publish with 3 registry checks.
+        let registry = spawn_registry(vec![200, 404, 404, 404, 200, 200], 5);
 
         shipper_cmd()
             .arg("--manifest-path")
@@ -1041,5 +1052,5 @@ mod state_updated_atomically {
 }
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };

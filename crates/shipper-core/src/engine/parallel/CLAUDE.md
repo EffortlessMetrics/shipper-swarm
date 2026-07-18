@@ -28,7 +28,7 @@ in-tree duplicate, including the webhook submodule and BDD tests).
   `#[cfg(test)] mod tests;` and `mod property_tests`.
 - `scheduler.rs` — dependency-level batching and worker/thread scheduling;
   it invokes the canonical executor and does not own package transitions.
-- `engine/execute_package.rs` — single-package execution primitives
+- `../execute_package.rs` — single-package execution primitives
   (`publish_package`, `PackagePublishResult`).
 - `readiness.rs` — readiness-visibility polling with backoff/jitter and
   sparse-index fallback.

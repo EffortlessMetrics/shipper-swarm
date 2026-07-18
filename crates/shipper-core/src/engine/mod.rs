@@ -2093,7 +2093,12 @@ mod tests {
         let td = tempdir().expect("tempdir");
         let bin = td.path().join("bin");
         write_fake_tools(&bin);
-        let env_vars = fake_program_env_vars(&bin);
+        let mut env_vars = fake_program_env_vars(&bin);
+        let cargo_log = td.path().join("cargo-args.log");
+        env_vars.push((
+            "SHIPPER_CARGO_ARGS_LOG",
+            Some(cargo_log.to_string_lossy().to_string()),
+        ));
         temp_env::with_vars(env_vars, || {
             let server = spawn_registry_server(
                 std::collections::BTreeMap::from([(
@@ -2198,7 +2203,12 @@ mod tests {
         let td = tempdir().expect("tempdir");
         let bin = td.path().join("bin");
         write_fake_tools(&bin);
-        let env_vars = fake_program_env_vars(&bin);
+        let cargo_log = td.path().join("cargo-args.log");
+        let mut env_vars = fake_program_env_vars(&bin);
+        env_vars.push((
+            "SHIPPER_CARGO_ARGS_LOG",
+            Some(cargo_log.to_string_lossy().to_string()),
+        ));
         temp_env::with_vars(env_vars, || {
             // Registry returns 200 for the version check â€” the crate IS
             // visible, even though run 1 left us with Failed/Ambiguous.
@@ -2253,6 +2263,15 @@ mod tests {
             assert!(
                 matches!(pkg_state, PackageState::Published),
                 "expected state.json to show Published after resume reconciled against registry; got {pkg_state:?}"
+            );
+            let cargo_called = cargo_log.exists()
+                && fs::read_to_string(&cargo_log)
+                    .unwrap_or_default()
+                    .lines()
+                    .any(|line| !line.trim().is_empty());
+            assert!(
+                !cargo_called,
+                "resume should not invoke cargo when Failed(Ambiguous) state is reconciled via registry visibility"
             );
             server.join();
         });
@@ -5128,6 +5147,16 @@ mod tests {
                     "expected Failed, got {:?}",
                     pkg.state
                 );
+                match &pkg.state {
+                    PackageState::Failed { class, .. } => {
+                        assert_eq!(
+                            *class,
+                            ErrorClass::Retryable,
+                            "failed class should preserve retry classification"
+                        );
+                    }
+                    _ => unreachable!("unreachable due guard above"),
+                }
                 server.join();
             },
         );
@@ -5577,6 +5606,223 @@ mod tests {
     }
 
     // 6. Resume from partial state â€” only remaining packages are attempted
+    // 5b. Sequential scheduler synchronizes state on mid-run failures.
+    #[test]
+    #[serial]
+    fn sm_sequential_scheduler_restores_state_on_mid_run_failure() {
+        let td = tempdir().expect("tempdir");
+        let bin = td.path().join("bin");
+        fs::create_dir_all(&bin).expect("mkdir");
+        write_fake_tools(&bin);
+        let mut opts = default_opts(PathBuf::from(".shipper"));
+        opts.max_attempts = 1;
+        opts.readiness.max_total_wait = Duration::from_millis(0);
+        write_fake_git(&bin);
+
+        with_test_env(
+            &bin,
+            vec![
+                ("SHIPPER_CARGO_EXIT", Some("1".to_string())),
+                (
+                    "SHIPPER_CARGO_STDERR",
+                    Some("permission denied".to_string()),
+                ),
+            ],
+            || {
+                // alpha: Uploaded on disk, registry says already visible (published);
+                // beta: pending + failed cargo publish -> final state is Failed.
+                let server = spawn_registry_server(
+                    std::collections::BTreeMap::from([
+                        (
+                            "/api/v1/crates/alpha/1.0.0".to_string(),
+                            vec![(200, "{}".to_string())],
+                        ),
+                        (
+                            "/api/v1/crates/beta/2.0.0".to_string(),
+                            vec![(404, "{}".to_string()), (404, "{}".to_string())],
+                        ),
+                    ]),
+                    4,
+                );
+                let ws = multi_package_workspace(
+                    td.path(),
+                    server.base_url.clone(),
+                    vec![("alpha", "1.0.0"), ("beta", "2.0.0")],
+                );
+                let state_dir = td.path().join(".shipper");
+                let mut st = init_state(&ws, &state_dir).expect("init state");
+                st.packages.insert(
+                    "alpha@1.0.0".to_string(),
+                    PackageProgress {
+                        name: "alpha".to_string(),
+                        version: "1.0.0".to_string(),
+                        attempts: 1,
+                        state: PackageState::Uploaded,
+                        last_updated_at: Utc::now(),
+                    },
+                );
+                let reg = crate::registry::RegistryClient::new(ws.plan.registry.clone())
+                    .expect("registry");
+                let mut reporter = CollectingReporter::default();
+                let mut event_log = events::EventLog::new();
+                let events_path = events::events_path(&state_dir);
+
+                let result = execute_package::run_sequential_scheduler(
+                    &ws,
+                    &opts,
+                    &mut st,
+                    &state_dir,
+                    &reg,
+                    &mut event_log,
+                    &events_path,
+                    &mut reporter,
+                );
+                let err = result.expect_err("scheduler should fail");
+                let persisted = state::load_state(&state_dir)
+                    .expect("load state")
+                    .expect("state exists");
+
+                assert!(
+                    err.to_string().contains("beta"),
+                    "expected failure to mention beta, got {err}"
+                );
+                assert!(
+                    matches!(
+                        st.packages.get("beta@2.0.0"),
+                        Some(PackageProgress {
+                            state: PackageState::Failed { .. },
+                            ..
+                        })
+                    ),
+                    "expected beta to be failed after stop (in-memory), got {:?}",
+                    st.packages
+                        .get("beta@2.0.0")
+                        .expect("beta package state")
+                        .state
+                );
+                assert!(
+                    matches!(
+                        st.packages.get("alpha@1.0.0"),
+                        Some(PackageProgress {
+                            state: PackageState::Published,
+                            ..
+                        })
+                    ),
+                    "expected alpha to remain published after partial progress, got {:?}",
+                    st.packages
+                        .get("alpha@1.0.0")
+                        .expect("alpha package state")
+                        .state
+                );
+                assert!(
+                    matches!(
+                        persisted.packages.get("beta@2.0.0"),
+                        Some(PackageProgress {
+                            state: PackageState::Failed { .. },
+                            ..
+                        })
+                    ),
+                    "expected beta to be failed after stop (on disk), got {:?}",
+                    persisted
+                        .packages
+                        .get("beta@2.0.0")
+                        .expect("beta package state")
+                        .state
+                );
+                assert!(
+                    matches!(
+                        persisted.packages.get("alpha@1.0.0"),
+                        Some(PackageProgress {
+                            state: PackageState::Published,
+                            ..
+                        })
+                    ),
+                    "expected persisted alpha to remain published, got {:?}",
+                    persisted
+                        .packages
+                        .get("alpha@1.0.0")
+                        .expect("alpha package state")
+                        .state
+                );
+
+                server.join();
+            },
+        );
+    }
+
+    // 5c. Sequential scheduler restores event-log ownership when skip write fails.
+    #[test]
+    #[serial]
+    fn sm_sequential_scheduler_restores_event_log_on_skip_write_failure() {
+        let td = tempdir().expect("tempdir");
+        let state_dir = td.path().join(".shipper");
+        fs::create_dir_all(&state_dir).expect("state dir");
+
+        let events_path = events::events_path(&state_dir);
+        fs::write(&events_path, "").expect("events file");
+        let mut events_permissions = fs::metadata(&events_path)
+            .expect("events metadata")
+            .permissions();
+        #[cfg(windows)]
+        {
+            events_permissions.set_readonly(true);
+        }
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            events_permissions.set_mode(0o444);
+        }
+        fs::set_permissions(&events_path, events_permissions).expect("events permissions");
+
+        let ws = planned_workspace(td.path(), "http://127.0.0.1:9".to_string());
+        let mut st = init_state(&ws, &state_dir).expect("init state");
+        st.packages.insert(
+            "demo@0.1.0".to_string(),
+            PackageProgress {
+                name: "demo".to_string(),
+                version: "0.1.0".to_string(),
+                attempts: 1,
+                state: PackageState::Published,
+                last_updated_at: Utc::now(),
+            },
+        );
+        let reg = crate::registry::RegistryClient::new(ws.plan.registry.clone()).expect("registry");
+        let opts = default_opts(PathBuf::from(".shipper"));
+        let mut event_log = events::EventLog::new();
+        let mut reporter = CollectingReporter::default();
+
+        let result = execute_package::run_sequential_scheduler(
+            &ws,
+            &opts,
+            &mut st,
+            &state_dir,
+            &reg,
+            &mut event_log,
+            &events_path,
+            &mut reporter,
+        );
+        let err = result.expect_err("skip event write should fail");
+        assert!(
+            err.to_string()
+                .contains("failed to write package-skip event")
+                || err.to_string().contains("failed to write events")
+                || err.to_string().contains("failed to open events file"),
+            "expected events write failure, got {err}"
+        );
+        assert!(
+            st.packages.get("demo@0.1.0").expect("demo package").state == PackageState::Published,
+            "state should survive synchronized copy back"
+        );
+        assert!(
+            event_log
+                .all_events()
+                .iter()
+                .any(|event| matches!(event.event_type, EventType::PackageSkipped { .. })),
+            "caller should still own the skipped event after write failure"
+        );
+    }
+
     #[test]
     #[serial]
     fn sm_resume_from_partial_state() {
