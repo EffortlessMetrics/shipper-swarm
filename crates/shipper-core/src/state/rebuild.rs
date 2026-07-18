@@ -387,6 +387,53 @@ mod tests {
     }
 
     #[test]
+    fn rebuild_interrupt_resumes_from_uploaded_checkpoint() {
+        let td = tempdir().expect("tempdir");
+        let events_path = td.path().join("events.jsonl");
+        write_events(
+            &events_path,
+            vec![
+                event(
+                    0,
+                    "all",
+                    EventType::PlanCreated {
+                        plan_id: "plan-123".to_string(),
+                        package_count: 2,
+                    },
+                ),
+                event(1, "core@0.1.0", EventType::PackageUploaded),
+                event(2, "app@0.2.0", EventType::PackageUploaded),
+                event(
+                    3,
+                    "app@0.2.0",
+                    EventType::PackagePublished { duration_ms: 11 },
+                ),
+            ],
+        );
+
+        let state = rebuild_state_from_events(&events_path, options()).expect("rebuild");
+        let core = state.packages.get("core@0.1.0").expect("package");
+        let app = state.packages.get("app@0.2.0").expect("package");
+
+        assert_eq!(core.state, PackageState::Uploaded);
+        assert_eq!(core.last_updated_at, ts(1));
+        assert_eq!(app.state, PackageState::Published);
+        assert_eq!(app.last_updated_at, ts(3));
+    }
+
+    #[test]
+    fn rebuild_rejects_corrupt_event_log() {
+        let td = tempdir().expect("tempdir");
+        let events_path = td.path().join("events.jsonl");
+        std::fs::write(&events_path, "invalid-json-line").expect("write corrupt");
+
+        let err = rebuild_state_from_events(&events_path, options())
+            .expect_err("corrupt log should fail");
+
+        assert!(err.to_string().contains("failed to read event log"));
+    }
+
+    #[test]
     fn rebuild_readiness_started_still_projects_uploaded_for_compatibility() {
         let td = tempdir().expect("tempdir");
         let events_path = td.path().join("events.jsonl");
