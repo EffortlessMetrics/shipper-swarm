@@ -468,6 +468,8 @@ jobs:
       labels: [self-hosted, linux, x64, em-ci, cx23, ci-nano, trusted-pr]
     timeout-minutes: 5
     steps:
+      - uses: actions/checkout@v7.0.0
+
       - name: Normalize routed result
         env:
           TARGET: ${{ needs.route.outputs.target }}
