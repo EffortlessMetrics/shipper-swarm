@@ -129,13 +129,6 @@ pub(crate) fn run_sequential_scheduler(
                 continue;
             }
 
-            if matches!(progress.state, PackageState::Uploaded) {
-                reporter.info(&format!(
-                    "{}@{}: resuming from uploaded (skipping cargo publish)",
-                    package.name, package.version
-                ));
-            }
-
             let result = publish_package_with_timeout(
                 package,
                 ws,
@@ -146,7 +139,7 @@ pub(crate) fn run_sequential_scheduler(
                 &event_log_arc,
                 events_path,
                 &send_reporter,
-                Some(opts.parallel.per_package_timeout),
+                sequential_cargo_timeout(opts),
             );
             crate::engine::parallel::drain_retry_waits_to_host(reporter, &send_reporter);
             crate::engine::parallel::replay_buffered_messages_to_host(reporter, &send_reporter);
@@ -551,6 +544,13 @@ fn write_reconciliation_report_best_effort(
     ) {
         reporter.warn(&format!("failed to write reconciliation report: {err}"));
     }
+}
+
+/// Sequential publishing uses the same finite per-package ceiling as the
+/// parallel executor. The option remains stored under `parallel` for one
+/// compatibility cycle; the runtime policy applies in both scheduling modes.
+pub(crate) fn sequential_cargo_timeout(opts: &RuntimeOptions) -> Option<Duration> {
+    Some(opts.parallel.per_package_timeout)
 }
 
 /// Publish a single package with retries (parallel-safe version)
@@ -1754,30 +1754,34 @@ pub(crate) fn publish_package_with_timeout(
         };
         (progress.attempts, progress.state.clone())
     };
-    match final_state {
-        PackageState::Published | PackageState::Skipped { .. } => {}
-        _ => {
-            return PackagePublishResult {
-                result: Err(anyhow::anyhow!(
-                    "{}@{}: publish terminated without terminal state {:?}",
-                    p.name,
-                    p.version,
-                    final_state
-                )),
-            };
-        }
+    let successful = matches!(
+        final_state,
+        PackageState::Published | PackageState::Skipped { .. }
+    );
+    let pending_due_to_attempt_limit =
+        matches!(final_state, PackageState::Pending) && attempts >= opts.max_attempts;
+    if !successful && !pending_due_to_attempt_limit {
+        return PackagePublishResult {
+            result: Err(anyhow::anyhow!(
+                "{}@{}: publish terminated without terminal state {:?}",
+                p.name,
+                p.version,
+                final_state
+            )),
+        };
     }
 
-    // Send webhook notification: package succeeded
-    maybe_send_event(
-        &opts.webhook,
-        WebhookEvent::PublishSucceeded {
-            plan_id: ws.plan.plan_id.clone(),
-            package_name: p.name.clone(),
-            package_version: p.version.clone(),
-            duration_ms: duration_ms as u64,
-        },
-    );
+    if successful {
+        maybe_send_event(
+            &opts.webhook,
+            WebhookEvent::PublishSucceeded {
+                plan_id: ws.plan.plan_id.clone(),
+                package_name: p.name.clone(),
+                package_version: p.version.clone(),
+                duration_ms: duration_ms as u64,
+            },
+        );
+    }
 
     PackagePublishResult {
         result: Ok(PackageReceipt {

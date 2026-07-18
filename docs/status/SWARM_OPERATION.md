@@ -140,6 +140,13 @@ inspect the diff, run focused validation, push a maintainer-authored refresh or
 trusted same-repo branch, and require the normal `Shipper Rust Small Result`
 before merge.
 
+For human PRs, GitHub-hosted fallback is an explicit manual proof action, not a
+label-triggered refresh. Use the `workflow_dispatch` input `force_route=github`
+when self-hosted capacity is unavailable or a cancelled self-hosted lane needs
+to be replayed. The required workflow remains restricted to code-changing pull
+request events so a label update cannot cancel the synchronize run whose result
+branch-protection check is authoritative.
+
 ## CI and Branch Protection
 
 `shipper-swarm/main` requires only the normalized result check:

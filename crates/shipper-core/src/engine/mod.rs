@@ -2199,7 +2199,7 @@ mod tests {
     /// visibility instead of preserving `Failed`.
     #[test]
     #[serial]
-    fn resume_from_failed_ambiguous_updates_state_to_skipped_when_registry_visible() {
+    fn resume_from_failed_ambiguous_updates_state_to_published_when_registry_visible() {
         let td = tempdir().expect("tempdir");
         let bin = td.path().join("bin");
         write_fake_tools(&bin);
@@ -5074,26 +5074,30 @@ mod tests {
                 opts.max_attempts = 0;
 
                 let mut reporter = CollectingReporter::default();
-                let err =
-                    run_publish(&ws, &opts, &mut reporter).expect_err("max attempts exhausted");
-                let msg = err.to_string();
-                assert!(
-                    msg.contains("publish terminated without terminal state"),
-                    "expected non-terminal termination error, got: {msg}"
-                );
+                let receipt = run_publish(&ws, &opts, &mut reporter).expect("publish");
+                assert_eq!(receipt.packages.len(), 1);
+                assert!(matches!(receipt.packages[0].state, PackageState::Pending));
 
                 let st = state::load_state(&td.path().join(".shipper"))
                     .expect("load")
                     .expect("exists");
                 let pkg = st.packages.get("demo@0.1.0").expect("pkg");
                 assert_eq!(pkg.attempts, 0, "no attempts should have been made");
-                assert!(
-                    matches!(pkg.state, PackageState::Pending),
-                    "expected Pending with 0 max_attempts, got {:?}",
-                    pkg.state
-                );
+                assert!(matches!(pkg.state, PackageState::Pending));
                 server.join();
             },
+        );
+    }
+
+    #[test]
+    fn sequential_scheduler_uses_finite_package_timeout() {
+        let mut opts = default_opts(PathBuf::from(".shipper"));
+        opts.parallel.enabled = false;
+        opts.parallel.per_package_timeout = Duration::from_secs(17);
+
+        assert_eq!(
+            execute_package::sequential_cargo_timeout(&opts),
+            Some(Duration::from_secs(17))
         );
     }
 

@@ -99,7 +99,7 @@ fn create_fake_cargo_proxy(bin_dir: &Path) {
     {
         fs::write(
             bin_dir.join("cargo.cmd"),
-            "@echo off\r\nif \"%1\"==\"publish\" (\r\n  if not \"%SHIPPER_FAKE_PUBLISH_STDOUT%\"==\"\" echo %SHIPPER_FAKE_PUBLISH_STDOUT%\r\n  if not \"%SHIPPER_FAKE_PUBLISH_STDERR%\"==\"\" echo %SHIPPER_FAKE_PUBLISH_STDERR% 1>&2\r\n  if \"%SHIPPER_FAKE_PUBLISH_EXIT%\"==\"\" (exit /b 0) else (exit /b %SHIPPER_FAKE_PUBLISH_EXIT%)\r\n)\r\n\"%REAL_CARGO%\" %*\r\nexit /b %ERRORLEVEL%\r\n",
+            "@echo off\r\nif \"%1\"==\"publish\" (\r\n  if not \"%SHIPPER_FAKE_PUBLISH_STDOUT%\"==\"\" echo \"%SHIPPER_FAKE_PUBLISH_STDOUT%\"\r\n  if not \"%SHIPPER_FAKE_PUBLISH_STDERR%\"==\"\" echo \"%SHIPPER_FAKE_PUBLISH_STDERR%\" 1>&2\r\n  if \"%SHIPPER_FAKE_PUBLISH_EXIT%\"==\"\" (exit /b 0) else (exit /b %SHIPPER_FAKE_PUBLISH_EXIT%)\r\n)\r\n\"%REAL_CARGO%\" %*\r\nexit /b %ERRORLEVEL%\r\n",
         )
         .expect("write fake cargo");
     }
@@ -118,6 +118,33 @@ fn create_fake_cargo_proxy(bin_dir: &Path) {
         perms.set_mode(0o755);
         fs::set_permissions(&path, perms).expect("chmod");
     }
+}
+
+#[cfg(windows)]
+#[test]
+fn fake_cargo_proxy_treats_shell_metacharacters_as_output() {
+    let td = tempdir().expect("tempdir");
+    create_fake_cargo_proxy(td.path());
+    let proxy = td.path().join("cargo.cmd");
+    let output = std::process::Command::new("cmd")
+        .args(["/D", "/C", "call"])
+        .arg(&proxy)
+        .arg("publish")
+        .env(
+            "SHIPPER_FAKE_PUBLISH_STDOUT",
+            "permission denied & echo injected",
+        )
+        .output()
+        .expect("run fake cargo proxy");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.lines().count(),
+        1,
+        "shell metacharacters must not split output"
+    );
+    assert!(stdout.contains("permission denied & echo injected"));
 }
 
 fn path_sep() -> &'static str {

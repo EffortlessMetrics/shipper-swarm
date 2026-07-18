@@ -33,6 +33,11 @@ Post-0.4.0 release cleanup. Resolves the carry-over items flagged in the
 
 ### Changed
 
+- **Package execution timeout policy.** Sequential and parallel publish paths
+  now apply the configured finite `per_package_timeout` ceiling to each Cargo
+  package operation. The existing parallel configuration key remains the
+  compatibility source for this shared runtime policy for one migration cycle.
+
 - **`duration_suboptimal_units` clippy lint activated.** All 223 workspace
   sites rewritten to their optimal `Duration` unit via `cargo clippy --fix`
   (behavior-preserving exact aliases), and the lint moved from `[[planned]]` →
