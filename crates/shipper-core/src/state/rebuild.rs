@@ -114,8 +114,8 @@ fn apply_event(
             progress.last_updated_at = event.timestamp;
         }
         // A package upload starts only after Cargo has accepted the upload.
-        // This is the durable, backward-compatible checkpoint for Uploaded;
-        // a later PackagePublished event advances the projection to Published.
+        // Both event variants are durable, backward-compatible checkpoints for
+        // Uploaded; a later PackagePublished event advances the projection.
         EventType::ReadinessStarted { .. } => {
             if let Some(progress) = ensure_event_package(packages, event, event.timestamp) {
                 progress.state = PackageState::Uploaded;

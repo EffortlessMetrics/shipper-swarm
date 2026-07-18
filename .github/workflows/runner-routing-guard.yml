@@ -25,5 +25,9 @@ jobs:
       labels: [self-hosted, linux, x64, em-ci, cx23, ci-nano, trusted-pr]
     steps:
       - uses: actions/checkout@v7.0.0
+      - name: Validate workflow syntax
+        uses: docker://rhysd/actionlint:1.7.12
       - name: Check runner routing policy
         run: scripts/ci/no-bare-self-hosted.sh
+      - name: Test routed result normalization
+        run: python3 scripts/ci/normalize-routed-rust-result.py --test
