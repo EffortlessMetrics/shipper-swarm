@@ -4034,6 +4034,107 @@ fn test_error_in_level_replays_buffered_messages_to_host() {
     server.join();
 }
 
+#[test]
+#[serial]
+fn test_error_in_level_replays_retryable_messages_to_host() {
+    let td = tempdir().expect("tempdir");
+    let bin = td.path().join("bin");
+    write_fake_tools(&bin);
+
+    // A retryable failure path should still surface retry notices and buffered
+    // messages before the outer failure return. This guards against dropping
+    // operator logs on multi-attempt transient paths.
+    let server = spawn_registry_server(
+        BTreeMap::from([(
+            "/api/v1/crates/base/1.0.0".to_string(),
+            vec![(404, "{}".to_string())],
+        )]),
+        2,
+    );
+
+    let ws = PlannedWorkspace {
+        workspace_root: td.path().to_path_buf(),
+        plan: ReleasePlan {
+            plan_version: "1".to_string(),
+            plan_id: "plan-halt-level-retry-message".to_string(),
+            created_at: Utc::now(),
+            registry: Registry {
+                name: "crates-io".to_string(),
+                api_base: server.base_url.clone(),
+                index_base: None,
+            },
+            packages: vec![PlannedPackage {
+                name: "base".to_string(),
+                version: "1.0.0".to_string(),
+                manifest_path: td.path().join("base").join("Cargo.toml"),
+                regime: None,
+            }],
+            dependencies: BTreeMap::new(),
+        },
+        skipped: vec![],
+    };
+
+    let reg = test_registry_client(&ws);
+    let state_dir = td.path().join(".shipper");
+    let mut opts = default_opts(state_dir.clone());
+    opts.max_attempts = 2;
+    opts.readiness.enabled = false;
+
+    let mut st = init_state_for_package(&ws.plan.plan_id, &ws.plan.registry, "base", "1.0.0");
+    let mut reporter = CollectingReporter::default();
+
+    temp_env::with_vars(
+        [
+            (
+                "SHIPPER_CARGO_BIN",
+                Some(fake_cargo_path(&bin).to_str().expect("utf8")),
+            ),
+            ("SHIPPER_CARGO_EXIT", Some("1")),
+            ("SHIPPER_CARGO_STDERR", Some("HTTP 503 service unavailable")),
+        ],
+        || {
+            let result = run_publish_parallel(&ws, &opts, &mut st, &state_dir, &reg, &mut reporter);
+
+            assert!(result.is_err(), "level should fail after retry exhaustion");
+
+            assert!(
+                reporter
+                    .infos
+                    .iter()
+                    .any(|msg| msg.contains("Level 0: publishing")),
+                "level message should be replayed to host reporter"
+            );
+            assert!(
+                reporter
+                    .warns
+                    .iter()
+                    .any(|msg| msg.contains("next attempt")),
+                "retry wait should be replayed to host reporter"
+            );
+            assert!(
+                reporter
+                    .errors
+                    .iter()
+                    .chain(reporter.warns.iter())
+                    .any(|msg| msg.contains("Retryable") || msg.contains("transient")),
+                "failure context should be replayed to host reporter"
+            );
+
+            let progress = st
+                .packages
+                .get("base@1.0.0")
+                .expect("base should remain tracked");
+            assert!(
+                matches!(progress.state, PackageState::Pending),
+                "expected pending state after retry attempts are exhausted, got {:?}",
+                progress.state
+            );
+            assert_eq!(progress.attempts, 2, "expected two publish attempts");
+        },
+    );
+    server.join();
+}
+
 // ---------------------------------------------------------------------------
 // Empty plan: no packages → no receipts
 // ---------------------------------------------------------------------------
