@@ -237,6 +237,14 @@ fn verify_state_matches_events(
             ));
         }
     }
+
+    if state.attempt_history != rebuilt_state.attempt_history {
+        findings.push(format!(
+            "attempt_history drift: state has {} entries but events project {} entries",
+            state.attempt_history.len(),
+            rebuilt_state.attempt_history.len()
+        ));
+    }
 }
 
 fn trusted_resume_terminal_skips(event_log: &EventLog) -> BTreeSet<String> {
@@ -348,9 +356,10 @@ mod tests {
 
     use chrono::Utc;
     use shipper_types::{
-        EnvironmentFingerprint, PackageEvidence, PackageProgress, PackageReceipt, PublishEvent,
-        ReconciliationEvidenceKind, ReconciliationEvidenceSource, ReconciliationOperatorAction,
-        ReconciliationRecord, ReconciliationReport, ReconciliationTrigger, Registry,
+        AttemptDetail, EnvironmentFingerprint, ErrorClass, PackageEvidence, PackageProgress,
+        PackageReceipt, PublishEvent, ReconciliationEvidenceKind, ReconciliationEvidenceSource,
+        ReconciliationOperatorAction, ReconciliationRecord, ReconciliationReport,
+        ReconciliationTrigger, Registry,
     };
     use tempfile::tempdir;
 
@@ -453,6 +462,25 @@ mod tests {
             compromised_at: None,
             compromised_by: None,
             superseded_by: None,
+        }
+    }
+
+    fn attempt_detail(
+        package: &str,
+        version: &str,
+        attempt: u32,
+        started_at: chrono::DateTime<Utc>,
+    ) -> AttemptDetail {
+        AttemptDetail {
+            package: package.to_string(),
+            version: version.to_string(),
+            attempt,
+            max_attempts: attempt,
+            started_at,
+            ended_at: started_at,
+            error_class: Some(ErrorClass::Retryable),
+            next_attempt_at: None,
+            redacted_message: Some("retryable failure".to_string()),
         }
     }
 
@@ -660,6 +688,85 @@ mod tests {
                 .contains("reconciliation.json was not produced"),
             "{err:#}"
         );
+    }
+
+    #[test]
+    fn drift_finalization_rejects_attempt_history_mismatch() {
+        let td = tempdir().expect("tempdir");
+        let now = Utc::now();
+        write_events(
+            td.path(),
+            vec![
+                plan_created_event(),
+                PublishEvent {
+                    timestamp: now,
+                    event_type: EventType::PackageAttempted {
+                        attempt: 1,
+                        command: "cargo publish".to_string(),
+                    },
+                    package: "demo@1.0.0".to_string(),
+                },
+                PublishEvent {
+                    timestamp: now,
+                    event_type: EventType::PackageFailed {
+                        class: ErrorClass::Retryable,
+                        message: "retryable failure".to_string(),
+                    },
+                    package: "demo@1.0.0".to_string(),
+                },
+                PublishEvent {
+                    timestamp: now,
+                    event_type: EventType::RetryScheduled {
+                        attempt: 1,
+                        max_attempts: 2,
+                        delay_ms: 500,
+                        next_attempt_at: now,
+                        reason: ErrorClass::Retryable,
+                        message: "retry again".to_string(),
+                    },
+                    package: "demo@1.0.0".to_string(),
+                },
+                PublishEvent {
+                    timestamp: now,
+                    event_type: EventType::PackageAttempted {
+                        attempt: 2,
+                        command: "cargo publish".to_string(),
+                    },
+                    package: "demo@1.0.0".to_string(),
+                },
+                PublishEvent {
+                    timestamp: now,
+                    event_type: EventType::PackageUploaded,
+                    package: "demo@1.0.0".to_string(),
+                },
+                PublishEvent {
+                    timestamp: now,
+                    event_type: EventType::PackagePublished { duration_ms: 10 },
+                    package: "demo@1.0.0".to_string(),
+                },
+            ],
+        );
+
+        let events_path = td.path().join(EVENTS_FILE);
+        let rebuilt = rebuild_state_from_events(
+            &events_path,
+            StateRebuildOptions::new(Registry::crates_io()),
+        )
+        .expect("rebuild");
+        let mut state = rebuilt.clone();
+        state
+            .attempt_history
+            .push(attempt_detail("demo", "1.0.0", 2, now));
+
+        let receipt = receipt(vec![package_receipt(
+            "demo",
+            "1.0.0",
+            PackageState::Published,
+        )]);
+        let err = verify_finalization_consistency(&events_path, &state, &receipt, None)
+            .expect_err("attempt history mismatch should fail");
+
+        assert!(err.to_string().contains("attempt_history drift"), "{err:#}");
     }
 
     #[test]
