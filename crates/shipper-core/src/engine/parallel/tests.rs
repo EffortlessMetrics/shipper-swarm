@@ -3822,6 +3822,127 @@ fn test_error_in_first_level_prevents_all_subsequent() {
     server.join();
 }
 
+#[test]
+#[serial]
+fn test_error_in_second_level_preserves_first_level_success_state() {
+    let td = tempdir().expect("tempdir");
+    let bin = td.path().join("bin");
+    write_fake_tools(&bin);
+
+    // Level 0 publishes as already existing in registry, so it is marked Skipped.
+    // Level 1 depends on level 0 and fails, proving the first level result is still
+    // synchronized back on the failure return path.
+    let server = spawn_registry_server(
+        BTreeMap::from([
+            (
+                "/api/v1/crates/base/1.0.0".to_string(),
+                vec![(200, "{}".to_string())],
+            ),
+            (
+                "/api/v1/crates/dependent/1.0.0".to_string(),
+                vec![(404, "{}".to_string())],
+            ),
+        ]),
+        2,
+    );
+
+    let ws = PlannedWorkspace {
+        workspace_root: td.path().to_path_buf(),
+        plan: ReleasePlan {
+            plan_version: "1".to_string(),
+            plan_id: "plan-halt-second-level".to_string(),
+            created_at: Utc::now(),
+            registry: Registry {
+                name: "crates-io".to_string(),
+                api_base: server.base_url.clone(),
+                index_base: None,
+            },
+            packages: vec![
+                PlannedPackage {
+                    name: "base".to_string(),
+                    version: "1.0.0".to_string(),
+                    manifest_path: td.path().join("base").join("Cargo.toml"),
+                    regime: None,
+                },
+                PlannedPackage {
+                    name: "dependent".to_string(),
+                    version: "1.0.0".to_string(),
+                    manifest_path: td.path().join("dependent").join("Cargo.toml"),
+                    regime: None,
+                },
+            ],
+            dependencies: BTreeMap::from([("dependent".to_string(), vec!["base".to_string()])]),
+        },
+        skipped: vec![],
+    };
+
+    let reg = test_registry_client(&ws);
+    let state_dir = td.path().join(".shipper");
+    let mut opts = default_opts(state_dir.clone());
+    opts.max_attempts = 1;
+
+    let mut packages = BTreeMap::new();
+    for p in &ws.plan.packages {
+        packages.insert(
+            pkg_key(&p.name, &p.version),
+            PackageProgress {
+                name: p.name.clone(),
+                version: p.version.clone(),
+                attempts: 0,
+                state: PackageState::Pending,
+                last_updated_at: Utc::now(),
+            },
+        );
+    }
+    let mut st = ExecutionState {
+        state_version: crate::state::execution_state::CURRENT_STATE_VERSION.to_string(),
+        plan_id: ws.plan.plan_id.clone(),
+        registry: ws.plan.registry.clone(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        attempt_history: Vec::new(),
+        packages,
+    };
+    let mut reporter = CollectingReporter::default();
+
+    temp_env::with_vars(
+        [
+            (
+                "SHIPPER_CARGO_BIN",
+                Some(fake_cargo_path(&bin).to_str().expect("utf8")),
+            ),
+            ("SHIPPER_CARGO_EXIT", Some("1")),
+            ("SHIPPER_CARGO_STDERR", Some("transient publish failure")),
+        ],
+        || {
+            let result = run_publish_parallel(&ws, &opts, &mut st, &state_dir, &reg, &mut reporter);
+
+            assert!(result.is_err(), "publish should fail");
+
+            let base_key = pkg_key("base", "1.0.0");
+            let base_progress = st.packages.get(&base_key).expect("base");
+            assert!(
+                matches!(base_progress.state, PackageState::Skipped { .. }),
+                "base should be marked Skipped, got {:?}",
+                base_progress.state
+            );
+
+            let dependent_key = pkg_key("dependent", "1.0.0");
+            let dependent_progress = st.packages.get(&dependent_key).expect("dependent");
+            assert!(
+                matches!(dependent_progress.state, PackageState::Failed { .. }),
+                "dependent should be marked Failed, got {:?}",
+                dependent_progress.state
+            );
+            assert_eq!(
+                dependent_progress.attempts, 1,
+                "expected one failed publish attempt"
+            );
+        },
+    );
+    server.join();
+}
+
 // ---------------------------------------------------------------------------
 // Empty plan: no packages → no receipts
 // ---------------------------------------------------------------------------
