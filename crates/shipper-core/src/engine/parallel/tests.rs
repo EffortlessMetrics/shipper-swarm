@@ -4047,9 +4047,14 @@ fn test_error_in_level_replays_retryable_messages_to_host() {
     let server = spawn_registry_server(
         BTreeMap::from([(
             "/api/v1/crates/base/1.0.0".to_string(),
-            vec![(404, "{}".to_string())],
+            vec![
+                (404, "{}".to_string()),
+                (404, "{}".to_string()),
+                (404, "{}".to_string()),
+                (404, "{}".to_string()),
+            ],
         )]),
-        2,
+        4,
     );
 
     let ws = PlannedWorkspace {
@@ -4124,11 +4129,15 @@ fn test_error_in_level_replays_retryable_messages_to_host() {
                 .packages
                 .get("base@1.0.0")
                 .expect("base should remain tracked");
-            assert!(
-                matches!(progress.state, PackageState::Pending),
-                "expected pending state after retry attempts are exhausted, got {:?}",
-                progress.state
-            );
+            match &progress.state {
+                PackageState::Failed { class, .. } => assert_eq!(
+                    *class,
+                    ErrorClass::Retryable,
+                    "expected retryable failure class, got {:?}",
+                    class
+                ),
+                other => panic!("expected failed state, got {:?}", other),
+            }
             assert_eq!(progress.attempts, 2, "expected two publish attempts");
         },
     );
