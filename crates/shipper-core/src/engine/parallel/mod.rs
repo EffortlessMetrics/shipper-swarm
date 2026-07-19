@@ -365,6 +365,7 @@ pub(crate) fn run_publish_parallel_inner(
             &send_reporter,
         );
         if let Err(err) = level_receipts {
+            replay_buffered_messages(reporter, send_reporter.as_ref());
             synchronize_parallel_state(st, &st_arc)?;
             return Err(err);
         }
