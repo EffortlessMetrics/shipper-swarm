@@ -3798,6 +3798,14 @@ fn test_error_in_first_level_prevents_all_subsequent() {
 
             assert!(result.is_err(), "publish should fail");
 
+            let a_key = pkg_key("a", "1.0.0");
+            let a_progress = st.packages.get(&a_key).expect("a");
+            assert!(
+                matches!(a_progress.state, PackageState::Failed { .. }),
+                "a should be marked Failed, got {:?}",
+                a_progress.state
+            );
+
             // Both "b" and "c" should remain Pending
             for name in ["b", "c"] {
                 let key = pkg_key(name, "1.0.0");
