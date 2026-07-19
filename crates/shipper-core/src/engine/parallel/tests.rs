@@ -2488,6 +2488,140 @@ fn test_webhook_events_sent_on_publish() {
     assert!(received[0].contains("PublishStarted") || received[0].contains("publish_started"));
 }
 
+#[test]
+#[serial]
+fn test_webhook_failure_is_non_blocking_and_mode_parity_holds() {
+    let td = tempdir().expect("tempdir");
+    let bin = td.path().join("bin");
+    write_fake_tools(&bin);
+
+    let webhook_server = Server::http("127.0.0.1:0").expect("webhook server");
+    let webhook_url = format!("http://{}", webhook_server.server_addr());
+    let webhook_received = Arc::new(Mutex::new(Vec::<String>::new()));
+    let webhook_received_clone = Arc::clone(&webhook_received);
+    let webhook_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let webhook_done_clone = std::sync::Arc::clone(&webhook_done);
+
+    let webhook_handle = std::thread::spawn(move || {
+        let mut total = 0usize;
+        while !webhook_done_clone.load(std::sync::atomic::Ordering::Acquire) {
+            if let Ok(Some(mut req)) = webhook_server.recv_timeout(Duration::from_millis(100)) {
+                let mut body = Vec::new();
+                let _ = std::io::Read::read_to_end(req.as_reader(), &mut body);
+                let text = String::from_utf8_lossy(&body).to_string();
+                webhook_received_clone.lock().unwrap().push(text);
+                total = total.saturating_add(1);
+                req.respond(Response::from_string("down").with_status_code(StatusCode(503)))
+                    .expect("respond");
+                if total >= 8 {
+                    break;
+                }
+            }
+        }
+    });
+
+    let registry_server = spawn_registry_server(
+        BTreeMap::from([(
+            "/api/v1/crates/demo/0.1.0".to_string(),
+            vec![
+                (404, "{}".to_string()),
+                (200, "{}".to_string()),
+                (404, "{}".to_string()),
+                (200, "{}".to_string()),
+            ],
+        )]),
+        4,
+    );
+
+    let ws_seq = planned_workspace(td.path(), registry_server.base_url.clone());
+    let reg_seq = test_registry_client(&ws_seq);
+    let state_dir_seq = td.path().join(".shipper-seq");
+    fs::create_dir_all(&state_dir_seq).expect("mkdir");
+    let mut opts_seq = default_opts(state_dir_seq.clone());
+    opts_seq.webhook = shipper_webhook::WebhookConfig {
+        url: webhook_url.clone(),
+        ..Default::default()
+    };
+    opts_seq.readiness.enabled = false;
+    let seq_events_path = events::events_path(&state_dir_seq);
+    let mut seq_event_log = events::EventLog::new();
+    let mut seq_state =
+        init_state_for_package(&ws_seq.plan.plan_id, &ws_seq.plan.registry, "demo", "0.1.0");
+    let mut seq_reporter = CollectingReporter::default();
+
+    let ws_par = planned_workspace(td.path(), registry_server.base_url.clone());
+    let reg_par = test_registry_client(&ws_par);
+    let state_dir_par = td.path().join(".shipper-par");
+    fs::create_dir_all(&state_dir_par).expect("mkdir");
+    let mut opts_par = default_opts(state_dir_par.clone());
+    opts_par.webhook = shipper_webhook::WebhookConfig {
+        url: webhook_url,
+        ..Default::default()
+    };
+    opts_par.readiness.enabled = false;
+    let mut par_state =
+        init_state_for_package(&ws_par.plan.plan_id, &ws_par.plan.registry, "demo", "0.1.0");
+    let mut par_reporter = CollectingReporter::default();
+
+    temp_env::with_var(
+        "SHIPPER_CARGO_BIN",
+        Some(fake_cargo_path(&bin).to_str().expect("utf8")),
+        || {
+            let seq_receipts = crate::engine::execute_package::run_sequential_scheduler(
+                &ws_seq,
+                &opts_seq,
+                &mut seq_state,
+                &state_dir_seq,
+                &reg_seq,
+                &mut seq_event_log,
+                &seq_events_path,
+                &mut seq_reporter,
+            )
+            .expect("sequential publish");
+
+            temp_env::with_var("SHIPPER_CARGO_EXIT", Some("0"), || {
+                let par_receipts = run_publish_parallel(
+                    &ws_par,
+                    &opts_par,
+                    &mut par_state,
+                    &state_dir_par,
+                    &reg_par,
+                    &mut par_reporter,
+                )
+                .expect("parallel publish");
+
+                assert_eq!(
+                    seq_receipts.len(),
+                    par_receipts.len(),
+                    "receipt counts should match"
+                );
+                assert_eq!(seq_state.packages.len(), par_state.packages.len());
+
+                let seq_pkg = seq_state
+                    .packages
+                    .get("demo@0.1.0")
+                    .expect("sequential package");
+                let par_pkg = par_state
+                    .packages
+                    .get("demo@0.1.0")
+                    .expect("parallel package");
+                assert_eq!(seq_pkg.state, par_pkg.state);
+                assert_eq!(seq_pkg.attempts, par_pkg.attempts);
+            });
+        },
+    );
+
+    webhook_done.store(true, std::sync::atomic::Ordering::Release);
+    registry_server.join();
+    webhook_handle.join().expect("webhook thread");
+
+    let received = webhook_received.lock().unwrap();
+    assert!(
+        received.len() >= 2,
+        "expected webhook delivery attempts despite webhook failures"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Resume from specific level (resume_from option)
 // ---------------------------------------------------------------------------
