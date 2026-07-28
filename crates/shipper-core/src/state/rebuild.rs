@@ -137,7 +137,11 @@ fn apply_event(
                 progress.last_updated_at = event.timestamp;
             }
         }
-        EventType::PackageAttempted { attempt, .. } => {
+        EventType::PackageAttempted {
+            attempt,
+            max_attempts,
+            ..
+        } => {
             if let Some((name, version)) = split_package_label(&event.package) {
                 start_rebuild_attempt(
                     active_attempts,
@@ -146,6 +150,7 @@ fn apply_event(
                     name,
                     version,
                     *attempt,
+                    *max_attempts,
                     event.timestamp,
                 );
             }
@@ -298,8 +303,14 @@ fn start_rebuild_attempt(
     name: &str,
     version: &str,
     attempt: u32,
+    max_attempts: u32,
     timestamp: DateTime<Utc>,
 ) {
+    let max_attempts = if max_attempts == 0 {
+        attempt
+    } else {
+        max_attempts
+    };
     if let Some(conflict) = active_attempts.remove(package_key) {
         attempt_history.push(rebuild_attempt_to_detail(conflict));
     }
@@ -309,7 +320,7 @@ fn start_rebuild_attempt(
             package: name.to_string(),
             version: version.to_string(),
             attempt,
-            max_attempts: attempt,
+            max_attempts,
             started_at: timestamp,
             ended_at: timestamp,
             error_class: None,
@@ -565,6 +576,7 @@ mod tests {
                     EventType::PackageAttempted {
                         attempt: 1,
                         command: "cargo publish".to_string(),
+                        max_attempts: 1,
                     },
                 ),
                 event(
@@ -573,6 +585,7 @@ mod tests {
                     EventType::PackageAttempted {
                         attempt: 3,
                         command: "cargo publish".to_string(),
+                        max_attempts: 3,
                     },
                 ),
             ],
@@ -607,6 +620,7 @@ mod tests {
                     EventType::PackageAttempted {
                         attempt: 1,
                         command: "cargo publish".to_string(),
+                        max_attempts: 1,
                     },
                 ),
                 event(2, "demo@0.1.0", EventType::PackageUploaded),
@@ -656,6 +670,7 @@ mod tests {
                     EventType::PackageAttempted {
                         attempt: 1,
                         command: "cargo publish".to_string(),
+                        max_attempts: 3,
                     },
                 ),
                 event(
@@ -684,6 +699,7 @@ mod tests {
                     EventType::PackageAttempted {
                         attempt: 2,
                         command: "cargo publish".to_string(),
+                        max_attempts: 3,
                     },
                 ),
                 event(
@@ -712,6 +728,7 @@ mod tests {
                     EventType::PackageAttempted {
                         attempt: 3,
                         command: "cargo publish".to_string(),
+                        max_attempts: 3,
                     },
                 ),
                 event(9, "demo@0.1.0", EventType::PackageUploaded),
@@ -770,6 +787,7 @@ mod tests {
                     EventType::PackageAttempted {
                         attempt: 1,
                         command: "cargo publish".to_string(),
+                        max_attempts: 3,
                     },
                 ),
                 event(
@@ -798,6 +816,7 @@ mod tests {
                     EventType::PackageAttempted {
                         attempt: 1,
                         command: "cargo publish".to_string(),
+                        max_attempts: 1,
                     },
                 ),
                 event(5, "beta@0.1.0", EventType::PackageUploaded),
@@ -812,6 +831,7 @@ mod tests {
                     EventType::PackageAttempted {
                         attempt: 2,
                         command: "cargo publish".to_string(),
+                        max_attempts: 3,
                     },
                 ),
                 event(8, "alpha@0.1.0", EventType::PackageUploaded),
@@ -871,6 +891,7 @@ mod tests {
                     EventType::PackageAttempted {
                         attempt: 1,
                         command: "cargo publish".to_string(),
+                        max_attempts: 1,
                     },
                 ),
                 event(
@@ -879,6 +900,7 @@ mod tests {
                     EventType::PackageAttempted {
                         attempt: 1,
                         command: "cargo publish".to_string(),
+                        max_attempts: 1,
                     },
                 ),
             ],
@@ -913,6 +935,7 @@ mod tests {
                     EventType::PackageAttempted {
                         attempt: 1,
                         command: "cargo publish".to_string(),
+                        max_attempts: 1,
                     },
                 ),
                 event(
@@ -982,6 +1005,7 @@ mod tests {
                     EventType::PackageAttempted {
                         attempt: 1,
                         command: "cargo publish".to_string(),
+                        max_attempts: 1,
                     },
                 ),
                 event(
@@ -1033,6 +1057,7 @@ mod tests {
                     EventType::PackageAttempted {
                         attempt: 1,
                         command: "cargo publish".to_string(),
+                        max_attempts: 1,
                     },
                 ),
                 event(

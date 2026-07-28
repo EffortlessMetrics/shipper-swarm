@@ -703,6 +703,7 @@ mod tests {
                     event_type: EventType::PackageAttempted {
                         attempt: 1,
                         command: "cargo publish".to_string(),
+                        max_attempts: 2,
                     },
                     package: "demo@1.0.0".to_string(),
                 },
@@ -731,6 +732,7 @@ mod tests {
                     event_type: EventType::PackageAttempted {
                         attempt: 2,
                         command: "cargo publish".to_string(),
+                        max_attempts: 2,
                     },
                     package: "demo@1.0.0".to_string(),
                 },
