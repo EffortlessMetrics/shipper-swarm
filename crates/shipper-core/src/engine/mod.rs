@@ -6749,12 +6749,24 @@ mod tests {
 
         let mut reporter = CollectingReporter::default();
         let receipt = run_publish(&ws, &opts, &mut reporter).expect("publish");
-        assert!(receipt.packages.is_empty()); // already complete
+        // Terminal gate (#153) produces a resume-skip receipt for the already-
+        // complete package rather than omitting it from the receipt list.
+        assert_eq!(receipt.packages.len(), 1);
+        assert_eq!(receipt.packages[0].name, "demo");
+        assert!(matches!(receipt.packages[0].state, PackageState::Published));
         assert!(
             reporter
                 .warns
                 .iter()
                 .any(|w| w.contains("forcing resume with mismatched plan_id"))
+        );
+        assert!(
+            reporter
+                .infos
+                .iter()
+                .any(|i| i.contains("already complete") && i.contains("demo")),
+            "expected already-complete narration, got: {:?}",
+            reporter.infos
         );
     }
 
