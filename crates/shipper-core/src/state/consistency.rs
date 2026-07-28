@@ -239,11 +239,58 @@ fn verify_state_matches_events(
     }
 
     if state.attempt_history != rebuilt_state.attempt_history {
-        findings.push(format!(
+        let mut detail = format!(
             "attempt_history drift: state has {} entries but events project {} entries",
             state.attempt_history.len(),
             rebuilt_state.attempt_history.len()
-        ));
+        );
+        let pairs = state
+            .attempt_history
+            .iter()
+            .zip(rebuilt_state.attempt_history.iter())
+            .enumerate();
+        for (idx, (live, rebuilt)) in pairs {
+            if live == rebuilt {
+                continue;
+            }
+            detail.push_str(&format!(
+                "; entry[{idx}] differs (live {}@{} attempt={}/{} class={:?} next={:?} started={} ended={} msg={:?}; events {}@{} attempt={}/{} class={:?} next={:?} started={} ended={} msg={:?})",
+                live.package,
+                live.version,
+                live.attempt,
+                live.max_attempts,
+                live.error_class,
+                live.next_attempt_at.is_some(),
+                live.started_at.to_rfc3339(),
+                live.ended_at.to_rfc3339(),
+                live.redacted_message,
+                rebuilt.package,
+                rebuilt.version,
+                rebuilt.attempt,
+                rebuilt.max_attempts,
+                rebuilt.error_class,
+                rebuilt.next_attempt_at.is_some(),
+                rebuilt.started_at.to_rfc3339(),
+                rebuilt.ended_at.to_rfc3339(),
+                rebuilt.redacted_message,
+            ));
+        }
+        if state.attempt_history.len() != rebuilt_state.attempt_history.len() {
+            detail.push_str(&format!(
+                "; live_keys={:?}; event_keys={:?}",
+                state
+                    .attempt_history
+                    .iter()
+                    .map(|a| format!("{}@{}#{}", a.package, a.version, a.attempt))
+                    .collect::<Vec<_>>(),
+                rebuilt_state
+                    .attempt_history
+                    .iter()
+                    .map(|a| format!("{}@{}#{}", a.package, a.version, a.attempt))
+                    .collect::<Vec<_>>(),
+            ));
+        }
+        findings.push(detail);
     }
 }
 

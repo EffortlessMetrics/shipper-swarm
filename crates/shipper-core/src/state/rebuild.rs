@@ -129,8 +129,14 @@ fn apply_event(
             }
         }
         EventType::PackageUploaded => {
+            // Live publish commits the matching attempt detail at the Uploaded
+            // boundary as a success (no error_class). Finalize here so later
+            // readiness-timeout Retry* events cannot rewrite that attempt.
             if let Some(active) = active_attempt_for_key_mut(active_attempts, &event.package) {
                 active.ended_at = event.timestamp;
+                if active.error_class.is_none() {
+                    finalize_attempt(active_attempts, attempt_history, &event.package);
+                }
             }
             if let Some(progress) = ensure_event_package(packages, event, event.timestamp) {
                 progress.state = PackageState::Uploaded;
@@ -344,9 +350,14 @@ fn apply_package_failed(
     let Some(active) = active_attempt_for_key_mut(active_attempts, package_key) else {
         return;
     };
-    active.ended_at = timestamp;
-    active.error_class = Some(class.clone());
-    active.redacted_message = Some(message.to_string());
+    // Live attempt details capture the first failure's timestamp/message when the
+    // attempt is recorded (retry schedule or exhaustion). A later terminal
+    // PackageFailed must not rewrite those fields or finalization drifts.
+    if !active.saw_failure {
+        active.ended_at = timestamp;
+        active.error_class = Some(class.clone());
+        active.redacted_message = Some(message.to_string());
+    }
     if matches!(class, ErrorClass::Permanent) || active.saw_failure {
         finalize_attempt(active_attempts, attempt_history, package_key);
     } else {
@@ -1029,10 +1040,13 @@ mod tests {
 
         let state = rebuild_state_from_events(&events_path, options()).expect("rebuild");
 
+        // Duplicate terminal failures collapse to one attempt detail. Live state
+        // records the first failure's message/timestamp when the attempt is
+        // persisted, so rebuild must not let a later PackageFailed rewrite it.
         assert_eq!(state.attempt_history.len(), 1);
         assert_eq!(
             state.attempt_history[0].redacted_message.as_deref(),
-            Some("final failure")
+            Some("first failure")
         );
     }
 
