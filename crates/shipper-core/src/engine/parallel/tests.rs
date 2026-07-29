@@ -6568,6 +6568,15 @@ fn assert_mode_parity_pair(case: &ModeParityCase, seq: &ModeRunOutcome, par: &Mo
                 let persisted = events::EventLog::read_from_file(path)
                     .unwrap_or_else(|e| panic!("{} {mode}: read events: {e}", case.name));
                 let all_events = persisted.all_events();
+                let timeout_count = all_events
+                    .iter()
+                    .filter(|event| matches!(event.event_type, EventType::ReadinessTimeout { .. }))
+                    .count();
+                assert_eq!(
+                    timeout_count, 1,
+                    "{} {mode}: expected exactly one readiness timeout event",
+                    case.name
+                );
                 let timeout_index = all_events
                     .iter()
                     .position(|event| {
@@ -6576,6 +6585,15 @@ fn assert_mode_parity_pair(case: &ModeParityCase, seq: &ModeRunOutcome, par: &Mo
                     .unwrap_or_else(|| {
                         panic!("{} {mode}: expected readiness timeout event", case.name)
                     });
+                let complete_count = all_events
+                    .iter()
+                    .filter(|event| matches!(event.event_type, EventType::ReadinessComplete { .. }))
+                    .count();
+                assert_eq!(
+                    complete_count, 1,
+                    "{} {mode}: expected exactly one readiness complete event",
+                    case.name
+                );
                 let complete_index = all_events
                     .iter()
                     .position(|event| {
