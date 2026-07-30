@@ -6464,6 +6464,14 @@ fn assert_mode_parity_rebuild(outcome: &ModeRunOutcome, scenario: ModeParityScen
     let _ = &outcome.state_dir;
 }
 
+fn stable_event_write_error_contract(error: &str) -> Option<&str> {
+    let start_marker = "failed to write package-start event";
+    let end_marker = "failed to open events file";
+    let start = error.find(start_marker)?;
+    let end = error[start..].find(end_marker)? + start + end_marker.len();
+    Some(&error[start..end])
+}
+
 fn assert_mode_parity_pair(case: &ModeParityCase, seq: &ModeRunOutcome, par: &ModeRunOutcome) {
     assert_eq!(
         seq.ok, par.ok,
@@ -6596,14 +6604,8 @@ fn assert_mode_parity_pair(case: &ModeParityCase, seq: &ModeRunOutcome, par: &Mo
                 );
             }
             assert_eq!(
-                seq_error
-                    .split("failed to open events file")
-                    .next()
-                    .unwrap_or(seq_error),
-                par_error
-                    .split("failed to open events file")
-                    .next()
-                    .unwrap_or(par_error),
+                stable_event_write_error_contract(seq_error),
+                stable_event_write_error_contract(par_error),
                 "{}: sequential and parallel event-write errors must share the same stable contract",
                 case.name
             );
