@@ -6242,6 +6242,7 @@ struct ModeRunOutcome {
     state: ExecutionState,
     events_path: PathBuf,
     state_dir: PathBuf,
+    cargo_args_log: PathBuf,
 }
 
 fn mode_parity_routes(
@@ -6303,6 +6304,7 @@ fn mode_parity_seed_state(ws: &PlannedWorkspace, scenario: ModeParityScenario) -
 fn mode_parity_cargo_env(
     scenario: ModeParityScenario,
     cargo_bin: &str,
+    cargo_args_log: &str,
 ) -> Vec<(&'static str, Option<&str>)> {
     match scenario {
         ModeParityScenario::CleanPublish | ModeParityScenario::AlreadyPublishedInState => vec![
@@ -6325,6 +6327,7 @@ fn mode_parity_cargo_env(
         ],
         ModeParityScenario::EventWriteFailure => vec![
             ("SHIPPER_CARGO_BIN", Some(cargo_bin)),
+            ("SHIPPER_CARGO_ARGS_LOG", Some(cargo_args_log)),
             ("SHIPPER_CARGO_EXIT", Some("0")),
             ("SHIPPER_CARGO_STDERR", Some("")),
             ("SHIPPER_CARGO_STDOUT", Some("")),
@@ -6362,6 +6365,8 @@ fn run_mode_parity_case(
 
     let mut state = mode_parity_seed_state(&ws, scenario);
     let events_path = events::events_path(&state_dir);
+    let cargo_args_log = state_dir.join("cargo-args.log");
+    let cargo_args_log_path = cargo_args_log.to_str().expect("cargo args log path");
     if matches!(scenario, ModeParityScenario::EventWriteFailure) {
         // A directory at the event-log path fails on every supported platform
         // without relying on administrator privileges or readonly semantics.
@@ -6370,7 +6375,7 @@ fn run_mode_parity_case(
     let mut event_log = events::EventLog::new();
     let mut reporter = CollectingReporter::default();
 
-    let env = mode_parity_cargo_env(scenario, cargo_bin);
+    let env = mode_parity_cargo_env(scenario, cargo_bin, cargo_args_log_path);
     let result = temp_env::with_vars(env, || {
         if parallel {
             run_publish_parallel(&ws, &opts, &mut state, &state_dir, &reg, &mut reporter)
@@ -6400,6 +6405,7 @@ fn run_mode_parity_case(
         state,
         events_path,
         state_dir,
+        cargo_args_log,
     }
 }
 
@@ -6602,10 +6608,23 @@ fn assert_mode_parity_pair(case: &ModeParityCase, seq: &ModeRunOutcome, par: &Mo
                     "{} {mode}: event failure must not fabricate attempt history",
                     case.name
                 );
+                if outcome.cargo_args_log.exists() {
+                    let args = fs::read_to_string(&outcome.cargo_args_log).unwrap_or_else(|e| {
+                        panic!("{} {mode}: read cargo args log: {e}", case.name)
+                    });
+                    assert!(
+                        args.trim().is_empty(),
+                        "{} {mode}: Cargo must not run before the event-write failure, args: {args:?}",
+                        case.name
+                    );
+                }
             }
+            let seq_contract = stable_event_write_error_contract(seq_error)
+                .expect("sequential event-write contract");
+            let par_contract = stable_event_write_error_contract(par_error)
+                .expect("parallel event-write contract");
             assert_eq!(
-                stable_event_write_error_contract(seq_error),
-                stable_event_write_error_contract(par_error),
+                seq_contract, par_contract,
                 "{}: sequential and parallel event-write errors must share the same stable contract",
                 case.name
             );
