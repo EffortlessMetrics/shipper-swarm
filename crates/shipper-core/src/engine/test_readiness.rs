@@ -62,6 +62,7 @@ fn verify_published_inner(
     let started_at = Instant::now();
     let mut emit_event = |event| record_readiness_event(event_log, events_path, event);
     let (visible, evidence) = crate::engine::readiness::is_version_visible_with_backoff_and_events(
+        reg,
         crate_name,
         version,
         config,
