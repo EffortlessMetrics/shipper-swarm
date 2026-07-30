@@ -46,6 +46,7 @@ pub(crate) fn is_version_visible_with_backoff_and_events(
 
     let start = Instant::now();
     let mut attempt = 0u32;
+    let mut pending_delay = Duration::ZERO;
 
     if config.initial_delay > Duration::ZERO {
         emit_event(readiness_poll_scheduled_event(
@@ -59,17 +60,7 @@ pub(crate) fn is_version_visible_with_backoff_and_events(
     loop {
         attempt += 1;
 
-        let jittered_delay = if attempt == 1 {
-            Duration::ZERO
-        } else {
-            let base_delay = config.poll_interval;
-            let exponential_delay =
-                base_delay.saturating_mul(2_u32.saturating_pow(attempt.saturating_sub(2).min(16)));
-            let capped_delay = exponential_delay.min(config.max_delay);
-            let jitter_range = config.jitter_factor;
-            let jitter = 1.0 + (rand::random::<f64>() * 2.0 * jitter_range - jitter_range);
-            Duration::from_millis((capped_delay.as_millis() as f64 * jitter).round() as u64)
-        };
+        let jittered_delay = pending_delay;
 
         let visible = match config.method {
             ReadinessMethod::Api => reg.version_exists(crate_name, version).unwrap_or(false),
@@ -117,6 +108,7 @@ pub(crate) fn is_version_visible_with_backoff_and_events(
         let jitter = 1.0 + (rand::random::<f64>() * 2.0 * jitter_range - jitter_range);
         let next_delay =
             Duration::from_millis((capped_delay.as_millis() as f64 * jitter).round() as u64);
+        pending_delay = next_delay;
         emit_event(readiness_poll_scheduled_event(
             &package,
             attempt.saturating_add(1),
