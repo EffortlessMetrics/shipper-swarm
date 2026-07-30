@@ -6556,14 +6556,23 @@ fn assert_mode_parity_pair(case: &ModeParityCase, seq: &ModeRunOutcome, par: &Mo
         }
         ModeParityScenario::EventWriteFailure => {
             assert!(!seq.ok, "{}: event write failure should err", case.name);
+            let seq_error = seq
+                .error
+                .as_deref()
+                .unwrap_or("missing error for event write failure");
+            let par_error = par
+                .error
+                .as_deref()
+                .unwrap_or("missing error for event write failure");
             for (mode, outcome) in [("seq", seq), ("par", par)] {
                 let error = outcome
                     .error
                     .as_deref()
                     .unwrap_or("missing error for event write failure");
                 assert!(
-                    error.contains("events file"),
-                    "{} {mode}: expected event-log write error, got {error}",
+                    error.contains("failed to write package-start event")
+                        && error.contains("failed to open events file"),
+                    "{} {mode}: expected stable event-log write error, got {error}",
                     case.name
                 );
                 assert!(
@@ -6586,6 +6595,18 @@ fn assert_mode_parity_pair(case: &ModeParityCase, seq: &ModeRunOutcome, par: &Mo
                     case.name
                 );
             }
+            assert_eq!(
+                seq_error
+                    .split("failed to open events file")
+                    .next()
+                    .unwrap_or(seq_error),
+                par_error
+                    .split("failed to open events file")
+                    .next()
+                    .unwrap_or(par_error),
+                "{}: sequential and parallel event-write errors must share the same stable contract",
+                case.name
+            );
         }
     }
 
