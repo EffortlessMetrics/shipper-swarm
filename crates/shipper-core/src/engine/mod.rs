@@ -7011,9 +7011,9 @@ mod tests {
 
         proptest! {
             /// update_state always persists new_state to disk
-        #[test]
-        #[expect(deprecated, reason = "legacy compatibility coverage for quarantined state-only helper")]
-        fn update_state_always_persists(new_state in arb_package_state()) {
+            #[test]
+            #[expect(deprecated, reason = "legacy compatibility coverage for quarantined state-only helper")]
+            fn update_state_always_persists(new_state in arb_package_state()) {
                 let td = tempdir().expect("tempdir");
                 let state_dir = td.path().join(".shipper");
                 let ws = planned_workspace(td.path(), "http://127.0.0.1:9".to_string());
