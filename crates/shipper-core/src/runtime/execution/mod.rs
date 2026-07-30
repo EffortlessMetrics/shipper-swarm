@@ -20,6 +20,8 @@ use shipper_types::{AttemptDetail, ErrorClass, ExecutionState, PackageState, Pub
 ///
 /// This is retained only for legacy callers. Publish execution must use the
 /// event-first transition boundary so `events.jsonl` remains authoritative.
+/// If persistence fails, the in-memory mutation has already been applied;
+/// legacy callers must tolerate that behavior.
 #[doc(hidden)]
 #[deprecated(note = "legacy state-only mutator; use the event-first engine transition boundary")]
 pub fn update_state(
@@ -342,10 +344,6 @@ pub fn update_state_locked(st: &mut ExecutionState, key: &str, new_state: Packag
 }
 
 #[cfg(test)]
-#[expect(
-    deprecated,
-    reason = "legacy compatibility coverage for quarantined state-only helper"
-)]
 mod tests {
     use std::collections::BTreeMap;
     use std::path::PathBuf;
@@ -688,6 +686,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        deprecated,
+        reason = "legacy compatibility coverage for quarantined state-only helper"
+    )]
     fn update_state_updates_timestamp_and_persists() {
         let mut st = sample_state("demo@0.1.0", shipper_types::PackageState::Pending);
         let td = tempdir().expect("tempdir");
@@ -715,6 +717,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        deprecated,
+        reason = "legacy compatibility coverage for quarantined state-only helper"
+    )]
     fn update_state_fails_for_missing_package() {
         let mut st = sample_state("demo@0.1.0", shipper_types::PackageState::Pending);
         let td = tempdir().expect("tempdir");
@@ -862,6 +868,10 @@ mod tests {
     // -- Edge case: empty package list --
 
     #[test]
+    #[expect(
+        deprecated,
+        reason = "legacy compatibility coverage for quarantined state-only helper"
+    )]
     fn update_state_on_empty_packages_returns_error() {
         let mut st = shipper_types::ExecutionState {
             state_version: crate::state::execution_state::CURRENT_STATE_VERSION.to_string(),
@@ -1141,6 +1151,10 @@ mod tests {
     // -- Persist round-trip for each terminal state --
 
     #[test]
+    #[expect(
+        deprecated,
+        reason = "legacy compatibility coverage for quarantined state-only helper"
+    )]
     fn update_state_persists_skipped() {
         let key = "s@1.0.0";
         let mut st = sample_state(key, PackageState::Pending);
@@ -1164,6 +1178,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        deprecated,
+        reason = "legacy compatibility coverage for quarantined state-only helper"
+    )]
     fn update_state_persists_failed() {
         let key = "f@1.0.0";
         let mut st = sample_state(key, PackageState::Pending);
@@ -1191,6 +1209,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        deprecated,
+        reason = "legacy compatibility coverage for quarantined state-only helper"
+    )]
     fn update_state_persists_ambiguous() {
         let key = "x@1.0.0";
         let mut st = sample_state(key, PackageState::Pending);
@@ -1266,6 +1288,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        deprecated,
+        reason = "legacy compatibility coverage for quarantined state-only helper"
+    )]
     fn multi_package_persist_round_trip() {
         let mut st = multi_state(&[
             ("a@1.0.0", PackageState::Pending),
@@ -2285,6 +2311,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        deprecated,
+        reason = "legacy compatibility coverage for quarantined state-only helper"
+    )]
     fn update_state_rejects_missing_key() {
         let mut st = sample_state("a@1.0.0", PackageState::Pending);
         let td = tempdir().expect("tempdir");
@@ -2349,6 +2379,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        deprecated,
+        reason = "legacy compatibility coverage for quarantined state-only helper"
+    )]
     fn concurrent_persist_updates_are_consistent() {
         let td = tempdir().expect("tempdir");
         let mut st = multi_state(&[
@@ -2380,6 +2414,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        deprecated,
+        reason = "legacy compatibility coverage for quarantined state-only helper"
+    )]
     fn empty_plan_update_state_errors() {
         let mut st = multi_state(&[]);
         let td = tempdir().expect("tempdir");
@@ -2401,6 +2439,10 @@ mod tests {
     // -- 5. Single-package execution --
 
     #[test]
+    #[expect(
+        deprecated,
+        reason = "legacy compatibility coverage for quarantined state-only helper"
+    )]
     fn single_package_full_lifecycle() {
         let key = "solo@0.1.0";
         let td = tempdir().expect("tempdir");
@@ -2416,6 +2458,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        deprecated,
+        reason = "legacy compatibility coverage for quarantined state-only helper"
+    )]
     fn single_package_skip_lifecycle() {
         let key = "solo@0.1.0";
         let td = tempdir().expect("tempdir");
@@ -2439,6 +2485,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        deprecated,
+        reason = "legacy compatibility coverage for quarantined state-only helper"
+    )]
     fn single_package_failure_lifecycle() {
         let key = "solo@0.1.0";
         let td = tempdir().expect("tempdir");
@@ -2507,6 +2557,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        deprecated,
+        reason = "legacy compatibility coverage for quarantined state-only helper"
+    )]
     fn all_skipped_persist_round_trip() {
         let td = tempdir().expect("tempdir");
         let mut st = multi_state(&[
@@ -2545,6 +2599,10 @@ mod tests {
     // -- 10. Error propagation from callbacks --
 
     #[test]
+    #[expect(
+        deprecated,
+        reason = "legacy compatibility coverage for quarantined state-only helper"
+    )]
     fn update_state_propagates_save_error_on_invalid_dir() {
         let mut st = sample_state("a@1.0.0", PackageState::Pending);
         // Use a nonexistent directory that cannot be created
@@ -2558,6 +2616,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        deprecated,
+        reason = "legacy compatibility coverage for quarantined state-only helper"
+    )]
     fn update_state_error_does_not_corrupt_in_memory_state() {
         let mut st = sample_state("a@1.0.0", PackageState::Pending);
         let bad_dir = PathBuf::from(if cfg!(windows) {
@@ -2573,6 +2635,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        deprecated,
+        reason = "legacy compatibility coverage for quarantined state-only helper"
+    )]
     fn update_state_missing_key_error_message_is_descriptive() {
         let mut st = sample_state("a@1.0.0", PackageState::Pending);
         let td = tempdir().expect("tempdir");

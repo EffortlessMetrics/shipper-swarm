@@ -22,7 +22,7 @@ an authoritative transition API. Its retirement is tracked by issue #153.
 
 - Pure functions where possible.
 - `update_state_locked`: caller must hold the appropriate lock before calling.
-- `update_state`: legacy compatibility only; it mutates in-memory state, then persists without an event. New code must not call it.
+- `update_state`: legacy compatibility only; it mutates in-memory state, then persists without an event. Callers must tolerate the case where the in-memory mutation occurs even if the persist fails (known behavior, covered by tests). New code must not call it.
 
 ## Internal microcrate dependencies (transitional)
 
