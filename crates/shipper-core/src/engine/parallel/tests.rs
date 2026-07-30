@@ -6203,6 +6203,7 @@ enum ModeParityScenario {
     PermanentFailure,
     AlreadyPublishedInState,
     StillUnknownResume,
+    EventWriteFailure,
 }
 
 #[derive(Debug)]
@@ -6228,11 +6229,16 @@ const MODE_PARITY_CORPUS: &[ModeParityCase] = &[
         name: "still_unknown_resume",
         scenario: ModeParityScenario::StillUnknownResume,
     },
+    ModeParityCase {
+        name: "event_write_failure",
+        scenario: ModeParityScenario::EventWriteFailure,
+    },
 ];
 
 #[derive(Debug)]
 struct ModeRunOutcome {
     ok: bool,
+    error: Option<String>,
     state: ExecutionState,
     events_path: PathBuf,
     state_dir: PathBuf,
@@ -6270,6 +6276,7 @@ fn mode_parity_routes(
             )]),
             1,
         ),
+        ModeParityScenario::EventWriteFailure => (BTreeMap::new(), 0),
     }
 }
 
@@ -6289,6 +6296,7 @@ fn mode_parity_seed_state(ws: &PlannedWorkspace, scenario: ModeParityScenario) -
             },
             1,
         ),
+        ModeParityScenario::EventWriteFailure => init_state_for_workspace(ws),
     }
 }
 
@@ -6310,6 +6318,12 @@ fn mode_parity_cargo_env(
             ("SHIPPER_CARGO_STDOUT", Some("")),
         ],
         ModeParityScenario::StillUnknownResume => vec![
+            ("SHIPPER_CARGO_BIN", Some(cargo_bin)),
+            ("SHIPPER_CARGO_EXIT", Some("0")),
+            ("SHIPPER_CARGO_STDERR", Some("")),
+            ("SHIPPER_CARGO_STDOUT", Some("")),
+        ],
+        ModeParityScenario::EventWriteFailure => vec![
             ("SHIPPER_CARGO_BIN", Some(cargo_bin)),
             ("SHIPPER_CARGO_EXIT", Some("0")),
             ("SHIPPER_CARGO_STDERR", Some("")),
@@ -6348,13 +6362,18 @@ fn run_mode_parity_case(
 
     let mut state = mode_parity_seed_state(&ws, scenario);
     let events_path = events::events_path(&state_dir);
+    if matches!(scenario, ModeParityScenario::EventWriteFailure) {
+        // A directory at the event-log path fails on every supported platform
+        // without relying on administrator privileges or readonly semantics.
+        fs::create_dir_all(&events_path).expect("event path directory");
+    }
     let mut event_log = events::EventLog::new();
     let mut reporter = CollectingReporter::default();
 
     let env = mode_parity_cargo_env(scenario, cargo_bin);
-    let ok = temp_env::with_vars(env, || {
+    let result = temp_env::with_vars(env, || {
         if parallel {
-            run_publish_parallel(&ws, &opts, &mut state, &state_dir, &reg, &mut reporter).is_ok()
+            run_publish_parallel(&ws, &opts, &mut state, &state_dir, &reg, &mut reporter)
         } else {
             crate::engine::execute_package::run_sequential_scheduler(
                 &ws,
@@ -6366,9 +6385,10 @@ fn run_mode_parity_case(
                 &events_path,
                 &mut reporter,
             )
-            .is_ok()
         }
     });
+    let error = result.as_ref().err().map(ToString::to_string);
+    let ok = result.is_ok();
 
     if let Some(server) = server {
         server.join();
@@ -6376,6 +6396,7 @@ fn run_mode_parity_case(
 
     ModeRunOutcome {
         ok,
+        error,
         state,
         events_path,
         state_dir,
@@ -6533,10 +6554,45 @@ fn assert_mode_parity_pair(case: &ModeParityCase, seq: &ModeRunOutcome, par: &Mo
                 pkg.state
             );
         }
+        ModeParityScenario::EventWriteFailure => {
+            assert!(!seq.ok, "{}: event write failure should err", case.name);
+            for (mode, outcome) in [("seq", seq), ("par", par)] {
+                let error = outcome
+                    .error
+                    .as_deref()
+                    .unwrap_or("missing error for event write failure");
+                assert!(
+                    error.contains("events file"),
+                    "{} {mode}: expected event-log write error, got {error}",
+                    case.name
+                );
+                assert!(
+                    outcome.events_path.is_dir(),
+                    "{} {mode}: event path must remain the failure fixture",
+                    case.name
+                );
+                let pkg = outcome.state.packages.get("demo@0.1.0").expect("demo");
+                assert!(
+                    matches!(pkg.state, PackageState::Pending) && pkg.attempts == 0,
+                    "{} {mode}: event failure must not mutate pending state, got {:?} attempts={}",
+                    case.name,
+                    pkg.state,
+                    pkg.attempts
+                );
+                assert_eq!(
+                    outcome.state.attempt_history.len(),
+                    0,
+                    "{} {mode}: event failure must not fabricate attempt history",
+                    case.name
+                );
+            }
+        }
     }
 
-    assert_mode_parity_rebuild(seq, case.scenario, &format!("{}:seq", case.name));
-    assert_mode_parity_rebuild(par, case.scenario, &format!("{}:par", case.name));
+    if !matches!(case.scenario, ModeParityScenario::EventWriteFailure) {
+        assert_mode_parity_rebuild(seq, case.scenario, &format!("{}:seq", case.name));
+        assert_mode_parity_rebuild(par, case.scenario, &format!("{}:par", case.name));
+    }
 }
 
 #[test]
