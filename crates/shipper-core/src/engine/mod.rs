@@ -16,6 +16,10 @@ use crate::runtime::execution::backoff_delay;
 #[cfg(test)]
 use crate::runtime::execution::short_state;
 #[cfg(test)]
+#[expect(
+    deprecated,
+    reason = "legacy compatibility coverage for quarantined state-only helper"
+)]
 use crate::runtime::execution::update_state;
 use crate::runtime::execution::{classify_cargo_failure, pkg_key, resolve_state_dir};
 use crate::state::events;
@@ -729,6 +733,10 @@ pub(crate) fn init_state(ws: &PlannedWorkspace, state_dir: &Path) -> Result<Exec
 }
 
 #[cfg(test)]
+#[expect(
+    deprecated,
+    reason = "legacy compatibility coverage for quarantined state-only helper"
+)]
 mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};

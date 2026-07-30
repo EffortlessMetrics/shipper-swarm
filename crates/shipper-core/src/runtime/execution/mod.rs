@@ -3,7 +3,9 @@
 //! Absorbed from the former `shipper-execution-core` microcrate. These items
 //! are `pub` (rather than `pub(crate)`) because an external fuzz target in
 //! `fuzz/` exercises them directly; they will be tightened to `pub(crate)`
-//! once the fuzz surface is rationalized in a later pass.
+//! once the fuzz surface is rationalized in a later pass. The state-only
+//! `update_state` helper is a hidden, deprecated compatibility shim and is
+//! not a supported publish transition boundary.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -15,6 +17,11 @@ use shipper_retry::{RetryStrategyConfig, RetryStrategyType, calculate_delay};
 use shipper_types::{AttemptDetail, ErrorClass, ExecutionState, PackageState, PublishRegime};
 
 /// Update a package state and persist the entire execution state to disk.
+///
+/// This is retained only for legacy callers. Publish execution must use the
+/// event-first transition boundary so `events.jsonl` remains authoritative.
+#[doc(hidden)]
+#[deprecated(note = "legacy state-only mutator; use the event-first engine transition boundary")]
 pub fn update_state(
     st: &mut ExecutionState,
     state_dir: &Path,
@@ -335,6 +342,10 @@ pub fn update_state_locked(st: &mut ExecutionState, key: &str, new_state: Packag
 }
 
 #[cfg(test)]
+#[expect(
+    deprecated,
+    reason = "legacy compatibility coverage for quarantined state-only helper"
+)]
 mod tests {
     use std::collections::BTreeMap;
     use std::path::PathBuf;

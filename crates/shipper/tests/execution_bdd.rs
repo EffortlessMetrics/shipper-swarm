@@ -1,6 +1,11 @@
 //! BDD tests for `shipper_core::runtime::execution` (absorbed from the former
 //! `shipper-execution-core` crate's `tests/execution_core_bdd.rs`).
 
+#![expect(
+    deprecated,
+    reason = "legacy compatibility coverage for quarantined state-only helper"
+)]
+
 use chrono::Utc;
 use std::collections::BTreeMap;
 
