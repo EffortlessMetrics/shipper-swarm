@@ -6301,11 +6301,11 @@ fn mode_parity_seed_state(ws: &PlannedWorkspace, scenario: ModeParityScenario) -
     }
 }
 
-fn mode_parity_cargo_env(
+fn mode_parity_cargo_env<'a>(
     scenario: ModeParityScenario,
-    cargo_bin: &str,
-    cargo_args_log: &str,
-) -> Vec<(&'static str, Option<&str>)> {
+    cargo_bin: &'a str,
+    cargo_args_log: &'a str,
+) -> Vec<(&'static str, Option<&'a str>)> {
     match scenario {
         ModeParityScenario::CleanPublish | ModeParityScenario::AlreadyPublishedInState => vec![
             ("SHIPPER_CARGO_BIN", Some(cargo_bin)),
