@@ -264,3 +264,112 @@ mod workspace_health {
         registry.join();
     }
 }
+
+// ============================================================================
+// Feature: Doctor Command - Runs Without A Loadable Workspace
+// ============================================================================
+
+mod without_workspace {
+    use super::*;
+
+    // Scenario: Doctor still diagnoses the environment from a directory that
+    // has no Cargo.toml at all.
+    #[test]
+    fn given_no_manifest_when_running_doctor_then_reports_environment_and_flags_missing_plan() {
+        // Given: A directory with no workspace manifest
+        let td = tempdir().expect("tempdir");
+        fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
+
+        let registry = spawn_registry(1);
+
+        // When: We run shipper doctor against it
+        let mut cmd = shipper_cmd();
+        cmd.arg("--manifest-path")
+            .arg(td.path().join("Cargo.toml"))
+            .arg("--api-base")
+            .arg(&registry.base_url)
+            .arg("doctor")
+            .env("CARGO_HOME", td.path().join("cargo-home"))
+            .env_remove("CARGO_REGISTRY_TOKEN")
+            .env_remove("CARGO_REGISTRIES_CRATES_IO_TOKEN");
+
+        // Then: It succeeds, the environment checks still run, and the missing
+        // plan is reported as a finding rather than as a fatal error.
+        cmd.assert()
+            .success()
+            .stdout(contains("Shipper Doctor - Diagnostics Report"))
+            .stdout(contains("no publish plan"))
+            .stdout(contains("workspace-plan-unavailable"))
+            .stdout(contains("registry_reachable: true"))
+            .stdout(contains("Diagnostics complete."));
+
+        registry.join();
+    }
+
+    // Scenario: The JSON envelope carries the same signal for CI consumers.
+    #[test]
+    fn given_no_manifest_when_running_doctor_json_then_envelope_marks_workspace_unavailable() {
+        // Given: A directory with no workspace manifest
+        let td = tempdir().expect("tempdir");
+        fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
+
+        let registry = spawn_registry(1);
+
+        // When: We ask for the machine-readable report
+        let mut cmd = shipper_cmd();
+        cmd.arg("--manifest-path")
+            .arg(td.path().join("Cargo.toml"))
+            .arg("--api-base")
+            .arg(&registry.base_url)
+            .arg("--format")
+            .arg("json")
+            .arg("doctor")
+            .env("CARGO_HOME", td.path().join("cargo-home"))
+            .env_remove("CARGO_REGISTRY_TOKEN")
+            .env_remove("CARGO_REGISTRIES_CRATES_IO_TOKEN");
+
+        let output = cmd.assert().success().get_output().stdout.clone();
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&output).expect("doctor JSON envelope parses");
+
+        // Then: The schema is unchanged and the report names the missing plan.
+        assert_eq!(parsed["schema_version"], "shipper.doctor.v1");
+        let report = &parsed["reports"][0];
+        assert!(
+            report["workspace_unavailable"].is_string(),
+            "expected workspace_unavailable reason, got {report}"
+        );
+        let finding_ids: Vec<&str> = report["findings"]
+            .as_array()
+            .expect("findings array")
+            .iter()
+            .filter_map(|finding| finding["id"].as_str())
+            .collect();
+        assert!(
+            finding_ids.contains(&"workspace-plan-unavailable"),
+            "expected workspace-plan-unavailable finding, got {finding_ids:?}"
+        );
+
+        registry.join();
+    }
+
+    // Scenario: `shipper ci` prints a static snippet, so it must not need a
+    // workspace either.
+    #[test]
+    fn given_no_manifest_when_printing_ci_snippet_then_it_still_prints() {
+        // Given: A directory with no workspace manifest
+        let td = tempdir().expect("tempdir");
+
+        // When: We ask for the GitHub Actions snippet
+        let mut cmd = shipper_cmd();
+        cmd.arg("--manifest-path")
+            .arg(td.path().join("Cargo.toml"))
+            .arg("ci")
+            .arg("github-actions");
+
+        // Then: The snippet is printed
+        cmd.assert()
+            .success()
+            .stdout(contains("GitHub Actions workflow snippet"));
+    }
+}

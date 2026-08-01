@@ -27,9 +27,56 @@ pub(crate) struct DoctorOutput {
     reports: Vec<DoctorReport>,
 }
 
+/// Whether `shipper doctor` is reporting on a real workspace plan.
+///
+/// `doctor` is the "why is my environment broken" command, so it must
+/// still run when `cargo metadata` cannot produce a plan — wrong
+/// directory, missing manifest, unparseable `Cargo.toml`. In that case
+/// the caller passes [`WorkspaceStatus::Unavailable`] with the reason,
+/// and every environment-level check (auth, tools, connectivity, git,
+/// encryption) still runs against the fallback root.
+#[derive(Debug, Clone)]
+pub(crate) enum WorkspaceStatus {
+    /// `cargo metadata` produced a plan; `workspace_root` is authoritative.
+    Planned,
+    /// No plan could be built. Carries the short reason for the report.
+    Unavailable(String),
+}
+
+impl WorkspaceStatus {
+    fn reason(&self) -> Option<&str> {
+        match self {
+            WorkspaceStatus::Planned => None,
+            WorkspaceStatus::Unavailable(reason) => Some(reason.as_str()),
+        }
+    }
+
+    fn finding(&self) -> Option<findings::Finding> {
+        let reason = self.reason()?;
+        Some(findings::Finding {
+            id: "workspace-plan-unavailable",
+            severity: findings::FindingLevel::Blocked,
+            status: findings::FindingLevel::Blocked,
+            title: "no publish plan could be built for this directory",
+            why_it_matters: "plan, preflight, publish, and resume all need a workspace plan; \
+                 the environment checks below still ran, but no release command will work here",
+            evidence: reason.to_string(),
+            try_next: vec![
+                "cd to the workspace root that owns the crates you want to publish",
+                "or pass `--manifest-path <workspace>/Cargo.toml`",
+                "then rerun `shipper doctor` followed by `shipper plan`",
+            ],
+            docs: Some("docs/tutorials/getting-started-5-minutes.md"),
+        })
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct DoctorReport {
     workspace_root: String,
+    /// Present only when no plan could be built for `workspace_root`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workspace_unavailable: Option<String>,
     registry: DoctorRegistryReport,
     auth: checks::auth::AuthCheck,
     state_dir: checks::state_dir::StateDirCheck,
@@ -51,6 +98,7 @@ struct DoctorRegistryReport {
 pub(crate) fn collect_report(
     ws: &plan::PlannedWorkspace,
     opts: &RuntimeOptions,
+    workspace: &WorkspaceStatus,
 ) -> Result<DoctorReport> {
     let auth = checks::auth::inspect(ws)?;
     let state_dir = checks::state_dir::inspect(ws, opts);
@@ -60,6 +108,7 @@ pub(crate) fn collect_report(
     let encryption = checks::encryption::inspect(opts);
 
     let mut findings = Vec::new();
+    findings.extend(workspace.finding());
     findings.extend(auth.findings.clone());
     findings.extend(state_dir.findings.clone());
     findings.extend(connectivity.findings.clone());
@@ -68,6 +117,7 @@ pub(crate) fn collect_report(
 
     Ok(DoctorReport {
         workspace_root: ws.workspace_root.display().to_string(),
+        workspace_unavailable: workspace.reason().map(str::to_string),
         registry: DoctorRegistryReport {
             name: ws.plan.registry.name.clone(),
             api_base: redact_diagnostic_value(&ws.plan.registry.api_base),
@@ -102,18 +152,28 @@ pub(crate) fn run(
     ws: &plan::PlannedWorkspace,
     opts: &RuntimeOptions,
     reporter: &mut dyn Reporter,
+    workspace: &WorkspaceStatus,
 ) -> Result<()> {
     let mut all = Vec::new();
 
     println!("Shipper Doctor - Diagnostics Report");
     println!("----------------------------------");
-    println!("workspace_root: {}", ws.workspace_root.display());
+    match workspace.reason() {
+        None => println!("workspace_root: {}", ws.workspace_root.display()),
+        Some(reason) => {
+            println!(
+                "workspace_root: {} (no publish plan — {reason})",
+                ws.workspace_root.display()
+            );
+        }
+    }
     println!(
         "registry: {} ({})",
         ws.plan.registry.name,
         redact_diagnostic_value(&ws.plan.registry.api_base)
     );
 
+    all.extend(workspace.finding());
     all.extend(checks::auth::check(ws)?);
     all.extend(checks::state_dir::check(ws, opts));
 
