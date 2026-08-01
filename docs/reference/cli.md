@@ -33,11 +33,16 @@ evidence for each targeted registry.
 | `shipper preflight` | Run safety checks without publishing | No (emits events) |
 | `shipper publish` | Publish missing workspace versions; skip already-published `name@version` pairs | Yes |
 | `shipper resume` | Continue from the last persisted state | Yes |
+| `shipper rehearse` | Publish the plan to an alternate registry and verify it there | Yes (`rehearsal.json`, events) |
 | `shipper status` | Compare local workspace versions to the registry | No |
 | `shipper doctor` | Environment / auth / connectivity diagnostics | No |
 | `shipper inspect-events` | View the event log | No |
 | `shipper inspect-receipt` | View the end-of-run receipt | No |
 | `shipper clean` | Clean `.shipper/` state files | Yes (destructive) |
+| `shipper yank` | Yank one `crate@version`, or execute a reviewed yank plan — containment, not undo | Yes (events; registry-mutating) |
+| `shipper plan-yank` | Generate a reverse-topological yank plan from a receipt | No (prints the plan) |
+| `shipper fix-forward` | Generate a supersession plan from a receipt marked compromised | No (prints the plan) |
+| `shipper remediate` | Generate or execute a receipt-driven remediation plan | Yes (`remediation-plan.json`; `--execute-plan` yanks) |
 | `shipper config init` | Generate a default `.shipper.toml` | No |
 | `shipper config validate` | Validate an existing config | No |
 | `shipper completion <shell>` | Generate shell completion scripts | No |
@@ -105,6 +110,27 @@ workspace publishing and recovery.
 | `shipper resume` | Plan/state mismatch | non-zero unless forced |
 | `shipper status` | Mixed registry state read succeeds | `0` |
 | `shipper status` | Registry/query failure | non-zero |
+
+### The publish / resume exit vocabulary
+
+`publish` and `resume` distinguish their two failure shapes, so a CI job can
+branch without parsing output:
+
+| Code | Meaning | What CI should do |
+|---:|---|---|
+| `0` | Every package published, or already present on the registry | proceed |
+| `1` | Complete failure — nothing was published this run | fix the cause, rerun |
+| `2` | Partial failure — some packages published, some did not | `shipper resume` after fixing the cause |
+
+Exit `2` means the release is half-applied and resuming is the intended
+recovery, *not* that the invocation was rejected.
+
+**Caveat:** argument-parsing errors (unknown flag, missing subcommand,
+invalid `--format` value) also exit `2`, because that is clap's convention
+and no work is performed. The two are distinguishable by side effect — a
+usage error writes nothing to `state_dir`, so a partial failure always
+leaves a `state.json` and an `events.jsonl` behind. Validate flags in a
+separate step if your pipeline needs the codes to be unambiguous.
 
 ## See also
 

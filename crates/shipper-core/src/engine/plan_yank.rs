@@ -196,17 +196,42 @@ pub fn build_plan_from_starting_crate(
     })
 }
 
-/// Load a saved yank plan from disk (#98 PR 5).
+/// Load a saved yank plan from disk.
 ///
 /// Used by `shipper yank --plan <path>` to drive execution over a
-/// reviewed plan file produced by `shipper plan-yank`. The file format
-/// is the same JSON shape `plan-yank --format json` produces, so plans
-/// round-trip without any munging.
+/// reviewed plan file produced by `shipper plan-yank`.
+///
+/// Accepts both shapes a plan can arrive in:
+///
+/// - a bare [`YankPlan`] object, and
+/// - the `shipper.plan_yank.v1` command envelope that
+///   `shipper plan-yank --format json` prints, which nests the plan
+///   under a `plan` key alongside `schema_version` and `command`.
+///
+/// Accepting the envelope is what makes the documented containment
+/// hand-off compose: `plan-yank --format json > plan.json` followed by
+/// `yank --plan plan.json`. Before this, that second command failed with
+/// `missing field plan_id`, and the operator had to strip the envelope
+/// with `jq` first — during an incident, which is the worst possible
+/// time to discover a pipeline does not connect.
 pub fn load_plan_from_path(path: &std::path::Path) -> Result<YankPlan> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read yank plan at {}", path.display()))?;
-    serde_json::from_str(&raw)
-        .with_context(|| format!("failed to parse yank plan at {}", path.display()))
+    parse_plan(&raw).with_context(|| format!("failed to parse yank plan at {}", path.display()))
+}
+
+/// Parse either a bare plan or the `plan-yank` command envelope.
+fn parse_plan(raw: &str) -> Result<YankPlan> {
+    let value: serde_json::Value = serde_json::from_str(raw)?;
+
+    // Only treat this as an envelope when the nested `plan` is itself an
+    // object; a bare plan has no `plan` key at all, so there is no
+    // ambiguity to resolve.
+    if let Some(nested) = value.get("plan").filter(|nested| nested.is_object()) {
+        return Ok(serde_json::from_value(nested.clone())?);
+    }
+
+    Ok(serde_json::from_value(value)?)
 }
 
 /// Load a receipt from an arbitrary path (not necessarily inside a state dir).
@@ -497,6 +522,38 @@ mod tests {
         let err = load_plan_from_path(std::path::Path::new("/definitely/not/there.json"))
             .expect_err("should fail");
         assert!(format!("{err:#}").contains("failed to read yank plan"));
+    }
+
+    #[test]
+    fn load_plan_from_path_accepts_the_plan_yank_command_envelope() {
+        // The exact shape `shipper plan-yank --format json` prints.
+        let td = tempfile::tempdir().expect("tempdir");
+        let path = td.path().join("envelope.json");
+        std::fs::write(
+            &path,
+            r#"{
+              "schema_version": "shipper.plan_yank.v1",
+              "command": "plan-yank",
+              "plan": {
+                "plan_id": "plan-abc",
+                "registry": "crates-io",
+                "filter": "all_published",
+                "entries": [
+                  {"name": "b", "version": "0.1.0", "reason": "CVE-1"},
+                  {"name": "a", "version": "0.1.0", "reason": null}
+                ]
+              }
+            }"#,
+        )
+        .expect("write");
+
+        let loaded = load_plan_from_path(&path).expect("envelope should load");
+
+        assert_eq!(loaded.plan_id, "plan-abc");
+        assert_eq!(loaded.registry, "crates-io");
+        assert_eq!(loaded.entries.len(), 2);
+        assert_eq!(loaded.entries[0].name, "b");
+        assert_eq!(loaded.entries[0].reason.as_deref(), Some("CVE-1"));
     }
 
     #[test]

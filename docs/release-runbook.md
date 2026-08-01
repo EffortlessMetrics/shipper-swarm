@@ -125,12 +125,27 @@ As of rc.2, Shipper has receipt-driven containment via `shipper plan-yank` and `
 
 ```bash
 # Generate a containment plan from the release's receipt
-shipper plan-yank --state-dir .shipper --output yank-plan.json
+shipper plan-yank --from-receipt .shipper/receipt.json --format json > yank-plan.json
 
-# Execute it
+# Review it, then execute it
 shipper yank --plan yank-plan.json
 ```
 
+`plan-yank` has no `--output`; it prints to stdout, so redirect it.
+`--from-receipt` defaults to `<state_dir>/receipt.json`, so
+`shipper plan-yank --format json > yank-plan.json` is equivalent when you
+have not moved the state directory.
+
 Manual fallback, if you don't have the receipt handy, is reverse topological order — install face first, then adapter, then core, then tiers 3 → 2 → 1. `cargo yank --vers "$VERSION" <crate>` per crate.
 
-**Fix-forward** (bump the affected crate to the next patch/rc and re-release just that slice) is almost always preferable to a full yank cascade. `shipper fix-forward --mark-compromised <crate>@<version>` plans the minimal repair; the receipt schema records `compromised_at`, `compromised_by`, `superseded_by` so the history survives.
+**Fix-forward** (bump the affected crate to the next patch/rc and re-release just that slice) is almost always preferable to a full yank cascade. Mark the bad version first, then plan the repair:
+
+```bash
+# Record which crate@version is compromised (and contain it)
+shipper yank --crate <crate> --version <version> --reason "<why>" --mark-compromised
+
+# Plan the minimal fix-forward from the marked receipt
+shipper fix-forward --from-receipt .shipper/receipt.json
+```
+
+`--mark-compromised` belongs to `yank`, not to `fix-forward`; `fix-forward` takes only `--from-receipt` and reads the markers `yank` wrote. The receipt schema records `compromised_at`, `compromised_by`, and `superseded_by` so the history survives.
