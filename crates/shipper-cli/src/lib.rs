@@ -1382,15 +1382,11 @@ pub fn run() -> Result<std::process::ExitCode> {
                 for reg in target_registries {
                     let mut current_planned = planned.clone();
                     current_planned.plan.registry = reg;
-                    reports.push(doctor::collect_report(
-                        &current_planned,
-                        &opts,
-                        &workspace_status,
-                    )?);
+                    reports.push(doctor::collect_report(&current_planned, &opts)?);
                 }
-                doctor::print_json(reports)?;
+                doctor::print_json(reports, &workspace_status)?;
             } else {
-                for reg in target_registries {
+                for (idx, reg) in target_registries.into_iter().enumerate() {
                     if opts.registries.len() > 1 {
                         println!(
                             "\n🩺 Diagnostics for registry: {} ({})",
@@ -1400,7 +1396,13 @@ pub fn run() -> Result<std::process::ExitCode> {
                     }
                     let mut current_planned = planned.clone();
                     current_planned.plan.registry = reg;
-                    doctor::run(&current_planned, &opts, &mut reporter, &workspace_status)?;
+                    doctor::run(
+                        &current_planned,
+                        &opts,
+                        &mut reporter,
+                        &workspace_status,
+                        idx == 0,
+                    )?;
                 }
             }
         }
@@ -5361,8 +5363,14 @@ mod tests {
             ],
             || {
                 let mut reporter = TestReporter::default();
-                doctor::run(&ws, &opts, &mut reporter, &doctor::WorkspaceStatus::Planned)
-                    .expect("doctor");
+                doctor::run(
+                    &ws,
+                    &opts,
+                    &mut reporter,
+                    &doctor::WorkspaceStatus::Planned,
+                    true,
+                )
+                .expect("doctor");
             },
         );
     }
@@ -5434,8 +5442,14 @@ mod tests {
             ],
             || {
                 let mut reporter = TestReporter::default();
-                doctor::run(&ws, &opts, &mut reporter, &doctor::WorkspaceStatus::Planned)
-                    .expect("doctor");
+                doctor::run(
+                    &ws,
+                    &opts,
+                    &mut reporter,
+                    &doctor::WorkspaceStatus::Planned,
+                    true,
+                )
+                .expect("doctor");
             },
         );
     }

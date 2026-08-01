@@ -24,6 +24,18 @@ pub(crate) use redaction::redact_diagnostic_value;
 #[derive(Debug, Serialize)]
 pub(crate) struct DoctorOutput {
     schema_version: &'static str,
+    /// Reason no publish plan could be built, when that is the case.
+    ///
+    /// Envelope-level, not per-report: "this directory has no workspace"
+    /// is one condition about the run, and `--registries` fans the
+    /// per-registry reports out below. Repeating it inside each report
+    /// would make a consumer counting blockers over-count by the number
+    /// of registries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workspace_unavailable: Option<String>,
+    /// Run-scoped findings — those that hold regardless of registry.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    workspace_findings: Vec<findings::Finding>,
     reports: Vec<DoctorReport>,
 }
 
@@ -74,9 +86,6 @@ impl WorkspaceStatus {
 #[derive(Debug, Serialize)]
 pub(crate) struct DoctorReport {
     workspace_root: String,
-    /// Present only when no plan could be built for `workspace_root`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    workspace_unavailable: Option<String>,
     registry: DoctorRegistryReport,
     auth: checks::auth::AuthCheck,
     state_dir: checks::state_dir::StateDirCheck,
@@ -98,7 +107,6 @@ struct DoctorRegistryReport {
 pub(crate) fn collect_report(
     ws: &plan::PlannedWorkspace,
     opts: &RuntimeOptions,
-    workspace: &WorkspaceStatus,
 ) -> Result<DoctorReport> {
     let auth = checks::auth::inspect(ws)?;
     let state_dir = checks::state_dir::inspect(ws, opts);
@@ -108,7 +116,6 @@ pub(crate) fn collect_report(
     let encryption = checks::encryption::inspect(opts);
 
     let mut findings = Vec::new();
-    findings.extend(workspace.finding());
     findings.extend(auth.findings.clone());
     findings.extend(state_dir.findings.clone());
     findings.extend(connectivity.findings.clone());
@@ -117,7 +124,6 @@ pub(crate) fn collect_report(
 
     Ok(DoctorReport {
         workspace_root: ws.workspace_root.display().to_string(),
-        workspace_unavailable: workspace.reason().map(str::to_string),
         registry: DoctorRegistryReport {
             name: ws.plan.registry.name.clone(),
             api_base: redact_diagnostic_value(&ws.plan.registry.api_base),
@@ -138,9 +144,11 @@ pub(crate) fn collect_report(
     })
 }
 
-pub(crate) fn print_json(reports: Vec<DoctorReport>) -> Result<()> {
+pub(crate) fn print_json(reports: Vec<DoctorReport>, workspace: &WorkspaceStatus) -> Result<()> {
     let output = DoctorOutput {
         schema_version: "shipper.doctor.v1",
+        workspace_unavailable: workspace.reason().map(str::to_string),
+        workspace_findings: workspace.finding().into_iter().collect(),
         reports,
     };
     let json = serde_json::to_string_pretty(&output).context("serialize doctor report")?;
@@ -148,11 +156,20 @@ pub(crate) fn print_json(reports: Vec<DoctorReport>) -> Result<()> {
     Ok(())
 }
 
+/// Render one registry's diagnostics as text.
+///
+/// `emit_workspace_finding` exists because `--registries` calls this
+/// once per registry, while a missing workspace plan is a property of
+/// the run, not of any registry. The header line repeats it as context
+/// for whichever block you are reading; the finding itself is listed
+/// once, by the first block, so the findings list stays a list of
+/// distinct problems.
 pub(crate) fn run(
     ws: &plan::PlannedWorkspace,
     opts: &RuntimeOptions,
     reporter: &mut dyn Reporter,
     workspace: &WorkspaceStatus,
+    emit_workspace_finding: bool,
 ) -> Result<()> {
     let mut all = Vec::new();
 
@@ -173,7 +190,9 @@ pub(crate) fn run(
         redact_diagnostic_value(&ws.plan.registry.api_base)
     );
 
-    all.extend(workspace.finding());
+    if emit_workspace_finding {
+        all.extend(workspace.finding());
+    }
     all.extend(checks::auth::check(ws)?);
     all.extend(checks::state_dir::check(ws, opts));
 

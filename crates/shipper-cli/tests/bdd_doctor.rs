@@ -332,23 +332,95 @@ mod without_workspace {
         let parsed: serde_json::Value =
             serde_json::from_slice(&output).expect("doctor JSON envelope parses");
 
-        // Then: The schema is unchanged and the report names the missing plan.
+        // Then: The schema is unchanged and the envelope names the missing
+        // plan. Both live at envelope level, not inside a per-registry
+        // report — see the multi-registry scenario below for why.
         assert_eq!(parsed["schema_version"], "shipper.doctor.v1");
-        let report = &parsed["reports"][0];
         assert!(
-            report["workspace_unavailable"].is_string(),
-            "expected workspace_unavailable reason, got {report}"
+            parsed["workspace_unavailable"].is_string(),
+            "expected workspace_unavailable reason, got {parsed}"
         );
-        let finding_ids: Vec<&str> = report["findings"]
+        let finding_ids: Vec<&str> = parsed["workspace_findings"]
             .as_array()
-            .expect("findings array")
+            .expect("workspace_findings array")
             .iter()
             .filter_map(|finding| finding["id"].as_str())
             .collect();
-        assert!(
-            finding_ids.contains(&"workspace-plan-unavailable"),
-            "expected workspace-plan-unavailable finding, got {finding_ids:?}"
+        assert_eq!(finding_ids, vec!["workspace-plan-unavailable"]);
+
+        registry.join();
+    }
+
+    // Scenario: with several registries, the workspace condition is still
+    // reported exactly once. It describes the run, not any registry, so a
+    // consumer counting blockers must not see it multiplied by N.
+    #[test]
+    fn given_multiple_registries_when_running_doctor_json_then_workspace_finding_is_not_repeated() {
+        // Given: A directory with no workspace manifest and two registries
+        let td = tempdir().expect("tempdir");
+        fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
+
+        let registry = spawn_registry(2);
+        write_file(
+            &td.path().join(".shipper.toml"),
+            &format!(
+                r#"
+[[registries.registries]]
+name = "alpha"
+api_base = "{base}"
+
+[[registries.registries]]
+name = "beta"
+api_base = "{base}"
+"#,
+                base = registry.base_url
+            ),
         );
+
+        // When: We ask for diagnostics against both
+        let mut cmd = shipper_cmd();
+        cmd.arg("--manifest-path")
+            .arg(td.path().join("Cargo.toml"))
+            .arg("--all-registries")
+            .arg("--format")
+            .arg("json")
+            .arg("doctor")
+            .env("CARGO_HOME", td.path().join("cargo-home"))
+            .env_remove("CARGO_REGISTRY_TOKEN")
+            .env_remove("CARGO_REGISTRIES_CRATES_IO_TOKEN");
+
+        let output = cmd.assert().success().get_output().stdout.clone();
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&output).expect("doctor JSON envelope parses");
+
+        // Then: Two registry reports, one workspace finding.
+        assert_eq!(
+            parsed["reports"].as_array().expect("reports array").len(),
+            2
+        );
+        assert_eq!(
+            parsed["workspace_findings"]
+                .as_array()
+                .expect("workspace_findings array")
+                .len(),
+            1
+        );
+        for report in parsed["reports"].as_array().expect("reports array") {
+            assert!(
+                report["workspace_unavailable"].is_null(),
+                "per-registry reports must not repeat the run-level condition: {report}"
+            );
+            let ids: Vec<&str> = report["findings"]
+                .as_array()
+                .expect("findings array")
+                .iter()
+                .filter_map(|finding| finding["id"].as_str())
+                .collect();
+            assert!(
+                !ids.contains(&"workspace-plan-unavailable"),
+                "workspace finding leaked into a registry report: {ids:?}"
+            );
+        }
 
         registry.join();
     }
