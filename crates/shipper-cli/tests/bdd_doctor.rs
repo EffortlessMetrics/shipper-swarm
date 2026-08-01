@@ -425,6 +425,69 @@ api_base = "{base}"
         registry.join();
     }
 
+    // Scenario: the text path applies the same rule as the JSON envelope —
+    // the workspace header repeats per registry block (each block is read on
+    // its own) but the finding is listed once, so the findings list stays a
+    // list of distinct problems.
+    #[test]
+    fn given_multiple_registries_when_running_doctor_text_then_finding_listed_once() {
+        // Given: A directory with no workspace manifest and two registries
+        let td = tempdir().expect("tempdir");
+        fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
+
+        let registry = spawn_registry(2);
+        write_file(
+            &td.path().join(".shipper.toml"),
+            &format!(
+                r#"
+[[registries.registries]]
+name = "alpha"
+api_base = "{base}"
+
+[[registries.registries]]
+name = "beta"
+api_base = "{base}"
+"#,
+                base = registry.base_url
+            ),
+        );
+
+        // When: We run text diagnostics against both
+        let mut cmd = shipper_cmd();
+        cmd.arg("--manifest-path")
+            .arg(td.path().join("Cargo.toml"))
+            .arg("--all-registries")
+            .arg("doctor")
+            .env("CARGO_HOME", td.path().join("cargo-home"))
+            .env_remove("CARGO_REGISTRY_TOKEN")
+            .env_remove("CARGO_REGISTRIES_CRATES_IO_TOKEN");
+
+        let output = cmd.assert().success().get_output().stdout.clone();
+        let stdout = String::from_utf8_lossy(&output);
+
+        // Then: Two diagnostic blocks, each noting the missing plan in its
+        // header, but exactly one `workspace-plan-unavailable` finding.
+        assert_eq!(
+            stdout
+                .matches("Shipper Doctor - Diagnostics Report")
+                .count(),
+            2,
+            "expected one diagnostics block per registry:\n{stdout}"
+        );
+        assert_eq!(
+            stdout.matches("(no publish plan").count(),
+            2,
+            "each block's header should carry the workspace note:\n{stdout}"
+        );
+        assert_eq!(
+            stdout.matches("workspace-plan-unavailable").count(),
+            1,
+            "the finding itself must be listed once:\n{stdout}"
+        );
+
+        registry.join();
+    }
+
     // Scenario: `shipper ci` prints a static snippet, so it must not need a
     // workspace either.
     #[test]

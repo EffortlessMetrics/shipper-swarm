@@ -4,11 +4,18 @@ expression: normalize_help_output(&stdout)
 ---
 Print a ready-to-paste CI configuration snippet for a supported platform.
 
-The snippet wires up the plan → preflight → publish sequence, uploads the
-`.shipper/` evidence packet as a build artifact, and shows where the
-registry token (or Trusted Publishing step) belongs. It is printed to
-stdout and reads nothing from your workspace, so it works from any
-directory.
+The snippet covers the resumability wiring: it restores `.shipper/` from
+cache and from the previous run's artifact, runs `shipper publish`, and
+saves `.shipper/` again with `if: always()` so an interrupted run can be
+resumed from the uploaded state. It also shows where the registry token
+goes. It is printed to stdout and reads nothing from your workspace, so
+it works from any directory.
+
+It is a starting point, not a full release job. It does not include
+`shipper plan` / `shipper preflight` proof steps or the Trusted
+Publishing token-mint step — for a complete workflow, including
+`rust-lang/crates-io-auth-action@v1`, see
+docs/how-to/run-in-github-actions.md.
 
 EXAMPLES:
     # Write a GitHub Actions release job to a workflow file:
