@@ -21,6 +21,7 @@
 //! send_webhook(&config, &payload).expect("send");
 //! ```
 
+use std::fmt;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -42,7 +43,12 @@ pub enum WebhookType {
 }
 
 /// Webhook configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` is implemented manually so the signing secret is never printed.
+/// A derived `Debug` would put the plaintext secret into any log line, error
+/// chain, panic message, or receipt evidence field that formats the config
+/// with `{:?}`.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct WebhookConfig {
     /// Webhook URL
     pub url: String,
@@ -59,6 +65,23 @@ pub struct WebhookConfig {
 
 fn default_timeout() -> u64 {
     30
+}
+
+/// Placeholder substituted for the signing secret in `Debug` output.
+const REDACTED_SECRET: &str = "<redacted>";
+
+impl fmt::Debug for WebhookConfig {
+    /// Formats every field as the derived impl would, except `secret`, which
+    /// shows presence (`Some("<redacted>")`) or absence (`None`) but never the
+    /// value.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WebhookConfig")
+            .field("url", &self.url)
+            .field("webhook_type", &self.webhook_type)
+            .field("secret", &self.secret.as_ref().map(|_| REDACTED_SECRET))
+            .field("timeout_secs", &self.timeout_secs)
+            .finish()
+    }
 }
 
 impl Default for WebhookConfig {
@@ -497,6 +520,60 @@ mod tests {
         assert!(json.contains("\"run_id\":42"));
         // Flattened means no "extra" key wrapper
         assert!(!json.contains("\"extra\""));
+    }
+
+    // --- Debug redaction of the signing secret ---
+
+    #[test]
+    fn debug_does_not_print_signing_secret() {
+        let config = WebhookConfig {
+            url: "https://example.com/hook".to_string(),
+            webhook_type: WebhookType::Generic,
+            secret: Some("cio_super_secret_signing_key".to_string()),
+            timeout_secs: 15,
+        };
+
+        let compact = format!("{config:?}");
+        let pretty = format!("{config:#?}");
+
+        for rendered in [&compact, &pretty] {
+            assert!(
+                !rendered.contains("cio_super_secret_signing_key"),
+                "signing secret leaked into Debug output: {rendered}"
+            );
+            assert!(
+                rendered.contains("<redacted>"),
+                "expected redaction placeholder in: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn debug_preserves_non_secret_fields() {
+        let config = WebhookConfig {
+            url: "https://example.com/hook".to_string(),
+            webhook_type: WebhookType::Slack,
+            secret: Some("s3cret".to_string()),
+            timeout_secs: 15,
+        };
+        assert_eq!(
+            format!("{config:?}"),
+            r#"WebhookConfig { url: "https://example.com/hook", webhook_type: Slack, secret: Some("<redacted>"), timeout_secs: 15 }"#
+        );
+    }
+
+    #[test]
+    fn debug_shows_none_when_secret_absent() {
+        let config = WebhookConfig {
+            url: "https://example.com/hook".to_string(),
+            webhook_type: WebhookType::Discord,
+            secret: None,
+            timeout_secs: 30,
+        };
+        assert_eq!(
+            format!("{config:?}"),
+            r#"WebhookConfig { url: "https://example.com/hook", webhook_type: Discord, secret: None, timeout_secs: 30 }"#
+        );
     }
 
     // --- Serialization round-trips ---
