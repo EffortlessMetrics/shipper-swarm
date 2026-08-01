@@ -196,39 +196,46 @@ pub fn build_plan_from_starting_crate(
     })
 }
 
+/// `schema_version` carried by `shipper plan-yank --format json`.
+///
+/// Lives here rather than in the CLI so the writer and the reader of a
+/// plan file agree on one constant.
+pub const PLAN_YANK_SCHEMA_VERSION: &str = "shipper.plan_yank.v1";
+
 /// Load a saved yank plan from disk.
 ///
 /// Used by `shipper yank --plan <path>` to drive execution over a
-/// reviewed plan file produced by `shipper plan-yank`.
+/// reviewed plan file produced by `shipper plan-yank --format json`.
 ///
-/// Accepts both shapes a plan can arrive in:
+/// That output is the `shipper.plan_yank.v1` command envelope, in which
+/// the plan's fields (`plan_id`, `registry`, `filter`, `entries`) are
+/// **flattened** to the top level alongside `schema_version` and
+/// `command`. Because [`YankPlan`] ignores unknown fields, the envelope
+/// deserializes directly; a bare `YankPlan` — hand-written, or produced
+/// by an older Shipper — is accepted the same way.
 ///
-/// - a bare [`YankPlan`] object, and
-/// - the `shipper.plan_yank.v1` command envelope that
-///   `shipper plan-yank --format json` prints, which nests the plan
-///   under a `plan` key alongside `schema_version` and `command`.
-///
-/// Accepting the envelope is what makes the documented containment
-/// hand-off compose: `plan-yank --format json > plan.json` followed by
-/// `yank --plan plan.json`. Before this, that second command failed with
-/// `missing field plan_id`, and the operator had to strip the envelope
-/// with `jq` first — during an incident, which is the worst possible
-/// time to discover a pipeline does not connect.
+/// What is *not* accepted is another command's envelope. `--plan` drives
+/// `cargo yank`, so pointing it at the wrong file should fail on what
+/// the file is, not on whichever field happens to be missing from it.
+/// When a `schema_version` marker is present it must be
+/// [`PLAN_YANK_SCHEMA_VERSION`].
 pub fn load_plan_from_path(path: &std::path::Path) -> Result<YankPlan> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read yank plan at {}", path.display()))?;
     parse_plan(&raw).with_context(|| format!("failed to parse yank plan at {}", path.display()))
 }
 
-/// Parse either a bare plan or the `plan-yank` command envelope.
+/// Parse a plan file, rejecting envelopes that belong to another command.
 fn parse_plan(raw: &str) -> Result<YankPlan> {
     let value: serde_json::Value = serde_json::from_str(raw)?;
 
-    // Only treat this as an envelope when the nested `plan` is itself an
-    // object; a bare plan has no `plan` key at all, so there is no
-    // ambiguity to resolve.
-    if let Some(nested) = value.get("plan").filter(|nested| nested.is_object()) {
-        return Ok(serde_json::from_value(nested.clone())?);
+    if let Some(schema) = value.get("schema_version").and_then(|value| value.as_str())
+        && schema != PLAN_YANK_SCHEMA_VERSION
+    {
+        bail!(
+            "this is a `{schema}` document, not a `{PLAN_YANK_SCHEMA_VERSION}` yank plan; \
+             `yank --plan` takes the output of `shipper plan-yank --format json`"
+        );
     }
 
     Ok(serde_json::from_value(value)?)
@@ -525,8 +532,10 @@ mod tests {
     }
 
     #[test]
-    fn load_plan_from_path_accepts_the_plan_yank_command_envelope() {
-        // The exact shape `shipper plan-yank --format json` prints.
+    fn load_plan_from_path_accepts_the_flattened_plan_yank_envelope() {
+        // The shape `shipper plan-yank --format json` actually prints:
+        // `PlanYankJsonReport` flattens the plan, so the plan fields sit
+        // at the top level next to `schema_version` and `command`.
         let td = tempfile::tempdir().expect("tempdir");
         let path = td.path().join("envelope.json");
         std::fs::write(
@@ -534,15 +543,13 @@ mod tests {
             r#"{
               "schema_version": "shipper.plan_yank.v1",
               "command": "plan-yank",
-              "plan": {
-                "plan_id": "plan-abc",
-                "registry": "crates-io",
-                "filter": "all_published",
-                "entries": [
-                  {"name": "b", "version": "0.1.0", "reason": "CVE-1"},
-                  {"name": "a", "version": "0.1.0", "reason": null}
-                ]
-              }
+              "plan_id": "plan-abc",
+              "registry": "crates-io",
+              "filter": "all_published",
+              "entries": [
+                {"name": "b", "version": "0.1.0", "reason": "CVE-1"},
+                {"name": "a", "version": "0.1.0"}
+              ]
             }"#,
         )
         .expect("write");
@@ -554,6 +561,38 @@ mod tests {
         assert_eq!(loaded.entries.len(), 2);
         assert_eq!(loaded.entries[0].name, "b");
         assert_eq!(loaded.entries[0].reason.as_deref(), Some("CVE-1"));
+    }
+
+    #[test]
+    fn load_plan_from_path_rejects_another_commands_envelope() {
+        // `--plan` drives `cargo yank`. Pointing it at a fix-forward
+        // envelope must fail on what the file is, not on a missing field.
+        let td = tempfile::tempdir().expect("tempdir");
+        let path = td.path().join("fix-forward.json");
+        std::fs::write(
+            &path,
+            r#"{
+              "schema_version": "shipper.fix_forward.v1",
+              "command": "fix-forward",
+              "plan_id": "plan-abc",
+              "registry": "crates-io",
+              "compromised_count": 1,
+              "steps": []
+            }"#,
+        )
+        .expect("write");
+
+        let err = load_plan_from_path(&path).expect_err("foreign envelope must be refused");
+        let rendered = format!("{err:#}");
+
+        assert!(
+            rendered.contains("shipper.fix_forward.v1"),
+            "error should name the document it found: {rendered}"
+        );
+        assert!(
+            rendered.contains("shipper plan-yank --format json"),
+            "error should name the command that produces a yank plan: {rendered}"
+        );
     }
 
     #[test]

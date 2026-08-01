@@ -127,10 +127,19 @@ recovery, *not* that the invocation was rejected.
 
 **Caveat:** argument-parsing errors (unknown flag, missing subcommand,
 invalid `--format` value) also exit `2`, because that is clap's convention
-and no work is performed. The two are distinguishable by side effect — a
-usage error writes nothing to `state_dir`, so a partial failure always
-leaves a `state.json` and an `events.jsonl` behind. Validate flags in a
-separate step if your pipeline needs the codes to be unambiguous.
+and no work is performed.
+
+The two are distinguishable by side effect: a usage error writes nothing,
+so a partial failure always leaves a `state.json` and an `events.jsonl`
+behind. Check the right directory, though — that is `<workspace_root>/.shipper/`,
+where `workspace_root` comes from `--manifest-path` (default `Cargo.toml`)
+and **not** from the current working directory, unless `--state-dir` was
+given an absolute path. A CI step that looks for `./.shipper/` after
+running Shipper from a different directory will mis-classify the exit code.
+
+If your pipeline needs the codes to be unambiguous, validate flags in a
+separate step, or pass an explicit absolute `--state-dir` and test for that
+path.
 
 ## See also
 

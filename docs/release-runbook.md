@@ -138,14 +138,20 @@ have not moved the state directory.
 
 Manual fallback, if you don't have the receipt handy, is reverse topological order — install face first, then adapter, then core, then tiers 3 → 2 → 1. `cargo yank --vers "$VERSION" <crate>` per crate.
 
-**Fix-forward** (bump the affected crate to the next patch/rc and re-release just that slice) is almost always preferable to a full yank cascade. Mark the bad version first, then plan the repair:
+**Fix-forward** (bump the affected crate to the next patch/rc and re-release just that slice) is almost always preferable to a full yank cascade.
+
+`fix-forward` plans from receipt entries that carry a `compromised_at` marker, and the only command that writes that marker today is `yank --mark-compromised`:
 
 ```bash
-# Record which crate@version is compromised (and contain it)
+# ⚠️ THIS YANKS. `--mark-compromised` is a flag on `yank`, not a separate
+# "mark" command: this contains <crate>@<version> on the registry AND
+# records the marker in the receipt. There is no mark-without-yank path.
 shipper yank --crate <crate> --version <version> --reason "<why>" --mark-compromised
 
-# Plan the minimal fix-forward from the marked receipt
+# Then plan the minimal repair from the marked receipt
 shipper fix-forward --from-receipt .shipper/receipt.json
 ```
 
-`--mark-compromised` belongs to `yank`, not to `fix-forward`; `fix-forward` takes only `--from-receipt` and reads the markers `yank` wrote. The receipt schema records `compromised_at`, `compromised_by`, and `superseded_by` so the history survives.
+If you want the fix-forward plan *without* containing the old version yet, skip the first command and edit `compromised_at` / `compromised_by` into the receipt entry yourself — `fix-forward` only reads them. Note that `yank` execution is proven against fake Cargo and a mock registry; a live crates.io yank is an operator action, not something Shipper has release evidence for.
+
+The receipt schema records `compromised_at`, `compromised_by`, and `superseded_by` so the history survives either way.

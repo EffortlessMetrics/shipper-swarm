@@ -1724,7 +1724,7 @@ pub fn run() -> Result<std::process::ExitCode> {
             match cli.format.as_str() {
                 "json" => {
                     let report = PlanYankJsonReport {
-                        schema_version: "shipper.plan_yank.v1",
+                        schema_version: plan_yank::PLAN_YANK_SCHEMA_VERSION,
                         command: "plan-yank",
                         plan: &plan,
                     };
