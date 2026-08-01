@@ -232,34 +232,49 @@ mod strip_ansi_tests {
 }
 
 fn redact_line(line: &str) -> String {
-    let out = redact_authorization_bearer(line);
+    let out = redact_authorization_credential(line);
     let out = redact_token_assignments(&out);
     redact_cargo_token_env(&out)
 }
 
-fn redact_authorization_bearer(line: &str) -> String {
+/// Authorization schemes whose credential must never reach persisted evidence.
+///
+/// `Basic` carries a base64 `user:password`, `Token`/`ApiKey` carry raw API
+/// keys, and `Digest` carries a challenge response — all as recoverable as a
+/// bearer token. Under-redaction is the dangerous direction for receipts and
+/// events, so every scheme that puts a credential after the scheme name is
+/// listed here.
+const AUTHORIZATION_SCHEMES: [&str; 5] = ["bearer", "basic", "token", "apikey", "digest"];
+
+fn redact_authorization_credential(line: &str) -> String {
     if let Some(pos) = find_ascii_case_insensitive(line, "authorization:", 0) {
         let after_authorization = pos + "authorization:".len();
-        if let Some(bearer_pos) = find_ascii_case_insensitive(line, "bearer", after_authorization) {
-            let after_bearer = bearer_pos + "bearer".len();
-            if !line
-                .as_bytes()
-                .get(after_bearer)
-                .is_some_and(|b| matches!(b, b' ' | b'\t'))
-            {
+        // Use the earliest scheme that is actually followed by a separator, so
+        // a scheme word embedded in other text (`BasicAuth`) neither triggers a
+        // redaction nor shadows a real scheme later on the line.
+        let scheme_match = AUTHORIZATION_SCHEMES
+            .iter()
+            .filter_map(|scheme| {
+                let scheme_pos = find_ascii_case_insensitive(line, scheme, after_authorization)?;
+                let after_scheme = scheme_pos + scheme.len();
+                line.as_bytes()
+                    .get(after_scheme)
+                    .is_some_and(|b| matches!(b, b' ' | b'\t'))
+                    .then_some((scheme_pos, after_scheme))
+            })
+            .min_by_key(|(scheme_pos, _)| *scheme_pos);
+
+        if let Some((_, after_scheme)) = scheme_match {
+            let whitespace_after_scheme = leading_whitespace_len(&line[after_scheme..]);
+            let credential_start = after_scheme + whitespace_after_scheme;
+            if credential_start >= line.len() {
                 return line.to_string();
             }
 
-            let whitespace_after_bearer = leading_whitespace_len(&line[after_bearer..]);
-            let token_start = after_bearer + whitespace_after_bearer;
-            if token_start >= line.len() {
-                return line.to_string();
-            }
-
-            let token_end = env_value_end(line, token_start);
-            let redact_start = after_bearer + 1;
+            let credential_end = env_value_end(line, credential_start);
+            let redact_start = after_scheme + 1;
             let mut out = line.to_string();
-            out.replace_range(redact_start..token_end, "[REDACTED]");
+            out.replace_range(redact_start..credential_end, "[REDACTED]");
             return out;
         }
     }
@@ -672,11 +687,76 @@ mod tests {
     }
 
     #[test]
-    fn redact_basic_auth_not_touched() {
-        // Only bearer tokens are redacted; Basic auth passes through
+    fn redact_basic_auth_credential() {
+        // base64("user:pass") is trivially reversible, so it must not survive.
         let input = "Authorization: Basic dXNlcjpwYXNz";
         let out = redact_sensitive(input);
-        assert_eq!(out, "Authorization: Basic dXNlcjpwYXNz");
+        assert_eq!(out, "Authorization: Basic [REDACTED]");
+        assert!(!out.contains("dXNlcjpwYXNz"));
+    }
+
+    #[test]
+    fn redact_token_scheme_credential() {
+        let input = "Authorization: Token cio_raw_api_key";
+        let out = redact_sensitive(input);
+        assert_eq!(out, "Authorization: Token [REDACTED]");
+        assert!(!out.contains("cio_raw_api_key"));
+    }
+
+    #[test]
+    fn redact_apikey_scheme_credential() {
+        let input = "Authorization: ApiKey abc123secret";
+        let out = redact_sensitive(input);
+        assert_eq!(out, "Authorization: ApiKey [REDACTED]");
+        assert!(!out.contains("abc123secret"));
+    }
+
+    #[test]
+    fn redact_digest_scheme_credential() {
+        let input = "Authorization: Digest response=deadbeefcafe";
+        let out = redact_sensitive(input);
+        assert!(!out.contains("deadbeefcafe"));
+        assert!(out.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redact_basic_auth_case_insensitive() {
+        let input = "authorization: BASIC dXNlcjpwYXNz";
+        let out = redact_sensitive(input);
+        assert_eq!(out, "authorization: BASIC [REDACTED]");
+    }
+
+    #[test]
+    fn redact_basic_auth_with_extra_whitespace() {
+        let input = "Authorization:   Basic   dXNlcjpwYXNz";
+        let out = redact_sensitive(input);
+        assert_eq!(out, "Authorization:   Basic [REDACTED]");
+    }
+
+    #[test]
+    fn redact_mixed_schemes_across_lines() {
+        let input = "Authorization: Bearer tok1\nAuthorization: Basic dXNlcjpwYXNz\nAuthorization: Token tok3";
+        let out = redact_sensitive(input);
+        assert_eq!(
+            out,
+            "Authorization: Bearer [REDACTED]\nAuthorization: Basic [REDACTED]\nAuthorization: Token [REDACTED]"
+        );
+    }
+
+    #[test]
+    fn scheme_word_inside_bearer_credential_does_not_shadow_scheme() {
+        // "token" appears inside the credential; the earliest scheme wins.
+        let input = "Authorization: Bearer my_token_value";
+        let out = redact_sensitive(input);
+        assert_eq!(out, "Authorization: Bearer [REDACTED]");
+        assert!(!out.contains("my_token_value"));
+    }
+
+    #[test]
+    fn scheme_name_without_separating_space_is_not_redacted() {
+        let input = "Authorization: BasicAuth negotiation failed";
+        let out = redact_sensitive(input);
+        assert_eq!(out, input);
     }
 
     #[test]
