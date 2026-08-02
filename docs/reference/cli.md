@@ -148,6 +148,13 @@ and **not** from the current working directory, unless `--state-dir` was
 given an absolute path. A CI step that looks for `./.shipper/` after
 running Shipper from a different directory will mis-classify the exit code.
 
+**Multi-registry runs write elsewhere again.** When more than one registry
+is targeted, each run gets its own subdirectory — `<state_dir>/<registry-name>/`
+— so the root `state_dir` holds no `state.json` at all. A CI step checking
+only the root would read "no state file" and mis-classify a partial failure
+as a usage error, which is the opposite of the truth. Inspect
+`<state_dir>/<registry-name>/` for every targeted registry.
+
 If your pipeline needs the codes to be unambiguous, validate flags in a
 separate step, or pass an explicit absolute `--state-dir` and test for that
 path.
