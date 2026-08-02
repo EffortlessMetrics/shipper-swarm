@@ -43,8 +43,9 @@ pub enum WebhookType {
 
 /// Webhook configuration
 ///
-/// `Debug` is implemented manually so signing secrets are not copied into
-/// diagnostics, error chains, or evidence that formats configuration values.
+/// `Debug` is implemented manually so signing secrets and credential-bearing
+/// webhook URLs are not copied into diagnostics, error chains, or evidence
+/// that formats configuration values.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct WebhookConfig {
     /// Webhook URL
@@ -68,8 +69,13 @@ const REDACTED_SECRET: &str = "<redacted>";
 
 impl fmt::Debug for WebhookConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let safe_url = if self.url.is_empty() {
+            ""
+        } else {
+            REDACTED_SECRET
+        };
         f.debug_struct("WebhookConfig")
-            .field("url", &self.url)
+            .field("url", &safe_url)
             .field("webhook_type", &self.webhook_type)
             .field("secret", &self.secret.as_ref().map(|_| REDACTED_SECRET))
             .field("timeout_secs", &self.timeout_secs)
@@ -2170,6 +2176,23 @@ mod tests {
                 timeout_secs: 45,
             };
             insta::assert_debug_snapshot!("config_discord_with_secret", config);
+        }
+
+        #[test]
+        fn debug_redacts_credential_bearing_webhook_url() {
+            let webhook_id = ["12", "3"].concat();
+            let webhook_token = ["to", "k"].concat();
+            let config = WebhookConfig {
+                url: format!("https://discord.com/api/webhooks/{webhook_id}/{webhook_token}"),
+                webhook_type: WebhookType::Discord,
+                secret: None,
+                timeout_secs: 30,
+            };
+
+            let debug = format!("{config:?}");
+            assert!(debug.contains("url: \"<redacted>\""));
+            assert!(!debug.contains(&webhook_id));
+            assert!(!debug.contains(&webhook_token));
         }
 
         #[test]
