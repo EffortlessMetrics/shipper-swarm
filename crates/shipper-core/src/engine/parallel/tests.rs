@@ -6200,9 +6200,11 @@ fn publish_package_final_chance_success_emits_package_published_event() {
 #[derive(Clone, Copy, Debug)]
 enum ModeParityScenario {
     CleanPublish,
+    ReadinessTimeoutThenVisible,
     PermanentFailure,
     AlreadyPublishedInState,
     StillUnknownResume,
+    EventWriteFailure,
 }
 
 #[derive(Debug)]
@@ -6217,6 +6219,10 @@ const MODE_PARITY_CORPUS: &[ModeParityCase] = &[
         scenario: ModeParityScenario::CleanPublish,
     },
     ModeParityCase {
+        name: "readiness_timeout_then_visible",
+        scenario: ModeParityScenario::ReadinessTimeoutThenVisible,
+    },
+    ModeParityCase {
         name: "permanent_failure",
         scenario: ModeParityScenario::PermanentFailure,
     },
@@ -6228,14 +6234,20 @@ const MODE_PARITY_CORPUS: &[ModeParityCase] = &[
         name: "still_unknown_resume",
         scenario: ModeParityScenario::StillUnknownResume,
     },
+    ModeParityCase {
+        name: "event_write_failure",
+        scenario: ModeParityScenario::EventWriteFailure,
+    },
 ];
 
 #[derive(Debug)]
 struct ModeRunOutcome {
     ok: bool,
+    error: Option<String>,
     state: ExecutionState,
     events_path: PathBuf,
     state_dir: PathBuf,
+    cargo_args_log: PathBuf,
 }
 
 fn mode_parity_routes(
@@ -6248,6 +6260,19 @@ fn mode_parity_routes(
                 vec![(404, "{}".to_string()), (200, "{}".to_string())],
             )]),
             2,
+        ),
+        ModeParityScenario::ReadinessTimeoutThenVisible => (
+            BTreeMap::from([(
+                "/api/v1/crates/demo/0.1.0".to_string(),
+                // Initial version check, first readiness poll (timeout),
+                // then the next readiness attempt observes visibility.
+                vec![
+                    (404, "{}".to_string()),
+                    (404, "{}".to_string()),
+                    (200, "{}".to_string()),
+                ],
+            )]),
+            3,
         ),
         ModeParityScenario::PermanentFailure => (
             BTreeMap::from([(
@@ -6270,14 +6295,15 @@ fn mode_parity_routes(
             )]),
             1,
         ),
+        ModeParityScenario::EventWriteFailure => (BTreeMap::new(), 0),
     }
 }
 
 fn mode_parity_seed_state(ws: &PlannedWorkspace, scenario: ModeParityScenario) -> ExecutionState {
     match scenario {
-        ModeParityScenario::CleanPublish | ModeParityScenario::PermanentFailure => {
-            init_state_for_workspace(ws)
-        }
+        ModeParityScenario::CleanPublish
+        | ModeParityScenario::ReadinessTimeoutThenVisible
+        | ModeParityScenario::PermanentFailure => init_state_for_workspace(ws),
         ModeParityScenario::AlreadyPublishedInState => {
             init_state_with_checkpoint(ws, &pkg_key("demo", "0.1.0"), PackageState::Published, 1)
         }
@@ -6289,15 +6315,19 @@ fn mode_parity_seed_state(ws: &PlannedWorkspace, scenario: ModeParityScenario) -
             },
             1,
         ),
+        ModeParityScenario::EventWriteFailure => init_state_for_workspace(ws),
     }
 }
 
-fn mode_parity_cargo_env(
+fn mode_parity_cargo_env<'a>(
     scenario: ModeParityScenario,
-    cargo_bin: &str,
-) -> Vec<(&'static str, Option<&str>)> {
+    cargo_bin: &'a str,
+    cargo_args_log: &'a str,
+) -> Vec<(&'static str, Option<&'a str>)> {
     match scenario {
-        ModeParityScenario::CleanPublish | ModeParityScenario::AlreadyPublishedInState => vec![
+        ModeParityScenario::CleanPublish
+        | ModeParityScenario::ReadinessTimeoutThenVisible
+        | ModeParityScenario::AlreadyPublishedInState => vec![
             ("SHIPPER_CARGO_BIN", Some(cargo_bin)),
             ("SHIPPER_CARGO_EXIT", Some("0")),
             ("SHIPPER_CARGO_STDERR", Some("")),
@@ -6311,6 +6341,13 @@ fn mode_parity_cargo_env(
         ],
         ModeParityScenario::StillUnknownResume => vec![
             ("SHIPPER_CARGO_BIN", Some(cargo_bin)),
+            ("SHIPPER_CARGO_EXIT", Some("0")),
+            ("SHIPPER_CARGO_STDERR", Some("")),
+            ("SHIPPER_CARGO_STDOUT", Some("")),
+        ],
+        ModeParityScenario::EventWriteFailure => vec![
+            ("SHIPPER_CARGO_BIN", Some(cargo_bin)),
+            ("SHIPPER_CARGO_ARGS_LOG", Some(cargo_args_log)),
             ("SHIPPER_CARGO_EXIT", Some("0")),
             ("SHIPPER_CARGO_STDERR", Some("")),
             ("SHIPPER_CARGO_STDOUT", Some("")),
@@ -6343,18 +6380,38 @@ fn run_mode_parity_case(
     let reg = test_registry_client(&ws);
     let mut opts = default_opts(state_dir.clone());
     opts.parallel.enabled = parallel;
-    opts.readiness.enabled = false;
-    opts.max_attempts = 1;
+    opts.readiness.enabled = matches!(scenario, ModeParityScenario::ReadinessTimeoutThenVisible);
+    opts.max_attempts = if matches!(scenario, ModeParityScenario::ReadinessTimeoutThenVisible) {
+        2
+    } else {
+        1
+    };
+    if matches!(scenario, ModeParityScenario::ReadinessTimeoutThenVisible) {
+        opts.base_delay = Duration::ZERO;
+        opts.max_delay = Duration::ZERO;
+        opts.readiness.initial_delay = Duration::ZERO;
+        opts.readiness.max_delay = Duration::ZERO;
+        opts.readiness.max_total_wait = Duration::ZERO;
+        opts.readiness.poll_interval = Duration::ZERO;
+        opts.readiness.jitter_factor = 0.0;
+    }
 
     let mut state = mode_parity_seed_state(&ws, scenario);
     let events_path = events::events_path(&state_dir);
+    let cargo_args_log = state_dir.join("cargo-args.log");
+    let cargo_args_log_path = cargo_args_log.to_str().expect("cargo args log path");
+    if matches!(scenario, ModeParityScenario::EventWriteFailure) {
+        // A directory at the event-log path fails on every supported platform
+        // without relying on administrator privileges or readonly semantics.
+        fs::create_dir_all(&events_path).expect("event path directory");
+    }
     let mut event_log = events::EventLog::new();
     let mut reporter = CollectingReporter::default();
 
-    let env = mode_parity_cargo_env(scenario, cargo_bin);
-    let ok = temp_env::with_vars(env, || {
+    let env = mode_parity_cargo_env(scenario, cargo_bin, cargo_args_log_path);
+    let result = temp_env::with_vars(env, || {
         if parallel {
-            run_publish_parallel(&ws, &opts, &mut state, &state_dir, &reg, &mut reporter).is_ok()
+            run_publish_parallel(&ws, &opts, &mut state, &state_dir, &reg, &mut reporter)
         } else {
             crate::engine::execute_package::run_sequential_scheduler(
                 &ws,
@@ -6366,9 +6423,10 @@ fn run_mode_parity_case(
                 &events_path,
                 &mut reporter,
             )
-            .is_ok()
         }
     });
+    let error = result.as_ref().err().map(ToString::to_string);
+    let ok = result.is_ok();
 
     if let Some(server) = server {
         server.join();
@@ -6376,9 +6434,11 @@ fn run_mode_parity_case(
 
     ModeRunOutcome {
         ok,
+        error,
         state,
         events_path,
         state_dir,
+        cargo_args_log,
     }
 }
 
@@ -6443,6 +6503,14 @@ fn assert_mode_parity_rebuild(outcome: &ModeRunOutcome, scenario: ModeParityScen
     let _ = &outcome.state_dir;
 }
 
+fn stable_event_write_error_contract(error: &str) -> Option<&str> {
+    let start_marker = "failed to write package-start event";
+    let end_marker = "failed to open events file";
+    let start = error.find(start_marker)?;
+    let end = error[start..].find(end_marker)? + start + end_marker.len();
+    Some(&error[start..end])
+}
+
 fn assert_mode_parity_pair(case: &ModeParityCase, seq: &ModeRunOutcome, par: &ModeRunOutcome) {
     assert_eq!(
         seq.ok, par.ok,
@@ -6485,6 +6553,79 @@ fn assert_mode_parity_pair(case: &ModeParityCase, seq: &ModeRunOutcome, par: &Mo
                 case.name,
                 pkg.state
             );
+        }
+        ModeParityScenario::ReadinessTimeoutThenVisible => {
+            assert!(seq.ok, "{}: readiness recovery should succeed", case.name);
+            let pkg = seq.state.packages.get("demo@0.1.0").expect("demo");
+            assert!(
+                matches!(pkg.state, PackageState::Published),
+                "{}: expected Published after readiness recovery, got {:?}",
+                case.name,
+                pkg.state
+            );
+
+            for (mode, path) in [("seq", &seq.events_path), ("par", &par.events_path)] {
+                let persisted = events::EventLog::read_from_file(path)
+                    .unwrap_or_else(|e| panic!("{} {mode}: read events: {e}", case.name));
+                let all_events = persisted.all_events();
+                let timeout_count = all_events
+                    .iter()
+                    .filter(|event| matches!(event.event_type, EventType::ReadinessTimeout { .. }))
+                    .count();
+                assert_eq!(
+                    timeout_count, 1,
+                    "{} {mode}: expected exactly one readiness timeout event",
+                    case.name
+                );
+                let timeout_index = all_events
+                    .iter()
+                    .position(|event| {
+                        matches!(event.event_type, EventType::ReadinessTimeout { .. })
+                    })
+                    .unwrap_or_else(|| {
+                        panic!("{} {mode}: expected readiness timeout event", case.name)
+                    });
+                let complete_count = all_events
+                    .iter()
+                    .filter(|event| matches!(event.event_type, EventType::ReadinessComplete { .. }))
+                    .count();
+                assert_eq!(
+                    complete_count, 1,
+                    "{} {mode}: expected exactly one readiness complete event",
+                    case.name
+                );
+                let complete_index = all_events
+                    .iter()
+                    .position(|event| {
+                        matches!(event.event_type, EventType::ReadinessComplete { .. })
+                    })
+                    .unwrap_or_else(|| {
+                        panic!("{} {mode}: expected readiness complete event", case.name)
+                    });
+                let published_index = all_events
+                    .iter()
+                    .position(|event| {
+                        matches!(event.event_type, EventType::PackagePublished { .. })
+                    })
+                    .unwrap_or_else(|| {
+                        panic!("{} {mode}: expected package published event", case.name)
+                    });
+
+                assert!(
+                    timeout_index < complete_index && complete_index < published_index,
+                    "{} {mode}: readiness recovery events out of order",
+                    case.name
+                );
+                assert_eq!(
+                    all_events
+                        .iter()
+                        .filter(|event| matches!(event.event_type, EventType::PackageUploaded))
+                        .count(),
+                    1,
+                    "{} {mode}: retry after readiness timeout must not re-upload",
+                    case.name
+                );
+            }
         }
         ModeParityScenario::PermanentFailure => {
             assert!(!seq.ok, "{}: permanent failure should err", case.name);
@@ -6533,10 +6674,73 @@ fn assert_mode_parity_pair(case: &ModeParityCase, seq: &ModeRunOutcome, par: &Mo
                 pkg.state
             );
         }
+        ModeParityScenario::EventWriteFailure => {
+            assert!(!seq.ok, "{}: event write failure should err", case.name);
+            let seq_error = seq
+                .error
+                .as_deref()
+                .unwrap_or("missing error for event write failure");
+            let par_error = par
+                .error
+                .as_deref()
+                .unwrap_or("missing error for event write failure");
+            for (mode, outcome) in [("seq", seq), ("par", par)] {
+                let error = outcome
+                    .error
+                    .as_deref()
+                    .unwrap_or("missing error for event write failure");
+                assert!(
+                    error.contains("failed to write package-start event")
+                        && error.contains("failed to open events file"),
+                    "{} {mode}: expected stable event-log write error, got {error}",
+                    case.name
+                );
+                assert!(
+                    outcome.events_path.is_dir(),
+                    "{} {mode}: event path must remain the failure fixture",
+                    case.name
+                );
+                let pkg = outcome.state.packages.get("demo@0.1.0").expect("demo");
+                assert!(
+                    matches!(pkg.state, PackageState::Pending) && pkg.attempts == 0,
+                    "{} {mode}: event failure must not mutate pending state, got {:?} attempts={}",
+                    case.name,
+                    pkg.state,
+                    pkg.attempts
+                );
+                assert_eq!(
+                    outcome.state.attempt_history.len(),
+                    0,
+                    "{} {mode}: event failure must not fabricate attempt history",
+                    case.name
+                );
+                if outcome.cargo_args_log.exists() {
+                    let args = fs::read_to_string(&outcome.cargo_args_log).unwrap_or_else(|e| {
+                        panic!("{} {mode}: read cargo args log: {e}", case.name)
+                    });
+                    assert!(
+                        args.trim().is_empty(),
+                        "{} {mode}: Cargo must not run before the event-write failure, args: {args:?}",
+                        case.name
+                    );
+                }
+            }
+            let seq_contract = stable_event_write_error_contract(seq_error)
+                .expect("sequential event-write contract");
+            let par_contract = stable_event_write_error_contract(par_error)
+                .expect("parallel event-write contract");
+            assert_eq!(
+                seq_contract, par_contract,
+                "{}: sequential and parallel event-write errors must share the same stable contract",
+                case.name
+            );
+        }
     }
 
-    assert_mode_parity_rebuild(seq, case.scenario, &format!("{}:seq", case.name));
-    assert_mode_parity_rebuild(par, case.scenario, &format!("{}:par", case.name));
+    if !matches!(case.scenario, ModeParityScenario::EventWriteFailure) {
+        assert_mode_parity_rebuild(seq, case.scenario, &format!("{}:seq", case.name));
+        assert_mode_parity_rebuild(par, case.scenario, &format!("{}:par", case.name));
+    }
 }
 
 #[test]
