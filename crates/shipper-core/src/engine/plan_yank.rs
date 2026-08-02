@@ -290,6 +290,7 @@ pub fn render_text(plan: &YankPlan) -> String {
 mod tests {
     use super::*;
     use chrono::Utc;
+    use serial_test::serial;
     use shipper_types::{
         EnvironmentFingerprint, PackageEvidence, PackageReceipt, PackageState, Receipt, Registry,
     };
@@ -531,6 +532,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn load_plan_from_path_rejects_a_non_string_schema_marker() {
         // `"schema_version": 1` must not slip past the check just because
         // it is not a string.
@@ -562,6 +564,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn load_plan_from_path_accepts_the_flattened_plan_yank_envelope() {
         // The shape `shipper plan-yank --format json` actually prints:
         // `PlanYankJsonReport` flattens the plan, so the plan fields sit
@@ -594,6 +597,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn load_plan_from_path_rejects_another_commands_envelope() {
         // `--plan` drives `cargo yank`. Pointing it at a fix-forward
         // envelope must fail on what the file is, not on a missing field.
@@ -626,6 +630,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn load_plan_from_path_errors_on_malformed_json() {
         let td = tempfile::tempdir().expect("tempdir");
         let path = td.path().join("malformed.json");
