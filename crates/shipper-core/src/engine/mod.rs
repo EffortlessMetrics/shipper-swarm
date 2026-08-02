@@ -245,6 +245,8 @@ pub fn run_publish(
         run_started,
     } = publish::bootstrap::prepare_publish_run(ws, opts, reporter)?;
 
+    publish::notify_publish_started(ws, opts);
+
     // Check for parallel mode
     if opts.parallel.enabled {
         let parallel_receipts = crate::engine::parallel::run_publish_parallel(
@@ -4262,13 +4264,26 @@ mod tests {
     fn run_publish_errors_on_invalid_resume_from_target() {
         let td = tempdir().expect("tempdir");
         let ws = planned_workspace(td.path(), "http://127.0.0.1:9".to_string());
+        let webhook_server = Server::http("127.0.0.1:0").expect("webhook server");
+        let webhook_url = format!("http://{}", webhook_server.server_addr());
         let mut opts = default_opts(PathBuf::from(".shipper"));
         opts.resume_from = Some("nonexistent-package".to_string());
+        opts.webhook = crate::webhook::WebhookConfig {
+            url: webhook_url,
+            ..Default::default()
+        };
 
         let mut reporter = CollectingReporter::default();
         let err = run_publish(&ws, &opts, &mut reporter).expect_err("must fail");
         assert!(format!("{err:#}").contains("resume-from package"));
         assert!(format!("{err:#}").contains("not found in publish plan"));
+        assert!(
+            webhook_server
+                .recv_timeout(Duration::from_millis(200))
+                .expect("check webhook server")
+                .is_none(),
+            "preparation failure must not emit PublishStarted"
+        );
     }
 
     #[test]
