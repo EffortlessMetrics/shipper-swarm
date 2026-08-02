@@ -524,6 +524,25 @@ fn record_readiness_started(
     )
 }
 
+fn record_readiness_timeout(
+    event_log: &Arc<Mutex<events::EventLog>>,
+    events_path: &Path,
+    max_wait: Duration,
+    pkg_label: &str,
+) -> Result<()> {
+    record_readiness_event(
+        event_log,
+        events_path,
+        PublishEvent {
+            timestamp: Utc::now(),
+            event_type: EventType::ReadinessTimeout {
+                max_wait_ms: max_wait.as_millis() as u64,
+            },
+            package: pkg_label.to_string(),
+        },
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn wait_after_retry(
     reporter: &Arc<SendReporter>,
@@ -932,6 +951,12 @@ pub(crate) fn publish_package_with_timeout(
                             package: pkg_label.clone(),
                         },
                     ) {
+                        let _ = record_readiness_timeout(
+                            event_log,
+                            events_path,
+                            readiness_config.max_total_wait,
+                            &pkg_label,
+                        );
                         return PackagePublishResult { result: Err(e) };
                     }
                     if let Err(e) = commit_transition(
@@ -1015,6 +1040,16 @@ pub(crate) fn publish_package_with_timeout(
                 cargo_succeeded = false;
             }
             Err(error) => {
+                if let Err(close_error) = record_readiness_timeout(
+                    event_log,
+                    events_path,
+                    readiness_config.max_total_wait,
+                    &pkg_label,
+                ) {
+                    return PackagePublishResult {
+                        result: Err(close_error),
+                    };
+                }
                 return PackagePublishResult {
                     result: Err(anyhow::anyhow!(
                         "{}@{}: failed to verify uploaded package visibility before publish: {error}",
@@ -1631,6 +1666,12 @@ pub(crate) fn publish_package_with_timeout(
                             package: pkg_label.clone(),
                         },
                     ) {
+                        let _ = record_readiness_timeout(
+                            event_log,
+                            events_path,
+                            readiness_config.max_total_wait,
+                            &pkg_label,
+                        );
                         return PackagePublishResult { result: Err(e) };
                     }
                     if let Err(e) = commit_transition(
@@ -1704,7 +1745,19 @@ pub(crate) fn publish_package_with_timeout(
                     }
                 }
             }
-            Err(error) => return PackagePublishResult { result: Err(error) },
+            Err(error) => {
+                if let Err(close_error) = record_readiness_timeout(
+                    event_log,
+                    events_path,
+                    readiness_config.max_total_wait,
+                    &pkg_label,
+                ) {
+                    return PackagePublishResult {
+                        result: Err(close_error),
+                    };
+                }
+                return PackagePublishResult { result: Err(error) };
+            }
         }
     }
 
@@ -1798,6 +1851,12 @@ pub(crate) fn publish_package_with_timeout(
                             package: pkg_label.clone(),
                         },
                     ) {
+                        let _ = record_readiness_timeout(
+                            event_log,
+                            events_path,
+                            readiness_config.max_total_wait,
+                            &pkg_label,
+                        );
                         return PackagePublishResult { result: Err(e) };
                     }
                     if let Err(e) = commit_transition(
@@ -1879,6 +1938,16 @@ pub(crate) fn publish_package_with_timeout(
                 }
             }
             Err(error) => {
+                if let Err(close_error) = record_readiness_timeout(
+                    event_log,
+                    events_path,
+                    readiness_config.max_total_wait,
+                    &pkg_label,
+                ) {
+                    return PackagePublishResult {
+                        result: Err(close_error),
+                    };
+                }
                 return PackagePublishResult {
                     result: Err(anyhow::anyhow!(
                         "{}@{}: failed to verify final visibility after last error: {error}",
