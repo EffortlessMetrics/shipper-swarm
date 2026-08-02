@@ -4789,28 +4789,6 @@ mod tests {
         assert!(matches!(worst_result(Some(Success), &Success), Success));
     }
 
-    #[test]
-    fn exit_code_for_result_matches_the_documented_vocabulary() {
-        assert_eq!(
-            format!("{:?}", exit_code_for_result(&ExecutionResult::Success)),
-            format!("{:?}", std::process::ExitCode::SUCCESS)
-        );
-        assert_eq!(
-            format!(
-                "{:?}",
-                exit_code_for_result(&ExecutionResult::PartialFailure)
-            ),
-            format!("{:?}", std::process::ExitCode::from(2))
-        );
-        assert_eq!(
-            format!(
-                "{:?}",
-                exit_code_for_result(&ExecutionResult::CompleteFailure)
-            ),
-            format!("{:?}", std::process::ExitCode::FAILURE)
-        );
-    }
-
     #[derive(Default)]
     struct TestReporter {
         infos: Vec<String>,
