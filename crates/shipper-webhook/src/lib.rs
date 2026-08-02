@@ -21,7 +21,7 @@
 //! send_webhook(&config, &payload).expect("send");
 //! ```
 
-use std::time::Duration;
+use std::{fmt, time::Duration};
 
 use anyhow::{Context, Result};
 use hmac::{Hmac, Mac};
@@ -42,7 +42,10 @@ pub enum WebhookType {
 }
 
 /// Webhook configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` is implemented manually so signing secrets are not copied into
+/// diagnostics, error chains, or evidence that formats configuration values.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct WebhookConfig {
     /// Webhook URL
     pub url: String,
@@ -59,6 +62,19 @@ pub struct WebhookConfig {
 
 fn default_timeout() -> u64 {
     30
+}
+
+const REDACTED_SECRET: &str = "<redacted>";
+
+impl fmt::Debug for WebhookConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WebhookConfig")
+            .field("url", &self.url)
+            .field("webhook_type", &self.webhook_type)
+            .field("secret", &self.secret.as_ref().map(|_| REDACTED_SECRET))
+            .field("timeout_secs", &self.timeout_secs)
+            .finish()
+    }
 }
 
 impl Default for WebhookConfig {
@@ -527,6 +543,39 @@ mod tests {
         assert_eq!(deserialized.webhook_type, WebhookType::Discord);
         assert_eq!(deserialized.secret, Some("s3cret".to_string()));
         assert_eq!(deserialized.timeout_secs, 10);
+    }
+
+    #[test]
+    fn webhook_config_debug_redacts_secret_but_preserves_configuration_shape() {
+        let secret = ["unit", "debug", "secret"].concat();
+        let config = WebhookConfig {
+            url: "https://example.com/hook".to_string(),
+            webhook_type: WebhookType::Slack,
+            secret: Some(secret.clone()),
+            timeout_secs: 15,
+        };
+
+        let compact = format!("{config:?}");
+        let pretty = format!("{config:#?}");
+        for rendered in [&compact, &pretty] {
+            assert!(!rendered.contains(&secret));
+            assert!(rendered.contains("<redacted>"));
+            assert!(rendered.contains("https://example.com/hook"));
+            assert!(rendered.contains("Slack"));
+        }
+    }
+
+    #[test]
+    fn webhook_config_debug_represents_missing_secret_without_placeholder() {
+        let config = WebhookConfig {
+            url: "https://example.com/hook".to_string(),
+            webhook_type: WebhookType::Generic,
+            secret: None,
+            timeout_secs: 30,
+        };
+        let rendered = format!("{config:?}");
+        assert!(rendered.contains("secret: None"));
+        assert!(!rendered.contains("<redacted>"));
     }
 
     #[test]
