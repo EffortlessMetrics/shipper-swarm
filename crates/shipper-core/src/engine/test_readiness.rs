@@ -1,4 +1,20 @@
 //! Test-only readiness adapter for engine-level characterization tests.
+//!
+//! # Ownership boundary
+//!
+//! The readiness **polling loop** — backoff, jitter, sparse-index handling,
+//! and `ReadinessEvidence` — is owned by
+//! [`RegistryClient::is_version_visible_with_backoff_and_events`]. The engine
+//! does not keep a copy of it (issue #202).
+//!
+//! What the engine owns, and `shipper-registry` must never own, is the
+//! *envelope* around a poll run: the `ReadinessStarted` / `ReadinessComplete`
+//! / `ReadinessTimeout` events, the [`Reporter`] narration, and flushing each
+//! event through the event log to `events.jsonl`. `shipper-registry` has no
+//! knowledge of `EventLog`, `events.jsonl`, or [`Reporter`], and adding that
+//! knowledge would invert the crate dependency. This module is the test-side
+//! mirror of the same envelope that `engine::execute_package` applies in
+//! production.
 
 use std::path::Path;
 use std::time::Instant;
@@ -61,8 +77,7 @@ fn verify_published_inner(
     ));
     let started_at = Instant::now();
     let mut emit_event = |event| record_readiness_event(event_log, events_path, event);
-    let (visible, evidence) = crate::engine::readiness::is_version_visible_with_backoff_and_events(
-        reg,
+    let (visible, evidence) = reg.is_version_visible_with_backoff_and_events(
         crate_name,
         version,
         config,

@@ -48,6 +48,26 @@ event advances the projection to `published`. `EventType::ReadinessStarted`
 continues to map to `uploaded` for backward compatibility with historical
 event logs.
 
+## Readiness evidence matches readiness events
+
+`ReadinessEvidence.delay_before` is the delay that was **actually slept**
+immediately before that poll — not an independently recomputed backoff
+sample. It equals the `delay_ms` of the `ReadinessPollScheduled` event that
+announced the same attempt, so the receipt's readiness evidence and the event
+log can never disagree about how long a run waited.
+
+This holds for the first attempt too: when `readiness.initial_delay` is
+configured, the loop emits `ReadinessPollScheduled { attempt: 1 }` and sleeps,
+and attempt 1's evidence reports that same `initial_delay`. It reports
+`0` only when nothing was slept before the first poll.
+
+There is exactly one implementation of this loop —
+`shipper_registry::RegistryClient::is_version_visible_with_backoff_and_events`
+(see [#202](https://github.com/EffortlessMetrics/shipper/issues/202)). The
+engine wraps it with the `ReadinessStarted` / `ReadinessComplete` /
+`ReadinessTimeout` envelope but does not re-implement the polling or the
+evidence.
+
 Attempt details are appended to `state.json` through the same event-first
 transition boundary as the matching terminal, reconciliation, or retry event.
 This prevents a scheduler from independently persisting the attempt timeline

@@ -30,7 +30,6 @@ use shipper_types::{
 use crate::engine::parallel::SendReporter;
 use crate::engine::parallel::policy::policy_effects;
 use crate::engine::parallel::webhook::{WebhookEvent, maybe_send_event};
-use crate::engine::readiness::is_version_visible_with_backoff_and_events;
 use crate::engine::reconcile::reconcile_ambiguous_upload;
 
 /// Result of publishing a single package (for parallel execution)
@@ -889,8 +888,7 @@ pub(crate) fn publish_package_with_timeout(
         ));
         let mut emit_readiness_event =
             |event| record_readiness_event(event_log, events_path, event);
-        match is_version_visible_with_backoff_and_events(
-            reg,
+        match reg.is_version_visible_with_backoff_and_events(
             &p.name,
             &p.version,
             &readiness_config,
@@ -1554,8 +1552,7 @@ pub(crate) fn publish_package_with_timeout(
         let readiness_started_at = Instant::now();
         let mut emit_readiness_event =
             |event| record_readiness_event(event_log, events_path, event);
-        let verify_result = is_version_visible_with_backoff_and_events(
-            reg,
+        let verify_result = reg.is_version_visible_with_backoff_and_events(
             &p.name,
             &p.version,
             &readiness_config,
@@ -1714,8 +1711,7 @@ pub(crate) fn publish_package_with_timeout(
         // Final chance: maybe it eventually showed up.
         let mut emit_readiness_event =
             |event| record_readiness_event(event_log, events_path, event);
-        match is_version_visible_with_backoff_and_events(
-            reg,
+        match reg.is_version_visible_with_backoff_and_events(
             &p.name,
             &p.version,
             &readiness_config,
