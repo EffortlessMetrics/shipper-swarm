@@ -101,7 +101,7 @@ fn verify_published_inner(
             version,
             evidence.len()
         ));
-        record_readiness_event(
+        if let Err(error) = record_readiness_event(
             event_log,
             events_path,
             PublishEvent {
@@ -112,7 +112,15 @@ fn verify_published_inner(
                 },
                 package: pkg_label.to_string(),
             },
-        )?;
+        ) {
+            let _ = record_readiness_error(
+                event_log,
+                events_path,
+                started_at.elapsed().as_millis() as u64,
+                pkg_label,
+            );
+            return Err(error);
+        }
     } else {
         reporter.warn(&format!(
             "{}@{}: not visible after {} checks",
@@ -120,7 +128,7 @@ fn verify_published_inner(
             version,
             evidence.len()
         ));
-        record_readiness_event(
+        if let Err(error) = record_readiness_event(
             event_log,
             events_path,
             PublishEvent {
@@ -130,7 +138,15 @@ fn verify_published_inner(
                 },
                 package: pkg_label.to_string(),
             },
-        )?;
+        ) {
+            let _ = record_readiness_error(
+                event_log,
+                events_path,
+                started_at.elapsed().as_millis() as u64,
+                pkg_label,
+            );
+            return Err(error);
+        }
     }
     Ok((visible, evidence))
 }
