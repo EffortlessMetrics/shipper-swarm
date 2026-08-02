@@ -4415,6 +4415,20 @@ mod tests {
                     .iter()
                     .any(|event| matches!(event.event_type, EventType::ReadinessPoll { .. }))
             );
+            let readiness_started = events
+                .all_events()
+                .iter()
+                .position(|event| matches!(event.event_type, EventType::ReadinessStarted { .. }))
+                .expect("production readiness envelope starts before polling");
+            let readiness_complete = events
+                .all_events()
+                .iter()
+                .position(|event| matches!(event.event_type, EventType::ReadinessComplete { .. }))
+                .expect("production readiness envelope completes after polling");
+            assert!(
+                readiness_started < readiness_complete,
+                "production readiness envelope must open before it closes"
+            );
             assert!(
                 events
                     .all_events()
