@@ -566,13 +566,13 @@ mod tests {
         for rendered in [&compact, &pretty] {
             assert!(!rendered.contains(&secret));
             assert!(rendered.contains("<redacted>"));
-            assert!(rendered.contains("https://example.com/hook"));
+            assert!(rendered.contains("url: \"<redacted>\""));
             assert!(rendered.contains("Slack"));
         }
     }
 
     #[test]
-    fn webhook_config_debug_represents_missing_secret_without_placeholder() {
+    fn webhook_config_debug_redacts_url_but_preserves_missing_secret() {
         let config = WebhookConfig {
             url: "https://example.com/hook".to_string(),
             webhook_type: WebhookType::Generic,
@@ -581,7 +581,7 @@ mod tests {
         };
         let rendered = format!("{config:?}");
         assert!(rendered.contains("secret: None"));
-        assert!(!rendered.contains("<redacted>"));
+        assert!(rendered.contains("url: \"<redacted>\""));
     }
 
     #[test]
