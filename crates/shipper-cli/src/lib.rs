@@ -1997,6 +1997,17 @@ pub fn run() -> Result<std::process::ExitCode> {
 /// `main` instead — an error that ended the run before a receipt was
 /// finalized. Changing that classification is a behavior change for CI
 /// consumers and is deliberately not made here.
+fn exit_code_for_result(result: &ExecutionResult) -> std::process::ExitCode {
+    use std::process::ExitCode;
+    match result {
+        ExecutionResult::Success => ExitCode::SUCCESS,
+        // Partial failure: some packages published, some didn't. Resume is
+        // the intended next step — distinguish from a hard error (exit 1).
+        ExecutionResult::PartialFailure => ExitCode::from(2),
+        ExecutionResult::CompleteFailure => ExitCode::FAILURE,
+    }
+}
+
 /// Rank an [`ExecutionResult`] by severity, worst-highest.
 ///
 /// Exit *codes* are not ordered by severity (`PartialFailure` is 2,
@@ -2020,17 +2031,6 @@ fn worst_result(current: Option<ExecutionResult>, next: &ExecutionResult) -> Exe
     match current {
         Some(current) if result_severity(&current) >= result_severity(next) => current,
         _ => next.clone(),
-    }
-}
-
-fn exit_code_for_result(result: &ExecutionResult) -> std::process::ExitCode {
-    use std::process::ExitCode;
-    match result {
-        ExecutionResult::Success => ExitCode::SUCCESS,
-        // Partial failure: some packages published, some didn't. Resume is
-        // the intended next step — distinguish from a hard error (exit 1).
-        ExecutionResult::PartialFailure => ExitCode::from(2),
-        ExecutionResult::CompleteFailure => ExitCode::FAILURE,
     }
 }
 
