@@ -38,7 +38,7 @@ pub(in crate::doctor) fn inspect(ws: &plan::PlannedWorkspace) -> Result<AuthChec
             title: "crates.io auth is missing",
             why_it_matters:
                 "ownership checks and live publish require registry credentials before Shipper can prove or execute a release",
-            evidence: "auth_type: NONE FOUND (set CARGO_REGISTRY_TOKEN)".to_string(),
+            evidence: trusted_publishing_evidence(auth_label),
             try_next: vec![
                 "run `cargo login <token>` for local token auth",
                 "configure Trusted Publishing with `permissions: id-token: write` and `rust-lang/crates-io-auth-action@v1`",

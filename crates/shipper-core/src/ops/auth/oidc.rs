@@ -24,8 +24,10 @@ pub(crate) fn has_nonblank_value(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
+    #[serial]
     fn trusted_publishing_both_vars_set() {
         temp_env::with_vars(
             [
@@ -42,6 +44,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn trusted_publishing_only_url_set() {
         temp_env::with_vars(
             [
@@ -58,6 +61,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn trusted_publishing_only_token_set() {
         temp_env::with_vars(
             [
@@ -71,6 +75,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn trusted_publishing_neither_set() {
         temp_env::with_vars(
             [
@@ -84,6 +89,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn trusted_publishing_empty_values_are_unavailable() {
         temp_env::with_vars(
             [
@@ -97,6 +103,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn trusted_publishing_whitespace_values_are_unavailable() {
         temp_env::with_vars(
             [
@@ -110,6 +117,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn trusted_publishing_one_blank_value_is_unavailable() {
         temp_env::with_vars(
             [
