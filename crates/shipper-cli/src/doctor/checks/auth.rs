@@ -89,16 +89,42 @@ pub(in crate::doctor) fn inspect(ws: &plan::PlannedWorkspace) -> Result<AuthChec
 fn trusted_publishing_evidence(auth_label: &str) -> String {
     format!(
         "auth_type: {auth_label}; registry_token: {}; oidc_request_url: {}; oidc_request_token: {}",
-        presence(
-            std::env::var_os("CARGO_REGISTRY_TOKEN").is_some()
-                || std::env::vars_os().any(|(key, _)| {
-                    key.to_string_lossy().starts_with("CARGO_REGISTRIES_")
-                        && key.to_string_lossy().ends_with("_TOKEN")
-                })
-        ),
-        presence(std::env::var_os("ACTIONS_ID_TOKEN_REQUEST_URL").is_some()),
-        presence(std::env::var_os("ACTIONS_ID_TOKEN_REQUEST_TOKEN").is_some())
+        token_presence(),
+        env_presence("ACTIONS_ID_TOKEN_REQUEST_URL"),
+        env_presence("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
     )
+}
+
+fn token_presence() -> &'static str {
+    if let Some(value) = std::env::var_os("CARGO_REGISTRY_TOKEN") {
+        return value_presence(!value.to_string_lossy().trim().is_empty());
+    }
+
+    let mut blank = false;
+    for (key, value) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("CARGO_REGISTRIES_")
+            && key.to_string_lossy().ends_with("_TOKEN")
+        {
+            if value.to_string_lossy().trim().is_empty() {
+                blank = true;
+            } else {
+                return "set";
+            }
+        }
+    }
+    if blank { "blank" } else { "missing" }
+}
+
+fn env_presence(name: &str) -> &'static str {
+    match std::env::var(name) {
+        Err(_) => "missing",
+        Ok(value) if value.trim().is_empty() => "blank",
+        Ok(_) => "set",
+    }
+}
+
+fn value_presence(nonblank: bool) -> &'static str {
+    if nonblank { "set" } else { "blank" }
 }
 
 fn presence(is_set: bool) -> &'static str {
@@ -188,4 +214,46 @@ fn trusted_publishing_workflow_findings(
     }
 
     findings
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+
+    #[test]
+    #[serial]
+    fn trusted_publishing_evidence_distinguishes_missing_blank_and_set() {
+        temp_env::with_vars(
+            [
+                ("CARGO_REGISTRY_TOKEN", None::<&str>),
+                ("ACTIONS_ID_TOKEN_REQUEST_URL", Some("")),
+                ("ACTIONS_ID_TOKEN_REQUEST_TOKEN", Some("oidc-token")),
+            ],
+            || {
+                assert_eq!(
+                    trusted_publishing_evidence("unknown"),
+                    "auth_type: unknown; registry_token: missing; oidc_request_url: blank; oidc_request_token: set"
+                );
+            },
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn trusted_publishing_evidence_reports_missing_oidc_values() {
+        temp_env::with_vars(
+            [
+                ("CARGO_REGISTRY_TOKEN", None::<&str>),
+                ("ACTIONS_ID_TOKEN_REQUEST_URL", None::<&str>),
+                ("ACTIONS_ID_TOKEN_REQUEST_TOKEN", None::<&str>),
+            ],
+            || {
+                assert_eq!(
+                    trusted_publishing_evidence("unknown"),
+                    "auth_type: unknown; registry_token: missing; oidc_request_url: missing; oidc_request_token: missing"
+                );
+            },
+        );
+    }
 }
