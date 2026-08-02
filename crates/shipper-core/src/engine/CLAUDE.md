@@ -44,7 +44,8 @@ What the engine owns is the *envelope* around a poll run, because
 `shipper-registry` cannot depend on `shipper-core` and therefore has no
 knowledge of `EventLog`, `events.jsonl`, or `Reporter`:
 
-- the `ReadinessStarted` / `ReadinessComplete` / `ReadinessTimeout` events,
+- the `ReadinessStarted` / `ReadinessComplete` / `ReadinessTimeout` /
+  `ReadinessError` events,
 - the `Reporter` narration, and
 - flushing each emitted event through the event log.
 

@@ -543,6 +543,25 @@ fn record_readiness_timeout(
     )
 }
 
+fn record_readiness_error(
+    event_log: &Arc<Mutex<events::EventLog>>,
+    events_path: &Path,
+    duration: Duration,
+    pkg_label: &str,
+) -> Result<()> {
+    record_readiness_event(
+        event_log,
+        events_path,
+        PublishEvent {
+            timestamp: Utc::now(),
+            event_type: EventType::ReadinessError {
+                duration_ms: duration.as_millis() as u64,
+            },
+            package: pkg_label.to_string(),
+        },
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn wait_after_retry(
     reporter: &Arc<SendReporter>,
@@ -1040,10 +1059,10 @@ pub(crate) fn publish_package_with_timeout(
                 cargo_succeeded = false;
             }
             Err(error) => {
-                if let Err(close_error) = record_readiness_timeout(
+                if let Err(close_error) = record_readiness_error(
                     event_log,
                     events_path,
-                    readiness_config.max_total_wait,
+                    readiness_started_at.elapsed(),
                     &pkg_label,
                 ) {
                     return PackagePublishResult {
@@ -1746,10 +1765,10 @@ pub(crate) fn publish_package_with_timeout(
                 }
             }
             Err(error) => {
-                if let Err(close_error) = record_readiness_timeout(
+                if let Err(close_error) = record_readiness_error(
                     event_log,
                     events_path,
-                    readiness_config.max_total_wait,
+                    readiness_started_at.elapsed(),
                     &pkg_label,
                 ) {
                     return PackagePublishResult {
@@ -1938,10 +1957,10 @@ pub(crate) fn publish_package_with_timeout(
                 }
             }
             Err(error) => {
-                if let Err(close_error) = record_readiness_timeout(
+                if let Err(close_error) = record_readiness_error(
                     event_log,
                     events_path,
-                    readiness_config.max_total_wait,
+                    readiness_started_at.elapsed(),
                     &pkg_label,
                 ) {
                     return PackagePublishResult {

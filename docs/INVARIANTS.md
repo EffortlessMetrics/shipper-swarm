@@ -65,8 +65,10 @@ There is exactly one implementation of this loop —
 `shipper_registry::RegistryClient::is_version_visible_with_backoff_and_events`
 (see [#202](https://github.com/EffortlessMetrics/shipper/issues/202)). The
 engine wraps it with the `ReadinessStarted` / `ReadinessComplete` /
-`ReadinessTimeout` envelope but does not re-implement the polling or the
-evidence.
+`ReadinessTimeout` / `ReadinessError` envelope but does not re-implement the
+polling or the evidence. `ReadinessTimeout` means the configured wait budget
+was exhausted; `ReadinessError` means polling aborted before that budget was
+resolved and records elapsed time rather than the configured budget.
 
 Attempt details are appended to `state.json` through the same event-first
 transition boundary as the matching terminal, reconciliation, or retry event.

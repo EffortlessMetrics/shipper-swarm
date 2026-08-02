@@ -9,7 +9,7 @@
 //!
 //! What the engine owns, and `shipper-registry` must never own, is the
 //! *envelope* around a poll run: the `ReadinessStarted` / `ReadinessComplete`
-//! / `ReadinessTimeout` events, the [`Reporter`] narration, and flushing each
+//! / `ReadinessTimeout` / `ReadinessError` events, the [`Reporter`] narration, and flushing each
 //! event through the event log to `events.jsonl`. `shipper-registry` has no
 //! knowledge of `EventLog`, `events.jsonl`, or [`Reporter`], and adding that
 //! knowledge would invert the crate dependency. This module is the test-side
@@ -77,12 +77,23 @@ fn verify_published_inner(
     ));
     let started_at = Instant::now();
     let mut emit_event = |event| record_readiness_event(event_log, events_path, event);
-    let (visible, evidence) = reg.is_version_visible_with_backoff_and_events(
+    let (visible, evidence) = match reg.is_version_visible_with_backoff_and_events(
         crate_name,
         version,
         config,
         &mut emit_event,
-    )?;
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            record_readiness_error(
+                event_log,
+                events_path,
+                started_at.elapsed().as_millis() as u64,
+                pkg_label,
+            )?;
+            return Err(error);
+        }
+    };
     if visible {
         reporter.info(&format!(
             "{}@{}: visible after {} checks",
@@ -122,6 +133,23 @@ fn verify_published_inner(
         )?;
     }
     Ok((visible, evidence))
+}
+
+fn record_readiness_error(
+    event_log: &mut events::EventLog,
+    events_path: &Path,
+    duration_ms: u64,
+    pkg_label: &str,
+) -> Result<()> {
+    record_readiness_event(
+        event_log,
+        events_path,
+        PublishEvent {
+            timestamp: Utc::now(),
+            event_type: EventType::ReadinessError { duration_ms },
+            package: pkg_label.to_string(),
+        },
+    )
 }
 
 fn record_readiness_event(

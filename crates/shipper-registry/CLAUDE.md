@@ -37,7 +37,8 @@ Two properties are load-bearing and covered by tests in this crate:
   forward in `pending_delay`, and equal to the `delay_ms` of the matching
   `ReadinessPollScheduled` event. Never recompute it with a fresh jitter draw.
 
-The `ReadinessStarted` / `ReadinessComplete` / `ReadinessTimeout` envelope,
+The `ReadinessStarted` / `ReadinessComplete` / `ReadinessTimeout` /
+`ReadinessError` envelope,
 `Reporter` narration, and event-log persistence stay in `shipper-core`. This
 crate must not learn about `EventLog`, `events.jsonl`, or `Reporter` — that
 would invert the crate dependency.
