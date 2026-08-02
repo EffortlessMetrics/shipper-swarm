@@ -256,9 +256,10 @@ fn redact_authorization_headers(line: &str) -> String {
         }
 
         if line.as_bytes().get(value_start) == Some(&b'"') {
-            let Some(value_end) = quoted_value_end(line, value_start) else {
-                break;
-            };
+            // If malformed JSON has no closing quote, redact to the end of
+            // the line rather than allowing an escape-terminated value to
+            // pass through unchanged.
+            let value_end = quoted_value_end(line, value_start).unwrap_or(line.len());
             if value_end > value_start + 1 {
                 ranges.push((value_start + 1, value_end));
             }
@@ -339,7 +340,7 @@ fn quoted_value_end(s: &str, quote_start: usize) -> Option<usize> {
             return Some(quote_start + 1 + offset);
         }
     }
-    None
+    Some(bytes.len())
 }
 
 fn redact_token_assignments(line: &str) -> String {
@@ -693,6 +694,15 @@ mod tests {
             redact_sensitive(&input),
             r#"{"authorization":"[REDACTED]","proxy-authorization":"[REDACTED]","message":"Basic is ordinary prose"}"#
         );
+    }
+
+    #[test]
+    fn redact_json_authorization_with_unterminated_escaped_value() {
+        let input = r#"{"authorization":"abc\\\"}"#;
+        let out = redact_sensitive(input);
+
+        assert_eq!(out, r#"{"authorization":"[REDACTED]"#);
+        assert!(!out.contains("abc"));
     }
 
     #[test]
