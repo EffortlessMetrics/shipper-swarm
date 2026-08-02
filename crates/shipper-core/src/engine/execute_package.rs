@@ -524,25 +524,6 @@ fn record_readiness_started(
     )
 }
 
-fn record_readiness_timeout(
-    event_log: &Arc<Mutex<events::EventLog>>,
-    events_path: &Path,
-    max_wait: Duration,
-    pkg_label: &str,
-) -> Result<()> {
-    record_readiness_event(
-        event_log,
-        events_path,
-        PublishEvent {
-            timestamp: Utc::now(),
-            event_type: EventType::ReadinessTimeout {
-                max_wait_ms: max_wait.as_millis() as u64,
-            },
-            package: pkg_label.to_string(),
-        },
-    )
-}
-
 fn record_readiness_error(
     event_log: &Arc<Mutex<events::EventLog>>,
     events_path: &Path,
@@ -970,10 +951,10 @@ pub(crate) fn publish_package_with_timeout(
                             package: pkg_label.clone(),
                         },
                     ) {
-                        let _ = record_readiness_timeout(
+                        let _ = record_readiness_error(
                             event_log,
                             events_path,
-                            readiness_config.max_total_wait,
+                            readiness_started_at.elapsed(),
                             &pkg_label,
                         );
                         return PackagePublishResult { result: Err(e) };
@@ -1685,10 +1666,10 @@ pub(crate) fn publish_package_with_timeout(
                             package: pkg_label.clone(),
                         },
                     ) {
-                        let _ = record_readiness_timeout(
+                        let _ = record_readiness_error(
                             event_log,
                             events_path,
-                            readiness_config.max_total_wait,
+                            readiness_started_at.elapsed(),
                             &pkg_label,
                         );
                         return PackagePublishResult { result: Err(e) };
@@ -1870,10 +1851,10 @@ pub(crate) fn publish_package_with_timeout(
                             package: pkg_label.clone(),
                         },
                     ) {
-                        let _ = record_readiness_timeout(
+                        let _ = record_readiness_error(
                             event_log,
                             events_path,
-                            readiness_config.max_total_wait,
+                            readiness_started_at.elapsed(),
                             &pkg_label,
                         );
                         return PackagePublishResult { result: Err(e) };
