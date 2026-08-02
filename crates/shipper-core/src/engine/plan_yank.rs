@@ -229,11 +229,17 @@ pub fn load_plan_from_path(path: &std::path::Path) -> Result<YankPlan> {
 fn parse_plan(raw: &str) -> Result<YankPlan> {
     let value: serde_json::Value = serde_json::from_str(raw)?;
 
-    if let Some(schema) = value.get("schema_version").and_then(|value| value.as_str())
-        && schema != PLAN_YANK_SCHEMA_VERSION
+    // A present marker must match — including when it is not even a
+    // string. Reading `schema_version` through `as_str()` alone would let
+    // `"schema_version": 1` through the check entirely.
+    if let Some(marker) = value.get("schema_version")
+        && marker.as_str() != Some(PLAN_YANK_SCHEMA_VERSION)
     {
+        let found = marker
+            .as_str()
+            .map_or_else(|| marker.to_string(), str::to_string);
         bail!(
-            "this is a `{schema}` document, not a `{PLAN_YANK_SCHEMA_VERSION}` yank plan; \
+            "this is a `{found}` document, not a `{PLAN_YANK_SCHEMA_VERSION}` yank plan; \
              `yank --plan` takes the output of `shipper plan-yank --format json`"
         );
     }
@@ -522,6 +528,30 @@ mod tests {
         assert_eq!(loaded.entries[1].name, "a");
         // Per-entry reason preserved
         assert_eq!(loaded.entries[1].reason.as_deref(), Some("CVE-1"));
+    }
+
+    #[test]
+    fn load_plan_from_path_rejects_a_non_string_schema_marker() {
+        // `"schema_version": 1` must not slip past the check just because
+        // it is not a string.
+        let td = tempfile::tempdir().expect("tempdir");
+        let path = td.path().join("weird.json");
+        std::fs::write(
+            &path,
+            r#"{
+              "schema_version": 1,
+              "plan_id": "plan-abc",
+              "registry": "crates-io",
+              "entries": []
+            }"#,
+        )
+        .expect("write");
+
+        let err = load_plan_from_path(&path).expect_err("non-string marker must be refused");
+        assert!(
+            format!("{err:#}").contains(PLAN_YANK_SCHEMA_VERSION),
+            "error should name the schema it expected: {err:#}"
+        );
     }
 
     #[test]

@@ -118,12 +118,23 @@ branch without parsing output:
 
 | Code | Meaning | What CI should do |
 |---:|---|---|
-| `0` | Every package published, or already present on the registry | proceed |
-| `1` | Complete failure — nothing was published this run | fix the cause, rerun |
-| `2` | Partial failure — some packages published, some did not | `shipper resume` after fixing the cause |
+| `0` | Every package reached a successful terminal state (published or already present) | proceed |
+| `2` | At least one package did not — the run finalized a receipt | `shipper resume` after fixing the cause |
+| `1` | The run failed before finalizing a receipt (auth, plan, lock, config) | fix the cause, rerun |
 
-Exit `2` means the release is half-applied and resuming is the intended
-recovery, *not* that the invocation was rejected.
+Exit `2` means a receipt exists and resuming is the intended recovery, *not*
+that the invocation was rejected.
+
+Note that `2` covers "all packages failed" as well as "some failed":
+finalization classifies every non-all-successful receipt as
+`PartialFailure`, so `CompleteFailure` (`1`) is not reachable from a
+finalized run today. Treat `1` as "the command errored out", not as "all
+packages failed". Read `state.json` or `events.jsonl` if you need the
+per-package breakdown.
+
+With `--registries` / `--all-registries`, the exit code reflects the
+**worst** outcome across every targeted registry, so a partial failure on
+one registry is not masked by a success on another.
 
 **Caveat:** argument-parsing errors (unknown flag, missing subcommand,
 invalid `--format` value) also exit `2`, because that is clap's convention

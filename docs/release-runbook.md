@@ -152,6 +152,16 @@ shipper yank --crate <crate> --version <version> --reason "<why>" --mark-comprom
 shipper fix-forward --from-receipt .shipper/receipt.json
 ```
 
-If you want the fix-forward plan *without* containing the old version yet, skip the first command and edit `compromised_at` / `compromised_by` into the receipt entry yourself — `fix-forward` only reads them. Note that `yank` execution is proven against fake Cargo and a mock registry; a live crates.io yank is an operator action, not something Shipper has release evidence for.
+If you want the fix-forward plan *without* containing the old version yet, **copy** the receipt and annotate the copy:
+
+```bash
+cp .shipper/receipt.json /tmp/planning-receipt.json
+# add "compromised_at" / "compromised_by" to the affected entry in the COPY
+shipper fix-forward --from-receipt /tmp/planning-receipt.json
+```
+
+Do not edit `.shipper/receipt.json` in place. Per [INVARIANTS.md](./INVARIANTS.md), `events.jsonl` is authoritative and the receipt is a summary derived from it; hand-annotating the receipt creates exactly the events/receipt drift the contract defines as a bug, and it does so in the artifact your release evidence rests on. A scratch copy carries no such claim — it is planning input, not evidence.
+
+Note that `yank` execution is proven against fake Cargo and a mock registry; a live crates.io yank is an operator action, not something Shipper has release evidence for.
 
 The receipt schema records `compromised_at`, `compromised_by`, and `superseded_by` so the history survives either way.
