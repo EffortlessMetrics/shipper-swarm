@@ -1167,6 +1167,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn verify_published_returns_true_when_registry_visibility_appears() {
         let server = spawn_registry_server(
             std::collections::BTreeMap::from([(
@@ -1218,6 +1219,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn verify_published_returns_false_on_timeout() {
         let reg = test_registry_client(Registry {
             name: "crates-io".to_string(),
@@ -1262,6 +1264,7 @@ mod tests {
     /// the run, `readiness_complete` closes it, and every scheduled poll is
     /// announced before the poll it schedules is recorded.
     #[test]
+    #[serial]
     fn verify_published_writes_readiness_events_in_envelope_order() {
         let server = spawn_registry_server(
             std::collections::BTreeMap::from([(
@@ -5519,6 +5522,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn verify_published_disabled_does_single_check() {
         // When readiness is disabled, it still does one version_exists check
         let server = spawn_registry_server(
@@ -7582,7 +7586,7 @@ mod tests {
             opts.registries = vec![Registry {
                 name: "rehearsal".to_string(),
                 api_base: rehearsal_server.base_url.clone(),
-                index_base: None,
+                index_base: Some(rehearsal_server.base_url.clone()),
             }];
 
             let mut reporter = CollectingReporter::default();
@@ -7595,6 +7599,10 @@ mod tests {
             assert!(
                 types.contains(&"rehearsal_started".to_string()),
                 "types: {types:?}"
+            );
+            assert!(
+                types.contains(&"registry_policy_applied".to_string()),
+                "rehearsal must persist the applied registry trust posture: {types:?}"
             );
             assert!(
                 types.contains(&"rehearsal_package_published".to_string()),
@@ -7800,7 +7808,7 @@ mod tests {
             opts.registries = vec![Registry {
                 name: "rehearsal".to_string(),
                 api_base: rehearsal_server.base_url.clone(),
-                index_base: None,
+                index_base: Some(rehearsal_server.base_url.clone()),
             }];
             opts.rehearsal_smoke_install = Some("demo".to_string());
 
@@ -7847,7 +7855,7 @@ mod tests {
             opts.registries = vec![Registry {
                 name: "rehearsal".to_string(),
                 api_base: rehearsal_server.base_url.clone(),
-                index_base: None,
+                index_base: Some(rehearsal_server.base_url.clone()),
             }];
             opts.rehearsal_smoke_install = Some("nonexistent".to_string());
 
@@ -7884,7 +7892,7 @@ mod tests {
             opts.registries = vec![Registry {
                 name: "rehearsal".to_string(),
                 api_base: rehearsal_server.base_url.clone(),
-                index_base: None,
+                index_base: Some(rehearsal_server.base_url.clone()),
             }];
 
             let mut reporter = CollectingReporter::default();
