@@ -83,8 +83,7 @@ impl HttpRegistryClient {
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             client: Some(build_client(
                 Duration::from_secs(DEFAULT_TIMEOUT_SECS),
-                &resolved_host,
-                &resolved_addrs,
+                &[(resolved_host.as_str(), resolved_addrs.as_slice())],
             )?),
             cache_dir: None,
             policy,
@@ -112,8 +111,10 @@ impl HttpRegistryClient {
         if self.validation_error.is_none() {
             match build_client(
                 timeout,
-                self.resolved_host.as_deref().unwrap_or_default(),
-                &self.resolved_addrs,
+                &[(
+                    self.resolved_host.as_deref().unwrap_or_default(),
+                    self.resolved_addrs.as_slice(),
+                )],
             ) {
                 Ok(client) => self.client = Some(client),
                 Err(error) => {
@@ -305,7 +306,22 @@ impl HttpRegistryClient {
             request = request.header(reqwest::header::IF_NONE_MATCH, etag.trim());
         }
 
-        let response = request.send().context("index request failed")?;
+        // The API client pins the API hostname. Index traffic may use a
+        // different, but explicitly trusted, hostname, so it needs its own
+        // pinned client as well. Reusing the API client here would let the
+        // index hostname resolve at connection time and reopen a DNS-rebind
+        // window after validation.
+        let index_host = validated_index
+            .index_base()
+            .host_str()
+            .ok_or_else(|| anyhow!("validated index URL has no host"))?;
+        let index_addrs =
+            validated_index.approved_socket_addrs(validated_index.index_base(), "index_base")?;
+        let index_client = build_client(self.timeout, &[(index_host, index_addrs.as_slice())])?;
+        let response = request.build().context("failed to build index request")?;
+        let response = index_client
+            .execute(response)
+            .context("index request failed")?;
 
         match response.status() {
             reqwest::StatusCode::OK => {
@@ -353,14 +369,16 @@ impl HttpRegistryClient {
 
 fn build_client(
     timeout: Duration,
-    resolved_host: &str,
-    resolved_addrs: &[SocketAddr],
+    resolved_hosts: &[(&str, &[SocketAddr])],
 ) -> Result<reqwest::blocking::Client> {
-    reqwest::blocking::Client::builder()
+    let mut builder = reqwest::blocking::Client::builder()
         .timeout(timeout)
         .user_agent(USER_AGENT)
-        .redirect(reqwest::redirect::Policy::none())
-        .resolve_to_addrs(resolved_host, resolved_addrs)
+        .redirect(reqwest::redirect::Policy::none());
+    for (host, addrs) in resolved_hosts {
+        builder = builder.resolve_to_addrs(host, addrs);
+    }
+    builder
         .build()
         .context("failed to build registry HTTP client")
 }
