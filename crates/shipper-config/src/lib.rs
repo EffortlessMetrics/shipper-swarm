@@ -748,21 +748,21 @@ impl ShipperConfig {
         // Validate registry if present. Doctor intentionally defers the
         // destination trust decision to its connectivity diagnostic so an
         // invalid URL is reported instead of preventing the diagnostic run.
-        if let Some(ref registry) = self.registry {
-            if validate_registry_destinations {
-                if registry.name.is_empty() {
-                    bail!("registry.name cannot be empty");
-                }
-                if registry.api_base.is_empty() {
-                    bail!("registry.api_base cannot be empty");
-                }
-                validate_registry_destination(
-                    registry,
-                    allow_loopback
-                        || ((self.rehearsal.enabled || self.rehearsal.allow_loopback)
-                            && self.rehearsal.registry.as_deref() == Some(registry.name.as_str())),
-                )?;
+        if let Some(ref registry) = self.registry
+            && validate_registry_destinations
+        {
+            if registry.name.is_empty() {
+                bail!("registry.name cannot be empty");
             }
+            if registry.api_base.is_empty() {
+                bail!("registry.api_base cannot be empty");
+            }
+            validate_registry_destination(
+                registry,
+                allow_loopback
+                    || ((self.rehearsal.enabled || self.rehearsal.allow_loopback)
+                        && self.rehearsal.registry.as_deref() == Some(registry.name.as_str())),
+            )?;
         }
 
         // Validate multiple registries if present
