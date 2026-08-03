@@ -872,6 +872,7 @@ base_path = "artifacts/"
 [[registries.registries]]
 name = "primary"
 api_base = "https://primary.example.com"
+index_base = "https://index.primary.example.com"
 default = true
 
 [[registries.registries]]

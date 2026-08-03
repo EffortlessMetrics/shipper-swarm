@@ -5965,8 +5965,8 @@ mod tests {
                 created_at: Utc::now(),
                 registry: Registry {
                     name: "crates-io".to_string(),
+                    index_base: Some(api_base.clone()),
                     api_base,
-                    index_base: None,
                 },
                 packages: packages
                     .iter()
