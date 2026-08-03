@@ -14,7 +14,7 @@ use shipper_types::Registry;
 
 use crate::{
     CRATES_IO_API, DEFAULT_TIMEOUT_SECS, RegistryAuthority, RegistryPolicy, USER_AGENT,
-    ValidatedRegistry, sparse_index_path,
+    ValidatedRegistry, authorities_share_trusted_domain, sparse_index_path,
 };
 
 /// Lightweight HTTP registry client that operates on a raw base-URL.
@@ -262,7 +262,9 @@ impl HttpRegistryClient {
         };
         let validated_index = ValidatedRegistry::new(index_identity, self.policy)
             .context("invalid sparse index destination")?;
-        if self.validated_authority.as_ref() != Some(validated_index.credential_authority()) {
+        if !self.validated_authority.as_ref().is_some_and(|authority| {
+            authorities_share_trusted_domain(authority, validated_index.credential_authority())
+        }) {
             return Err(anyhow!(
                 "sparse index destination authority must match the registry client authority"
             ));

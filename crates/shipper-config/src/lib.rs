@@ -688,6 +688,33 @@ impl ShipperConfig {
             bail!("parallel.per_package_timeout must be greater than 0");
         }
 
+        if let Some(rehearsal_name) = self.rehearsal.registry.as_deref() {
+            let conflicts_with_live = if let Some(registry) = self.registry.as_ref() {
+                registry.name == rehearsal_name
+            } else if !self.registries.default_registries.is_empty() {
+                self.registries
+                    .default_registries
+                    .iter()
+                    .any(|name| name == rehearsal_name)
+            } else if let Some(registry) = self
+                .registries
+                .registries
+                .iter()
+                .find(|registry| registry.default)
+                .or_else(|| self.registries.registries.first())
+            {
+                registry.name == rehearsal_name
+            } else {
+                rehearsal_name == "crates-io"
+            };
+
+            if conflicts_with_live {
+                bail!(
+                    "rehearsal registry '{rehearsal_name}' must differ from the live target registry"
+                );
+            }
+        }
+
         // Validate registry if present
         if let Some(ref registry) = self.registry {
             if registry.name.is_empty() {
@@ -954,7 +981,7 @@ mod tests {
                 registries: vec![RegistryConfig {
                     name: "private".to_string(),
                     api_base: "https://10.0.0.5".to_string(),
-                    index_base: Some("https://10.0.0.6".to_string()),
+                    index_base: Some("https://10.0.0.5".to_string()),
                     token: None,
                     default: false,
                     allow_private: false,
@@ -976,14 +1003,24 @@ mod tests {
     fn loopback_registry_requires_rehearsal_posture() {
         let mut config = ShipperConfig {
             registries: MultiRegistryConfig {
-                registries: vec![RegistryConfig {
-                    name: "local".to_string(),
-                    api_base: "http://127.0.0.1:8080".to_string(),
-                    index_base: Some("http://127.0.0.1:8080".to_string()),
-                    token: None,
-                    default: false,
-                    allow_private: false,
-                }],
+                registries: vec![
+                    RegistryConfig {
+                        name: "crates-io".to_string(),
+                        api_base: "https://crates.io".to_string(),
+                        index_base: Some("https://index.crates.io".to_string()),
+                        token: None,
+                        default: true,
+                        allow_private: false,
+                    },
+                    RegistryConfig {
+                        name: "local".to_string(),
+                        api_base: "http://127.0.0.1:8080".to_string(),
+                        index_base: Some("http://127.0.0.1:8080".to_string()),
+                        token: None,
+                        default: false,
+                        allow_private: false,
+                    },
+                ],
                 default_registries: vec![],
             },
             ..ShipperConfig::default()
@@ -992,6 +1029,29 @@ mod tests {
 
         config.rehearsal.allow_loopback = true;
         config.rehearsal.registry = Some("local".to_string());
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn registry_index_must_remain_in_the_configured_trust_domain() {
+        let mut config = ShipperConfig {
+            registry: Some(RegistryConfig {
+                name: "crates-io".to_string(),
+                api_base: "https://crates.io".to_string(),
+                index_base: Some("https://evil.example".to_string()),
+                token: None,
+                default: true,
+                allow_private: false,
+            }),
+            ..ShipperConfig::default()
+        };
+        assert!(config.validate().is_err());
+
+        config
+            .registry
+            .as_mut()
+            .expect("registry configured")
+            .index_base = Some("https://index.crates.io".to_string());
         assert!(config.validate().is_ok());
     }
 

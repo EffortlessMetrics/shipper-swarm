@@ -21,6 +21,13 @@ const METADATA_HOSTS: &[&str] = &[
     "metadata",
     "metadata.google.internal",
     "metadata.goog",
+    "metadata.azure.com",
+    "metadata.digitalocean.com",
+    "metadata.hetzner.cloud",
+    "metadata.ibm.com",
+    "metadata.internal",
+    "metadata.oraclecloud.com",
+    "kubernetes.default.svc",
 ];
 
 /// Explicit trust choices for a registry destination.
@@ -88,6 +95,39 @@ pub struct RegistryAuthority {
     pub port: Option<u16>,
 }
 
+/// Return whether an index destination belongs to the same explicitly
+/// configured registry family as the credential-bearing API destination.
+///
+/// DNS names may use the same registrable domain (for example,
+/// `crates.io` and `index.crates.io`); literal IP destinations must match
+/// exactly. Schemes and effective ports always match.
+pub fn authorities_share_trusted_domain(
+    credential: &RegistryAuthority,
+    index: &RegistryAuthority,
+) -> bool {
+    if credential.scheme != index.scheme || credential.port != index.port {
+        return false;
+    }
+
+    let credential_ip = credential.host.parse::<IpAddr>().ok();
+    let index_ip = index.host.parse::<IpAddr>().ok();
+    match (credential_ip, index_ip) {
+        (Some(left), Some(right)) => left == right,
+        (Some(_), None) | (None, Some(_)) => false,
+        (None, None) => registrable_host(&credential.host) == registrable_host(&index.host),
+    }
+}
+
+fn registrable_host(host: &str) -> &str {
+    let Some(last_dot) = host.rfind('.') else {
+        return host;
+    };
+    let Some(previous_dot) = host[..last_dot].rfind('.') else {
+        return host;
+    };
+    &host[previous_dot + 1..]
+}
+
 impl ValidatedRegistry {
     /// Parse and validate a registry under explicit trust choices.
     pub fn new(registry: Registry, policy: RegistryPolicy) -> Result<Self> {
@@ -95,6 +135,12 @@ impl ValidatedRegistry {
         let index_raw = explicit_index_base(&registry, &api_base)?;
         let index_base = parse_and_validate_url(index_raw, "index_base", policy)?;
         let credential_authority = authority_for(&api_base)?;
+        let index_authority = authority_for(&index_base)?;
+        if !authorities_share_trusted_domain(&credential_authority, &index_authority) {
+            bail!(
+                "registry api_base and index_base must use the same scheme, port, and trusted host identity"
+            )
+        }
 
         Ok(Self {
             display: registry,
@@ -202,7 +248,7 @@ fn parse_and_validate_url(value: &str, field: &str, policy: RegistryPolicy) -> R
 
 fn validate_domain(domain: &str, field: &str, policy: RegistryPolicy) -> Result<()> {
     let domain = domain.trim_end_matches('.').to_ascii_lowercase();
-    if METADATA_HOSTS.contains(&domain.as_str()) {
+    if METADATA_HOSTS.contains(&domain.as_str()) || domain.starts_with("metadata.") {
         bail!("registry {field} host is a cloud metadata endpoint")
     }
 
@@ -357,8 +403,37 @@ mod tests {
     }
 
     #[test]
+    fn rejects_metadata_hostnames_and_shared_private_addresses() {
+        for host in [
+            "instance-data",
+            "metadata",
+            "metadata.google.internal",
+            "metadata.goog",
+            "metadata.azure.com",
+            "metadata.internal",
+            "kubernetes.default.svc",
+        ] {
+            let url = format!("https://{host}");
+            let err = ValidatedRegistry::new(registry(&url, Some(&url)), RegistryPolicy::secure())
+                .expect_err(host);
+            assert!(err.to_string().contains("metadata"));
+        }
+
+        for host in ["100.64.0.1", "0.1.2.3"] {
+            let url = format!("https://{host}");
+            ValidatedRegistry::new(registry(&url, Some(&url)), RegistryPolicy::secure())
+                .expect_err(host);
+            ValidatedRegistry::new(
+                registry(&url, Some(&url)),
+                RegistryPolicy::secure().with_private(true),
+            )
+            .expect("explicit private opt-in");
+        }
+    }
+
+    #[test]
     fn private_and_loopback_postures_are_separate() {
-        let private = registry("https://10.0.0.5", Some("https://10.0.0.6"));
+        let private = registry("https://10.0.0.5", Some("https://10.0.0.5"));
         ValidatedRegistry::new(private.clone(), RegistryPolicy::secure()).expect_err("private");
         let validated =
             ValidatedRegistry::new(private, RegistryPolicy::secure().with_private(true))
@@ -382,8 +457,8 @@ mod tests {
     fn evidence_contains_authorities_but_not_url_secrets() {
         let validated = ValidatedRegistry::new(
             registry(
-                "https://registry.example/api",
-                Some("https://index.example"),
+                "https://registry.example.com/api",
+                Some("https://index.registry.example.com"),
             ),
             RegistryPolicy::secure(),
         )
@@ -391,9 +466,12 @@ mod tests {
         let evidence = validated.sanitized_evidence();
         assert_eq!(
             evidence.credential_authority,
-            "https://registry.example:443"
+            "https://registry.example.com:443"
         );
-        assert_eq!(evidence.index_authority, "https://index.example:443");
+        assert_eq!(
+            evidence.index_authority,
+            "https://index.registry.example.com:443"
+        );
         let json = serde_json::to_string(&evidence).expect("json");
         assert!(!json.contains("token"));
     }
@@ -401,18 +479,18 @@ mod tests {
     #[test]
     fn evidence_brackets_ipv6_authorities() {
         let validated = ValidatedRegistry::new(
-            registry("https://[2001:db8::10]", Some("https://[2001:db8::11]")),
+            registry("https://[2001:db8::10]", Some("https://[2001:db8::10]")),
             RegistryPolicy::secure(),
         )
         .expect("valid IPv6 registry");
         let evidence = validated.sanitized_evidence();
         assert_eq!(evidence.credential_authority, "https://[2001:db8::10]:443");
-        assert_eq!(evidence.index_authority, "https://[2001:db8::11]:443");
+        assert_eq!(evidence.index_authority, "https://[2001:db8::10]:443");
     }
 
     #[test]
     fn ipv6_unique_local_requires_private_opt_in() {
-        let private = registry("https://[fd00::10]", Some("https://[fd00::11]"));
+        let private = registry("https://[fd00::10]", Some("https://[fd00::10]"));
         ValidatedRegistry::new(private.clone(), RegistryPolicy::secure())
             .expect_err("private IPv6 destination must be opted in");
         ValidatedRegistry::new(private, RegistryPolicy::secure().with_private(true))
@@ -422,12 +500,12 @@ mod tests {
     #[test]
     fn ipv4_compatible_ipv6_requires_private_opt_in() {
         for host in ["[::10.0.0.1]", "[::192.168.1.1]"] {
-            let private = registry(&format!("https://{host}"), Some("https://registry.example"));
+            let private = registry(&format!("https://{host}"), Some(&format!("https://{host}")));
             ValidatedRegistry::new(private, RegistryPolicy::secure())
                 .expect_err("embedded private IPv4 must be rejected");
         }
 
-        let private = registry("https://[::10.0.0.1]", Some("https://[::10.0.0.2]"));
+        let private = registry("https://[::10.0.0.1]", Some("https://[::10.0.0.1]"));
         ValidatedRegistry::new(private, RegistryPolicy::secure().with_private(true))
             .expect("private opt-in should cover embedded IPv4");
     }

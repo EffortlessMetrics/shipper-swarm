@@ -87,6 +87,32 @@ pub struct RegistryTrustOptions {
     pub allow_loopback: bool,
 }
 
+impl RegistryTrustOptions {
+    /// Secure default for live registry traffic.
+    pub const fn secure() -> Self {
+        Self {
+            allow_private: false,
+            allow_loopback: false,
+        }
+    }
+
+    /// Return a copy that permits private-network destinations.
+    pub const fn with_private(self, allow_private: bool) -> Self {
+        Self {
+            allow_private,
+            allow_loopback: self.allow_loopback,
+        }
+    }
+
+    /// Return a copy that permits loopback HTTP for rehearsal/test traffic.
+    pub const fn with_loopback(self, allow_loopback: bool) -> Self {
+        Self {
+            allow_private: self.allow_private,
+            allow_loopback,
+        }
+    }
+}
+
 impl Registry {
     /// Creates a new [`Registry`] configured for crates.io.
     ///
