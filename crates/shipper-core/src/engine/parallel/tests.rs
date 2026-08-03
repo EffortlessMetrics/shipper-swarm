@@ -6913,6 +6913,7 @@ fn assert_mode_parity_pair(case: &ModeParityCase, seq: &ModeRunOutcome, par: &Mo
         }
         ModeParityScenario::AmbiguousResolvesPublished => {
             assert!(seq.ok, "{}: visible ambiguity should succeed", case.name);
+            assert_semantic_event_sequences_match(seq, par, case.name);
             let pkg = seq.state.packages.get("demo@0.1.0").expect("demo");
             assert!(
                 matches!(pkg.state, PackageState::Published),
@@ -6932,6 +6933,7 @@ fn assert_mode_parity_pair(case: &ModeParityCase, seq: &ModeRunOutcome, par: &Mo
         }
         ModeParityScenario::AmbiguousRetriesWhenNotPublished => {
             assert!(!seq.ok, "{}: unresolved ambiguity should fail", case.name);
+            assert_semantic_event_sequences_match(seq, par, case.name);
             let pkg = seq.state.packages.get("demo@0.1.0").expect("demo");
             assert!(
                 matches!(
@@ -6961,6 +6963,7 @@ fn assert_mode_parity_pair(case: &ModeParityCase, seq: &ModeRunOutcome, par: &Mo
                 "{}: StillUnknown must stop with an error",
                 case.name
             );
+            assert_semantic_event_sequences_match(seq, par, case.name);
             let pkg = seq.state.packages.get("demo@0.1.0").expect("demo");
             assert!(
                 matches!(pkg.state, PackageState::Ambiguous { .. }),
@@ -7066,6 +7069,59 @@ fn cargo_invocation_count(outcome: &ModeRunOutcome) -> usize {
                 .count()
         })
         .unwrap_or(0)
+}
+
+fn assert_semantic_event_sequences_match(
+    seq: &ModeRunOutcome,
+    par: &ModeRunOutcome,
+    case_name: &str,
+) {
+    let seq_events = semantic_event_sequence(&seq.events_path, case_name, "seq");
+    let par_events = semantic_event_sequence(&par.events_path, case_name, "par");
+    assert_eq!(
+        seq_events, par_events,
+        "{case_name}: sequential and parallel semantic event sequences differ"
+    );
+}
+
+fn semantic_event_sequence(
+    path: &Path,
+    case_name: &str,
+    mode: &str,
+) -> Vec<(String, serde_json::Value)> {
+    events::EventLog::read_from_file(path)
+        .unwrap_or_else(|e| panic!("{case_name} {mode}: read events: {e}"))
+        .all_events()
+        .iter()
+        .map(|event| {
+            let mut event_type = serde_json::to_value(&event.event_type)
+                .unwrap_or_else(|e| panic!("{case_name} {mode}: serialize event: {e}"));
+            strip_nondeterministic_event_fields(&mut event_type);
+            (event.package.clone(), event_type)
+        })
+        .collect()
+}
+
+fn strip_nondeterministic_event_fields(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            for field in ["duration_ms", "elapsed_ms", "next_attempt_at", "until"] {
+                fields.remove(field);
+            }
+            for child in fields.values_mut() {
+                strip_nondeterministic_event_fields(child);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                strip_nondeterministic_event_fields(value);
+            }
+        }
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => {}
+    }
 }
 
 fn assert_reconciled_event(outcome: &ModeRunOutcome, expected: &str, mode: &str, case_name: &str) {
