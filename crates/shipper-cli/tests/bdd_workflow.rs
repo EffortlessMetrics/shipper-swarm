@@ -92,6 +92,30 @@ fn spawn_doctor_registry(expected_requests: usize) -> TestRegistry {
     TestRegistry { base_url, handle }
 }
 
+#[test]
+#[serial]
+fn direct_command_rejects_loopback_registry_without_opt_in() {
+    let td = tempdir().expect("tempdir");
+    create_single_crate_workspace(td.path());
+    let registry = spawn_registry(Vec::new(), 0);
+
+    shipper_cmd()
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--registry")
+        .arg("local")
+        .arg("--api-base")
+        .arg(&registry.base_url)
+        .arg("--allow-dirty")
+        .arg("--skip-ownership-check")
+        .arg("preflight")
+        .assert()
+        .failure()
+        .stderr(contains("loopback"));
+
+    registry.join();
+}
+
 fn path_sep() -> &'static str {
     if cfg!(windows) { ";" } else { ":" }
 }

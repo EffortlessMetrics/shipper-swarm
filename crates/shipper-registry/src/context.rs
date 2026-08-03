@@ -534,6 +534,13 @@ mod tests {
         RegistryClient::with_policy(registry, RegistryPolicy::rehearsal())
     }
 
+    fn closed_loopback_url() -> String {
+        let server = Server::http("127.0.0.1:0").expect("server");
+        let base_url = format!("http://{}", server.server_addr());
+        drop(server);
+        base_url
+    }
+
     fn with_multi_server<F>(handler: F, request_count: usize) -> (String, thread::JoinHandle<()>)
     where
         F: Fn(tiny_http::Request) + Send + Sync + 'static,
@@ -934,11 +941,11 @@ mod tests {
 
     #[test]
     fn check_index_visibility_returns_false_for_network_error() {
-        // Use a non-existent URL to simulate a network error
+        let closed_base = closed_loopback_url();
         let registry = Registry {
             name: "test".to_string(),
-            api_base: "http://127.0.0.1:9".to_string(),
-            index_base: Some("http://127.0.0.1:9".to_string()),
+            api_base: closed_base.clone(),
+            index_base: Some(closed_base),
         };
 
         let cli = test_registry_client(registry).expect("client");
@@ -1245,11 +1252,11 @@ mod tests {
 
     #[test]
     fn is_version_visible_with_backoff_handles_network_errors_gracefully() {
-        // Use a non-existent URL to simulate network errors
+        let closed_base = closed_loopback_url();
         let registry = Registry {
             name: "test".to_string(),
-            api_base: "http://127.0.0.1:9".to_string(),
-            index_base: Some("http://127.0.0.1:9".to_string()),
+            api_base: closed_base.clone(),
+            index_base: Some(closed_base),
         };
 
         let cli = test_registry_client(registry).expect("client");
