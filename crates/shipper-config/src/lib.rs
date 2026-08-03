@@ -31,6 +31,7 @@
 //! | `[encryption]`  | [`EncryptionConfigInner`] | State file encryption              |
 //! | `[storage]`     | [`StorageConfigInner`] | Cloud storage backend                 |
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -742,9 +743,13 @@ impl ShipperConfig {
         }
 
         // Validate multiple registries if present
+        let mut registry_names = HashSet::new();
         for reg in &self.registries.registries {
             if reg.name.is_empty() {
                 bail!("registries[].name cannot be empty");
+            }
+            if !registry_names.insert(reg.name.as_str()) {
+                bail!("duplicate registry name '{}'", reg.name);
             }
             if reg.api_base.is_empty() {
                 bail!("registries[].api_base cannot be empty");
@@ -1155,6 +1160,10 @@ index_base = "https://index.my-registry.example.com"
         let registry = config.registry.unwrap();
         assert_eq!(registry.name, "my-registry");
         assert_eq!(registry.api_base, "https://my-registry.example.com");
+        assert_eq!(
+            registry.index_base.as_deref(),
+            Some("https://index.my-registry.example.com")
+        );
     }
 
     // ---- #97 rehearsal registry config plumbing ----
@@ -2374,6 +2383,37 @@ max_delay = "5s"
                 "got: {}",
                 err
             );
+        }
+
+        #[test]
+        fn duplicate_registry_names_fail_validation() {
+            let config = ShipperConfig {
+                registries: MultiRegistryConfig {
+                    registries: vec![
+                        RegistryConfig {
+                            name: "same-name".to_string(),
+                            api_base: "https://one.example.com".to_string(),
+                            index_base: Some("https://index.one.example.com".to_string()),
+                            token: None,
+                            default: false,
+                            allow_private: false,
+                        },
+                        RegistryConfig {
+                            name: "same-name".to_string(),
+                            api_base: "https://two.example.com".to_string(),
+                            index_base: Some("https://index.two.example.com".to_string()),
+                            token: None,
+                            default: false,
+                            allow_private: false,
+                        },
+                    ],
+                    default_registries: vec![],
+                },
+                ..ShipperConfig::default()
+            };
+
+            let err = config.validate().unwrap_err();
+            assert!(err.to_string().contains("duplicate registry name"));
         }
 
         #[test]

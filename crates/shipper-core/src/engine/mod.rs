@@ -944,6 +944,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn stale_state_does_not_enable_legacy_index_fallback() {
         let td = tempdir().expect("tempdir");
         fs::write(td.path().join("state.json"), "stale state").expect("write stale state");
