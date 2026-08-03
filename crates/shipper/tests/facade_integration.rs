@@ -1144,6 +1144,7 @@ fn auth_token_integration_with_custom_registry_config() {
 [registry]
 name = "my-private"
 api_base = "https://my-registry.example.com"
+index_base = "https://index.my-registry.example.com"
 "#,
     );
 

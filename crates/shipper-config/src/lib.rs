@@ -1147,6 +1147,7 @@ skip_ownership_check = true
 [registry]
 name = "my-registry"
 api_base = "https://my-registry.example.com"
+index_base = "https://index.my-registry.example.com"
 "#;
 
         let config: ShipperConfig = toml::from_str(toml).unwrap();

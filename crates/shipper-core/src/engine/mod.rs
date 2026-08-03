@@ -1032,8 +1032,8 @@ mod tests {
                 created_at: Utc::now(),
                 registry: Registry {
                     name: "crates-io".to_string(),
-                    api_base,
-                    index_base: None,
+                    api_base: api_base.clone(),
+                    index_base: Some(api_base),
                 },
                 packages: vec![PlannedPackage {
                     name: "demo".to_string(),

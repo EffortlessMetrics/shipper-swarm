@@ -307,8 +307,8 @@ fn planned_workspace(workspace_root: &Path, api_base: String) -> PlannedWorkspac
             created_at: Utc::now(),
             registry: Registry {
                 name: "crates-io".to_string(),
-                api_base,
-                index_base: None,
+                api_base: api_base.clone(),
+                index_base: Some(api_base),
             },
             packages: vec![PlannedPackage {
                 name: "demo".to_string(),
@@ -408,8 +408,8 @@ fn planned_workspace_with_dependency(workspace_root: &Path, api_base: String) ->
             created_at: Utc::now(),
             registry: Registry {
                 name: "crates-io".to_string(),
-                api_base,
-                index_base: None,
+                api_base: api_base.clone(),
+                index_base: Some(api_base),
             },
             packages: vec![
                 PlannedPackage {

@@ -158,6 +158,7 @@ schema_version = "shipper.config.v1"
 [registry]
 name = "my-private-registry"
 api_base = "https://registry.example.com"
+index_base = "https://index.registry.example.com"
 "#,
     );
 
@@ -254,6 +255,7 @@ schema_version = "shipper.config.v1"
 [registry]
 name = "config-registry"
 api_base = "https://config.example.com"
+index_base = "https://index.config.example.com"
 "#,
     );
 
@@ -283,6 +285,7 @@ schema_version = "shipper.config.v1"
 [registry]
 name = "my-reg"
 api_base = "https://config-api.example.com"
+index_base = "https://index.config-api.example.com"
 "#,
     );
 
