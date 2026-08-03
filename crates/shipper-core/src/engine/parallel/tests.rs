@@ -6614,11 +6614,10 @@ fn run_mode_parity_case(
     let mut opts = default_opts(state_dir.clone());
     opts.parallel.enabled = parallel;
     opts.readiness.enabled = matches!(scenario, ModeParityScenario::ReadinessTimeoutThenVisible);
-    opts.max_attempts = if matches!(scenario, ModeParityScenario::ReadinessTimeoutThenVisible) {
-        2
-    } else if matches!(
+    opts.max_attempts = if matches!(
         scenario,
-        ModeParityScenario::AmbiguousResolvesPublished
+        ModeParityScenario::ReadinessTimeoutThenVisible
+            | ModeParityScenario::AmbiguousResolvesPublished
             | ModeParityScenario::AmbiguousRetriesWhenNotPublished
     ) {
         2
