@@ -77,7 +77,7 @@ pub(in crate::engine) fn run(
     }
 
     reporter.info("initializing registry client...");
-    let reg = init_registry_client(ws.plan.registry.clone(), &state_dir, opts, false)?;
+    let reg = init_registry_client(ws.plan.registry.clone(), &state_dir, opts, false, false)?;
     event_log.record(PublishEvent {
         timestamp: Utc::now(),
         event_type: EventType::RegistryPolicyApplied {

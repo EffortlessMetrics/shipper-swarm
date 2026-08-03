@@ -269,7 +269,7 @@ impl HttpRegistryClient {
                 "sparse index destination authority must match the registry client authority"
             ));
         }
-        let index_base = index_base.trim_end_matches('/');
+        let index_base = validated_index.index_base().as_str().trim_end_matches('/');
         let index_path = sparse_index_path(name);
         let url = format!("{}/{}", index_base, index_path);
 

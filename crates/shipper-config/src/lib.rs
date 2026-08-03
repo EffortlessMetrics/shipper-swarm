@@ -718,7 +718,7 @@ impl ShipperConfig {
                 rehearsal_name == "crates-io"
             };
 
-            if conflicts_with_live {
+            if self.rehearsal.enabled && conflicts_with_live {
                 bail!(
                     "rehearsal registry '{rehearsal_name}' must differ from the live target registry"
                 );
@@ -1046,6 +1046,31 @@ mod tests {
         config.rehearsal.allow_loopback = false;
         config.rehearsal.registry = None;
         assert!(config.validate_with_loopback(true).is_ok());
+    }
+
+    #[test]
+    fn loopback_only_posture_does_not_conflict_with_live_target() {
+        let mut config = ShipperConfig {
+            registry: Some(RegistryConfig {
+                name: "crates-io".to_string(),
+                api_base: "https://crates.io".to_string(),
+                index_base: Some("https://index.crates.io".to_string()),
+                token: None,
+                default: true,
+                allow_private: false,
+            }),
+            ..ShipperConfig::default()
+        };
+        config.rehearsal.allow_loopback = true;
+        config.rehearsal.registry = Some("crates-io".to_string());
+
+        assert!(config.validate().is_ok());
+
+        config.rehearsal.enabled = true;
+        let err = config
+            .validate()
+            .expect_err("enabled rehearsal must not target live registry");
+        assert!(err.to_string().contains("must differ"));
     }
 
     #[test]

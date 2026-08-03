@@ -97,13 +97,14 @@ fn init_registry_client(
     state_dir: &Path,
     opts: &RuntimeOptions,
     allow_loopback: bool,
+    allow_legacy_index_fallback: bool,
 ) -> Result<RegistryClient> {
     let cache_dir = state_dir.join("cache");
-    if registry.index_base.is_none() && state_dir.join("state.json").is_file() {
+    if registry.index_base.is_none() && allow_legacy_index_fallback {
         // 0.4 persisted plans did not always carry an index endpoint. Preserve
         // their resumability by using the already-persisted API endpoint only
-        // while resuming an existing state directory; new configuration still
-        // requires an explicit custom index_base.
+        // after the resume state has been matched to the current plan and
+        // registry identity. New configuration never guesses an index host.
         registry.index_base = Some(registry.api_base.clone());
     }
     let allow_private = opts
@@ -494,7 +495,8 @@ pub fn run_rehearsal(
     event_log.write_to_file(&events_path)?;
     event_log.clear();
 
-    let rehearsal_client = init_registry_client(rehearsal_reg.clone(), &state_dir, opts, true)?;
+    let rehearsal_client =
+        init_registry_client(rehearsal_reg.clone(), &state_dir, opts, true, false)?;
     event_log.record(PublishEvent {
         timestamp: Utc::now(),
         event_type: EventType::RegistryPolicyApplied {
@@ -939,6 +941,22 @@ mod tests {
         fs::create_dir_all(bin_dir).expect("mkdir");
         write_fake_cargo(bin_dir);
         write_fake_git(bin_dir);
+    }
+
+    #[test]
+    fn stale_state_does_not_enable_legacy_index_fallback() {
+        let td = tempdir().expect("tempdir");
+        fs::write(td.path().join("state.json"), "stale state").expect("write stale state");
+        let registry = Registry {
+            name: "custom".to_string(),
+            api_base: "https://registry.example.com".to_string(),
+            index_base: None,
+        };
+        let opts = default_opts(PathBuf::from(".shipper"));
+
+        let err = init_registry_client(registry, td.path(), &opts, false, false)
+            .expect_err("new or unvalidated runs must require explicit index_base");
+        assert!(err.to_string().contains("explicit index_base"));
     }
 
     struct TestRegistryServer {

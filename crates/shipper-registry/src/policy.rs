@@ -98,9 +98,11 @@ pub struct RegistryAuthority {
 /// Return whether an index destination belongs to the same explicitly
 /// configured registry family as the credential-bearing API destination.
 ///
-/// DNS names may use the same registrable domain (for example,
-/// `crates.io` and `index.crates.io`); literal IP destinations must match
-/// exactly. Schemes and effective ports always match.
+/// DNS names must either match exactly or use the conventional explicit
+/// `index.<api-host>` relationship. This conservative rule avoids guessing a
+/// registrable domain without a public-suffix list. The built-in
+/// crates.io/index.crates.io pair is covered by that relationship. Literal IP
+/// destinations must match exactly. Schemes and effective ports always match.
 pub fn authorities_share_trusted_domain(
     credential: &RegistryAuthority,
     index: &RegistryAuthority,
@@ -114,18 +116,12 @@ pub fn authorities_share_trusted_domain(
     match (credential_ip, index_ip) {
         (Some(left), Some(right)) => left == right,
         (Some(_), None) | (None, Some(_)) => false,
-        (None, None) => registrable_host(&credential.host) == registrable_host(&index.host),
+        (None, None) => trusted_dns_pair(&credential.host, &index.host),
     }
 }
 
-fn registrable_host(host: &str) -> &str {
-    let Some(last_dot) = host.rfind('.') else {
-        return host;
-    };
-    let Some(previous_dot) = host[..last_dot].rfind('.') else {
-        return host;
-    };
-    &host[previous_dot + 1..]
+fn trusted_dns_pair(credential: &str, index: &str) -> bool {
+    credential == index || index == format!("index.{credential}")
 }
 
 impl ValidatedRegistry {
@@ -481,6 +477,34 @@ mod tests {
         );
         let json = serde_json::to_string(&evidence).expect("json");
         assert!(!json.contains("token"));
+    }
+
+    #[test]
+    fn shared_two_label_public_suffix_is_not_a_registry_identity() {
+        let err = ValidatedRegistry::new(
+            registry(
+                "https://registry.example.co.uk",
+                Some("https://index.attacker.co.uk"),
+            ),
+            RegistryPolicy::secure(),
+        )
+        .expect_err("unrelated hosts must not share co.uk trust");
+        assert!(err.to_string().contains("trusted host identity"));
+
+        ValidatedRegistry::new(
+            registry("https://crates.io", Some("https://index.crates.io")),
+            RegistryPolicy::secure(),
+        )
+        .expect("the documented crates.io pair remains valid");
+
+        ValidatedRegistry::new(
+            registry(
+                "https://registry.example.co.uk",
+                Some("https://index.registry.example.co.uk"),
+            ),
+            RegistryPolicy::secure(),
+        )
+        .expect("the explicit index subdomain remains valid");
     }
 
     #[test]
