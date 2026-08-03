@@ -16,7 +16,11 @@ fn write_file(path: &Path, content: &str) {
 }
 
 fn shipper_cmd() -> Command {
-    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("shipper-cli"));
+    Command::new(assert_cmd::cargo::cargo_bin!("shipper-cli"))
+}
+
+fn loopback_shipper_cmd() -> Command {
+    let mut command = shipper_cmd();
     command.arg("--allow-loopback");
     command
 }
@@ -147,7 +151,7 @@ fn preflight_clean_workspace_succeeds() {
     // 2 requests: version_exists + check_new_crate for "alpha"
     let registry = spawn_registry(vec![404], 2);
 
-    shipper_cmd()
+    loopback_shipper_cmd()
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--api-base")
@@ -174,7 +178,7 @@ fn preflight_clean_workspace_shows_summary() {
     fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
     let registry = spawn_registry(vec![404], 2);
 
-    let out = shipper_cmd()
+    let out = loopback_shipper_cmd()
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--api-base")
@@ -209,7 +213,7 @@ fn preflight_non_git_directory_fails_without_allow_dirty() {
 
     // Without --allow-dirty, preflight checks git cleanliness.
     // A non-git temp directory should fail the git check.
-    shipper_cmd()
+    loopback_shipper_cmd()
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--skip-ownership-check")
@@ -232,7 +236,7 @@ fn preflight_package_filter_selects_single_package() {
     // 2 requests for the single filtered package
     let registry = spawn_registry(vec![404], 2);
 
-    let out = shipper_cmd()
+    let out = loopback_shipper_cmd()
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--api-base")
@@ -269,7 +273,7 @@ fn preflight_package_filter_multiple_packages() {
     // 4 requests: 2 per package (version_exists + check_new_crate)
     let registry = spawn_registry(vec![404], 4);
 
-    let out = shipper_cmd()
+    let out = loopback_shipper_cmd()
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--api-base")
@@ -308,7 +312,7 @@ fn preflight_skip_ownership_check_succeeds_without_token() {
     let registry = spawn_registry(vec![404], 2);
 
     // With --skip-ownership-check, ownership failures are not reported
-    shipper_cmd()
+    loopback_shipper_cmd()
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--api-base")
@@ -334,7 +338,7 @@ fn preflight_strict_ownership_fails_without_token() {
     fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
 
     // --strict-ownership without a token should fail
-    shipper_cmd()
+    loopback_shipper_cmd()
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--allow-dirty")
@@ -358,7 +362,7 @@ fn preflight_custom_manifest_path() {
     fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
     let registry = spawn_registry(vec![404], 2);
 
-    shipper_cmd()
+    loopback_shipper_cmd()
         .arg("--manifest-path")
         .arg(nested.join("Cargo.toml"))
         .arg("--api-base")
@@ -385,7 +389,7 @@ fn preflight_no_workspace_fails() {
     // Write a non-workspace file so there's no Cargo.toml
     write_file(&td.path().join("README.md"), "not a workspace");
 
-    shipper_cmd()
+    loopback_shipper_cmd()
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("preflight")
@@ -395,7 +399,7 @@ fn preflight_no_workspace_fails() {
 
 #[test]
 fn preflight_invalid_manifest_path_fails() {
-    shipper_cmd()
+    loopback_shipper_cmd()
         .arg("--manifest-path")
         .arg("nonexistent/path/Cargo.toml")
         .arg("preflight")
@@ -410,7 +414,7 @@ fn preflight_json_format_produces_valid_json() {
     fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
     let registry = spawn_registry(vec![404], 2);
 
-    let out = shipper_cmd()
+    let out = loopback_shipper_cmd()
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--api-base")
@@ -455,7 +459,7 @@ fn preflight_writes_events_file() {
     fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
     let registry = spawn_registry(vec![404], 2);
 
-    shipper_cmd()
+    loopback_shipper_cmd()
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--api-base")
@@ -488,7 +492,7 @@ fn preflight_multi_crate_workspace_lists_all_packages() {
     // 6 requests: 2 per package (version_exists + check_new_crate) for 3 packages
     let registry = spawn_registry(vec![404], 6);
 
-    let out = shipper_cmd()
+    let out = loopback_shipper_cmd()
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--api-base")
@@ -522,7 +526,7 @@ fn preflight_reports_already_published_packages() {
     // Return 200 to indicate the version already exists
     let registry = spawn_registry(vec![200], 2);
 
-    let out = shipper_cmd()
+    let out = loopback_shipper_cmd()
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--api-base")
@@ -583,7 +587,7 @@ fn preflight_allow_dirty_skips_git_check() {
     let registry = spawn_registry(vec![404], 2);
 
     // With --allow-dirty the dirty working tree is accepted
-    shipper_cmd()
+    loopback_shipper_cmd()
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--api-base")
@@ -614,7 +618,7 @@ fn preflight_skip_ownership_with_token_present() {
     // thread would hang because spawn_registry only serves `expected_requests`.
     let registry = spawn_registry(vec![404], 2);
 
-    shipper_cmd()
+    loopback_shipper_cmd()
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--api-base")
@@ -647,7 +651,7 @@ fn preflight_detects_mixed_already_published_in_multi_crate() {
     //   top-app:  404 (not published), 404 (new)
     let registry = spawn_registry(vec![200, 200, 404, 404, 404, 404], 6);
 
-    let out = shipper_cmd()
+    let out = loopback_shipper_cmd()
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--api-base")
@@ -687,7 +691,7 @@ fn preflight_custom_registry_url() {
     fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
     let registry = spawn_registry(vec![404], 2);
 
-    let out = shipper_cmd()
+    let out = loopback_shipper_cmd()
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--registry")
@@ -735,7 +739,7 @@ fn preflight_reports_multiple_issues_in_single_run() {
     let registry = spawn_registry(vec![200, 200, 404, 404, 404, 404], 6);
 
     // No token → ownership cannot be verified for any package
-    let out = shipper_cmd()
+    let out = loopback_shipper_cmd()
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--api-base")

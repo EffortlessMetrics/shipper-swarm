@@ -979,7 +979,7 @@ pub fn run() -> Result<std::process::ExitCode> {
 
     // Handle Config commands early (they don't need workspace plan)
     if let Some(Commands::Config(config_cmd)) = &cli.cmd {
-        run_config(config_cmd.clone())?;
+        run_config_with_loopback(config_cmd.clone(), cli.allow_loopback)?;
         return Ok(std::process::ExitCode::SUCCESS);
     }
 
@@ -1064,12 +1064,13 @@ pub fn run() -> Result<std::process::ExitCode> {
             .config
             .clone()
             .unwrap_or_else(|| planned.workspace_root.join(".shipper.toml"));
-        cfg.validate().with_context(|| {
-            format!(
-                "Configuration validation failed for {}",
-                config_path.display()
-            )
-        })?;
+        cfg.validate_with_loopback(cli.allow_loopback)
+            .with_context(|| {
+                format!(
+                    "Configuration validation failed for {}",
+                    config_path.display()
+                )
+            })?;
     }
 
     // Apply registry from config if CLI didn't set it
@@ -4823,7 +4824,7 @@ fn clean_single_dir(
     Ok(actions)
 }
 
-fn run_config(cmd: ConfigCommands) -> Result<()> {
+fn run_config_with_loopback(cmd: ConfigCommands, allow_loopback: bool) -> Result<()> {
     match cmd {
         ConfigCommands::Init { output } => {
             let template = ShipperConfig::default_toml_template();
@@ -4847,9 +4848,11 @@ fn run_config(cmd: ConfigCommands) -> Result<()> {
             }
             let config = ShipperConfig::load_from_file(&path)
                 .with_context(|| format!("Failed to load config file: {}", path.display()))?;
-            config.validate().with_context(|| {
-                format!("Configuration validation failed for {}", path.display())
-            })?;
+            config
+                .validate_with_loopback(allow_loopback)
+                .with_context(|| {
+                    format!("Configuration validation failed for {}", path.display())
+                })?;
             println!("Configuration file is valid: {}", path.display());
         }
     }
@@ -5663,9 +5666,12 @@ mod tests {
         let td = tempdir().expect("tempdir");
         let config_path = td.path().join("test-config.toml");
 
-        run_config(ConfigCommands::Init {
-            output: config_path.clone(),
-        })
+        run_config_with_loopback(
+            ConfigCommands::Init {
+                output: config_path.clone(),
+            },
+            false,
+        )
         .expect("config init should succeed");
 
         assert!(config_path.exists(), "config file should be created");
@@ -5717,9 +5723,12 @@ timeout = "1h"
 
         fs::write(&config_path, valid_config).expect("write config file");
 
-        run_config(ConfigCommands::Validate {
-            path: config_path.clone(),
-        })
+        run_config_with_loopback(
+            ConfigCommands::Validate {
+                path: config_path.clone(),
+            },
+            false,
+        )
         .expect("config validate should succeed for valid file");
     }
 
@@ -5736,9 +5745,12 @@ lines = 0
 
         fs::write(&config_path, invalid_config).expect("write config file");
 
-        let result = run_config(ConfigCommands::Validate {
-            path: config_path.clone(),
-        });
+        let result = run_config_with_loopback(
+            ConfigCommands::Validate {
+                path: config_path.clone(),
+            },
+            false,
+        );
 
         assert!(
             result.is_err(),
@@ -5758,9 +5770,12 @@ lines = 0
         let td = tempdir().expect("tempdir");
         let config_path = td.path().join("nonexistent-config.toml");
 
-        let result = run_config(ConfigCommands::Validate {
-            path: config_path.clone(),
-        });
+        let result = run_config_with_loopback(
+            ConfigCommands::Validate {
+                path: config_path.clone(),
+            },
+            false,
+        );
 
         assert!(
             result.is_err(),

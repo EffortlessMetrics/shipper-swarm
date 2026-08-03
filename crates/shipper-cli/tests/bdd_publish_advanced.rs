@@ -231,7 +231,11 @@ fn spawn_registry(statuses: Vec<u16>, expected_requests: usize) -> TestRegistry 
 }
 
 fn shipper_cmd() -> Command {
-    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("shipper-cli"));
+    Command::new(assert_cmd::cargo::cargo_bin!("shipper-cli"))
+}
+
+fn loopback_shipper_cmd() -> Command {
+    let mut command = shipper_cmd();
     command.arg("--allow-loopback");
     command
 }
@@ -279,7 +283,7 @@ mod registry_errors {
         let state_dir = td.path().join(".shipper");
 
         // When / Then
-        shipper_cmd()
+        loopback_shipper_cmd()
             .arg("--manifest-path")
             .arg(td.path().join("Cargo.toml"))
             .arg("--api-base")
@@ -323,7 +327,7 @@ mod registry_errors {
         let state_dir = td.path().join(".shipper");
 
         // When / Then
-        shipper_cmd()
+        loopback_shipper_cmd()
             .arg("--manifest-path")
             .arg(td.path().join("Cargo.toml"))
             .arg("--api-base")
@@ -379,7 +383,7 @@ mod retry_on_failure {
         let state_dir = td.path().join(".shipper");
 
         // When
-        shipper_cmd()
+        loopback_shipper_cmd()
             .arg("--manifest-path")
             .arg(td.path().join("Cargo.toml"))
             .arg("--api-base")
@@ -445,7 +449,7 @@ mod plan_as_dry_run {
         create_workspace(td.path());
 
         // When
-        let output = shipper_cmd()
+        let output = loopback_shipper_cmd()
             .arg("--manifest-path")
             .arg(td.path().join("Cargo.toml"))
             .arg("plan")
@@ -497,7 +501,7 @@ mod plan_as_dry_run {
         create_workspace(td.path());
 
         // When
-        let output = shipper_cmd()
+        let output = loopback_shipper_cmd()
             .arg("--manifest-path")
             .arg(td.path().join("Cargo.toml"))
             .arg("--package")
@@ -546,7 +550,7 @@ mod already_published_skip {
         let state_dir = td.path().join(".shipper");
 
         // When
-        let output = shipper_cmd()
+        let output = loopback_shipper_cmd()
             .arg("--manifest-path")
             .arg(td.path().join("Cargo.toml"))
             .arg("--api-base")
@@ -636,7 +640,7 @@ mod multi_crate_partial_failure {
         let state_dir = td.path().join(".shipper");
 
         // When
-        shipper_cmd()
+        loopback_shipper_cmd()
             .arg("--manifest-path")
             .arg(td.path().join("Cargo.toml"))
             .arg("--api-base")

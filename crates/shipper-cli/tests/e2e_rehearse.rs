@@ -293,7 +293,11 @@ fn pascal_to_snake(name: &str) -> String {
 }
 
 fn shipper_cmd() -> Command {
-    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("shipper-cli"));
+    Command::new(assert_cmd::cargo::cargo_bin!("shipper-cli"))
+}
+
+fn loopback_shipper_cmd() -> Command {
+    let mut command = shipper_cmd();
     command.arg("--allow-loopback");
     command
 }
@@ -483,7 +487,7 @@ fn rehearsal_interrupted_publish_then_resume_preserves_invariants() {
     // This is the "interrupted run" — a + b succeed, c fails. Shipper
     // persists state after each step, so state.json and events.jsonl
     // should reflect reality at the moment the loop gave up on c.
-    let mut cmd = shipper_cmd();
+    let mut cmd = loopback_shipper_cmd();
     common_args(
         &mut cmd,
         &root.join("Cargo.toml"),
@@ -545,7 +549,7 @@ fn rehearsal_interrupted_publish_then_resume_preserves_invariants() {
     // doesn't trip the stale-plan guard.
     registry.clear_pins();
 
-    let mut resume = shipper_cmd();
+    let mut resume = loopback_shipper_cmd();
     common_args_with_max_attempts(
         &mut resume,
         &root.join("Cargo.toml"),
@@ -638,7 +642,7 @@ fn live_runner_interruption_seed_uploads_shipper_artifact() {
     registry.pin_404("crate-c");
     write_live_rehearsal_config(&root, &registry_url);
 
-    let mut cmd = shipper_cmd();
+    let mut cmd = loopback_shipper_cmd();
     common_args(
         &mut cmd,
         &root.join("Cargo.toml"),
@@ -695,7 +699,7 @@ fn live_runner_interruption_resume_downloaded_artifact_preserves_invariants() {
     let (registry_url, registry_stop, _registry) = spawn_registry_at(&live_registry_addr());
     write_live_rehearsal_config(&root, &registry_url);
 
-    let mut resume = shipper_cmd();
+    let mut resume = loopback_shipper_cmd();
     common_args_with_max_attempts(
         &mut resume,
         &root.join("Cargo.toml"),

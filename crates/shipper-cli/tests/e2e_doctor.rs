@@ -43,7 +43,11 @@ edition = "2021"
 }
 
 fn shipper_cmd() -> Command {
-    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("shipper-cli"));
+    Command::new(assert_cmd::cargo::cargo_bin!("shipper-cli"))
+}
+
+fn loopback_shipper_cmd() -> Command {
+    let mut command = shipper_cmd();
     command.arg("--allow-loopback");
     command
 }
@@ -105,7 +109,7 @@ fn doctor_shows_cargo_version() {
 
     let registry = spawn_registry(1);
 
-    shipper_cmd()
+    loopback_shipper_cmd()
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--api-base")
@@ -130,7 +134,7 @@ fn doctor_shows_rust_version() {
 
     let registry = spawn_registry(1);
 
-    let output = shipper_cmd()
+    let output = loopback_shipper_cmd()
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--api-base")
@@ -171,7 +175,7 @@ fn doctor_detects_token_when_set() {
     temp_env::with_vars(
         [("CARGO_REGISTRY_TOKEN", Some("secret-test-token"))],
         || {
-            shipper_cmd()
+            loopback_shipper_cmd()
                 .arg("--manifest-path")
                 .arg(td.path().join("Cargo.toml"))
                 .arg("--api-base")
@@ -196,7 +200,7 @@ fn doctor_json_format_reports_diagnostics_without_token_value() {
 
     let registry = spawn_registry(1);
 
-    let output = shipper_cmd()
+    let output = loopback_shipper_cmd()
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--api-base")
@@ -261,7 +265,7 @@ fn doctor_json_format_redacts_registry_url_secrets() {
         "http://user:url-user-secret@127.0.0.1:{dead_port}/api?token=url-token-secret&api_key=url-key-secret&scope=all"
     );
 
-    let output = shipper_cmd()
+    let output = loopback_shipper_cmd()
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--api-base")
@@ -315,7 +319,7 @@ fn doctor_reports_missing_token() {
             ("CARGO_REGISTRIES_CRATES_IO_TOKEN", None::<&str>),
         ],
         || {
-            shipper_cmd()
+            loopback_shipper_cmd()
                 .arg("--manifest-path")
                 .arg(td.path().join("Cargo.toml"))
                 .arg("--api-base")
@@ -342,7 +346,7 @@ fn doctor_shows_workspace_info() {
 
     let registry = spawn_registry(1);
 
-    shipper_cmd()
+    loopback_shipper_cmd()
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--api-base")
@@ -371,7 +375,7 @@ fn doctor_reports_shipper_directory_status() {
 
     let registry = spawn_registry(1);
 
-    shipper_cmd()
+    loopback_shipper_cmd()
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--api-base")
@@ -405,7 +409,7 @@ fn doctor_reports_state_file_if_present() {
 
     let registry = spawn_registry(1);
 
-    shipper_cmd()
+    loopback_shipper_cmd()
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--api-base")
@@ -432,7 +436,7 @@ fn doctor_reports_dirty_git_remediation() {
 
     let registry = spawn_registry(1);
 
-    shipper_cmd()
+    loopback_shipper_cmd()
         .current_dir(td.path())
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))

@@ -393,7 +393,8 @@ pub struct RegistryConfig {
     /// Base URL for registry web API (e.g., <https://crates.io>)
     pub api_base: String,
 
-    /// Base URL for the sparse index (optional, derived from api_base if not set)
+    /// Base URL for the sparse index. Required for custom registries; crates.io
+    /// uses its well-known sparse index when this is omitted.
     #[serde(default)]
     pub index_base: Option<String>,
 
@@ -633,6 +634,15 @@ impl ShipperConfig {
 
     /// Validate the configuration
     pub fn validate(&self) -> Result<()> {
+        self.validate_with_loopback(false)
+    }
+
+    /// Validate the configuration with an explicit CLI/test loopback posture.
+    ///
+    /// The config-file validator remains secure by default. Callers may pass
+    /// `true` only when the operator explicitly supplied the loopback opt-in;
+    /// private, link-local, and metadata destinations remain rejected.
+    pub fn validate_with_loopback(&self, allow_loopback: bool) -> Result<()> {
         // Validate schema version format
         shipper_types::schema::parse_schema_version(&self.schema_version)
             .context("invalid schema_version format")?;
@@ -725,8 +735,9 @@ impl ShipperConfig {
             }
             validate_registry_destination(
                 registry,
-                (self.rehearsal.enabled || self.rehearsal.allow_loopback)
-                    && self.rehearsal.registry.as_deref() == Some(registry.name.as_str()),
+                allow_loopback
+                    || ((self.rehearsal.enabled || self.rehearsal.allow_loopback)
+                        && self.rehearsal.registry.as_deref() == Some(registry.name.as_str())),
             )?;
         }
 
@@ -740,8 +751,9 @@ impl ShipperConfig {
             }
             validate_registry_destination(
                 reg,
-                (self.rehearsal.enabled || self.rehearsal.allow_loopback)
-                    && self.rehearsal.registry.as_deref() == Some(reg.name.as_str()),
+                allow_loopback
+                    || ((self.rehearsal.enabled || self.rehearsal.allow_loopback)
+                        && self.rehearsal.registry.as_deref() == Some(reg.name.as_str())),
             )?;
         }
 
@@ -1030,6 +1042,10 @@ mod tests {
         config.rehearsal.allow_loopback = true;
         config.rehearsal.registry = Some("local".to_string());
         assert!(config.validate().is_ok());
+
+        config.rehearsal.allow_loopback = false;
+        config.rehearsal.registry = None;
+        assert!(config.validate_with_loopback(true).is_ok());
     }
 
     #[test]

@@ -84,7 +84,11 @@ core = { path = "../core" }
 }
 
 fn shipper_cmd() -> Command {
-    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("shipper-cli"));
+    Command::new(assert_cmd::cargo::cargo_bin!("shipper-cli"))
+}
+
+fn loopback_shipper_cmd() -> Command {
+    let mut command = shipper_cmd();
     command.arg("--allow-loopback");
     command
 }
@@ -198,7 +202,7 @@ fn resume_no_state_file_shows_error() {
     let state_dir = td.path().join("empty-state");
     fs::create_dir_all(&state_dir).expect("mkdir");
 
-    shipper_cmd()
+    loopback_shipper_cmd()
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--state-dir")
@@ -228,7 +232,7 @@ fn resume_continues_from_failed_state() {
     // Total: 4 requests
     let registry = spawn_registry(vec![404, 404, 404, 200], 4);
 
-    shipper_cmd()
+    loopback_shipper_cmd()
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--api-base")
@@ -260,7 +264,7 @@ fn resume_continues_from_failed_state() {
     // Resume: cargo publish now succeeds (exit 0).
     // Use --max-attempts 2 because the state already has attempts=1;
     // the retry loop needs max_attempts > saved attempts to enter.
-    shipper_cmd()
+    loopback_shipper_cmd()
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--api-base")
@@ -320,7 +324,7 @@ fn resume_with_all_published_state_succeeds() {
     // the extra slot times out harmlessly via recv_timeout.
     let registry = spawn_registry(vec![404, 200], 3);
 
-    shipper_cmd()
+    loopback_shipper_cmd()
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--api-base")
@@ -353,7 +357,7 @@ fn resume_with_all_published_state_succeeds() {
 
     // Resume: everything is already complete, so it should succeed and skip.
     // No registry requests needed since all packages are Published in state.
-    let output = shipper_cmd()
+    let output = loopback_shipper_cmd()
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--api-base")
@@ -421,7 +425,7 @@ fn resume_plan_id_mismatch_fails() {
     }"#;
     write_state_json(&state_dir, mock_state);
 
-    shipper_cmd()
+    loopback_shipper_cmd()
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--allow-dirty")
@@ -447,7 +451,7 @@ fn resume_with_custom_state_dir() {
     // No state.json in custom dir → resume should fail citing that directory
     fs::create_dir_all(&custom_dir).expect("mkdir");
 
-    shipper_cmd()
+    loopback_shipper_cmd()
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--state-dir")
@@ -490,7 +494,7 @@ fn resume_after_partial_publish() {
 
     // First: publish all crates with cargo failing.
     // core gets skipped (registry says 200 → already published), app fails.
-    shipper_cmd()
+    loopback_shipper_cmd()
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--api-base")
@@ -536,7 +540,7 @@ fn resume_after_partial_publish() {
 
     // Resume: core already complete → skip, app retried and succeeds.
     // Use --max-attempts 2 because state already has attempts=1 for app.
-    shipper_cmd()
+    loopback_shipper_cmd()
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--api-base")

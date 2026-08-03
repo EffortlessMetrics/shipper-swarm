@@ -158,7 +158,11 @@ fn spawn_registry(statuses: Vec<u16>, expected_requests: usize) -> TestRegistry 
 }
 
 fn shipper_cmd() -> Command {
-    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("shipper-cli"));
+    Command::new(assert_cmd::cargo::cargo_bin!("shipper-cli"))
+}
+
+fn loopback_shipper_cmd() -> Command {
+    let mut command = shipper_cmd();
     command.arg("--allow-loopback");
     command
 }
@@ -168,7 +172,7 @@ fn plan_command_snapshot() {
     let td = tempdir().expect("tempdir");
     create_workspace(td.path());
 
-    let mut cmd = shipper_cmd();
+    let mut cmd = loopback_shipper_cmd();
     let out = cmd
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
@@ -205,7 +209,7 @@ fn plan_command_with_package_flag() {
     let td = tempdir().expect("tempdir");
     create_workspace(td.path());
 
-    let mut cmd = shipper_cmd();
+    let mut cmd = loopback_shipper_cmd();
     let out = cmd
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
@@ -228,7 +232,7 @@ fn doctor_command_snapshot() {
     create_workspace(td.path());
     fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
 
-    let mut cmd = shipper_cmd();
+    let mut cmd = loopback_shipper_cmd();
     let out = cmd
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
@@ -288,7 +292,7 @@ fn doctor_command_detects_trusted_publishing_auth() {
     create_workspace(td.path());
     fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
 
-    let mut cmd = shipper_cmd();
+    let mut cmd = loopback_shipper_cmd();
     let out = cmd
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
@@ -353,7 +357,7 @@ fn doctor_command_reports_partial_trusted_publishing_env() {
     create_workspace(td.path());
     fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
 
-    let mut cmd = shipper_cmd();
+    let mut cmd = loopback_shipper_cmd();
     let out = cmd
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
@@ -431,7 +435,7 @@ jobs:
 "#,
     );
 
-    let mut cmd = shipper_cmd();
+    let mut cmd = loopback_shipper_cmd();
     let out = cmd
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
@@ -484,7 +488,7 @@ jobs:
 "#,
     );
 
-    let mut cmd = shipper_cmd();
+    let mut cmd = loopback_shipper_cmd();
     let out = cmd
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
@@ -514,7 +518,7 @@ fn status_command_snapshot() {
     create_workspace(td.path());
     let registry = spawn_registry(vec![404], 1);
 
-    let mut cmd = shipper_cmd();
+    let mut cmd = loopback_shipper_cmd();
     let out = cmd
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
@@ -546,7 +550,7 @@ fn preflight_command_snapshot() {
     fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
     let registry = spawn_registry(vec![404], 2);
 
-    let mut cmd = shipper_cmd();
+    let mut cmd = loopback_shipper_cmd();
     let out = cmd
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
@@ -640,7 +644,7 @@ fn preflight_command_writes_preflight_events() {
     fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
     let registry = spawn_registry(vec![404], 2);
 
-    shipper_cmd()
+    loopback_shipper_cmd()
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--api-base")
@@ -665,7 +669,7 @@ fn preflight_command_writes_preflight_events() {
     assert!(events.contains(r#""type":"preflight_ownership_check""#));
     assert!(events.contains(r#""type":"preflight_complete""#));
 
-    let mut inspect = shipper_cmd();
+    let mut inspect = loopback_shipper_cmd();
     let out = inspect
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
@@ -690,7 +694,7 @@ fn preflight_command_with_json_flag() {
     fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
     let registry = spawn_registry(vec![404], 2);
 
-    let mut cmd = shipper_cmd();
+    let mut cmd = loopback_shipper_cmd();
     let out = cmd
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
@@ -732,7 +736,7 @@ fn preflight_command_with_policy_flags() {
     let registry = spawn_registry(vec![404], 4);
 
     // Test with --policy fast
-    let mut cmd = shipper_cmd();
+    let mut cmd = loopback_shipper_cmd();
     cmd.arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--api-base")
@@ -748,7 +752,7 @@ fn preflight_command_with_policy_flags() {
         .success();
 
     // Test with --verify-mode package
-    let mut cmd = shipper_cmd();
+    let mut cmd = loopback_shipper_cmd();
     cmd.arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--api-base")
@@ -773,7 +777,7 @@ fn preflight_command_reports_already_published() {
     fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
     let registry = spawn_registry(vec![200], 2);
 
-    let mut cmd = shipper_cmd();
+    let mut cmd = loopback_shipper_cmd();
     let out = cmd
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
@@ -815,7 +819,7 @@ fn publish_command_e2e_with_fake_cargo() {
 
     let registry = spawn_registry(vec![404, 200], 2);
 
-    let mut cmd = shipper_cmd();
+    let mut cmd = loopback_shipper_cmd();
     let out = cmd
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
@@ -867,7 +871,7 @@ fn publish_then_resume_e2e_with_absolute_state_dir() {
 
     let registry = spawn_registry(vec![404, 200], 2);
 
-    let mut publish = shipper_cmd();
+    let mut publish = loopback_shipper_cmd();
     publish
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
@@ -890,7 +894,7 @@ fn publish_then_resume_e2e_with_absolute_state_dir() {
         .success();
     registry.join();
 
-    let mut resume = shipper_cmd();
+    let mut resume = loopback_shipper_cmd();
     let out = resume
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
@@ -920,7 +924,7 @@ fn invalid_duration_flag_fails() {
     let td = tempdir().expect("tempdir");
     create_workspace(td.path());
 
-    shipper_cmd()
+    loopback_shipper_cmd()
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--base-delay")
@@ -951,7 +955,7 @@ fn inspect_receipt_command_displays_new_fields() {
     let registry = spawn_registry(vec![404, 200], 2);
 
     // First publish to create a receipt
-    let mut publish = shipper_cmd();
+    let mut publish = loopback_shipper_cmd();
     publish
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
@@ -975,7 +979,7 @@ fn inspect_receipt_command_displays_new_fields() {
     registry.join();
 
     // Now inspect the receipt
-    let mut inspect = shipper_cmd();
+    let mut inspect = loopback_shipper_cmd();
     let out = inspect
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
@@ -1000,7 +1004,7 @@ fn ci_github_actions_includes_cache() {
     let td = tempdir().expect("tempdir");
     create_workspace(td.path());
 
-    let mut cmd = shipper_cmd();
+    let mut cmd = loopback_shipper_cmd();
     let out = cmd
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
@@ -1024,7 +1028,7 @@ fn ci_gitlab_includes_cache() {
     let td = tempdir().expect("tempdir");
     create_workspace(td.path());
 
-    let mut cmd = shipper_cmd();
+    let mut cmd = loopback_shipper_cmd();
     let out = cmd
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
@@ -1050,7 +1054,7 @@ fn preflight_command_finishability_proven() {
     fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
     let registry = spawn_registry(vec![404], 2);
 
-    let mut cmd = shipper_cmd();
+    let mut cmd = loopback_shipper_cmd();
     let out = cmd
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
@@ -1121,7 +1125,7 @@ fn preflight_command_finishability_failed() {
     #[cfg(not(windows))]
     let fake_cargo_path = bin.join("cargo");
 
-    let mut cmd = shipper_cmd();
+    let mut cmd = loopback_shipper_cmd();
     let out = cmd
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
@@ -1161,7 +1165,7 @@ fn preflight_command_with_new_crates() {
         2,
     );
 
-    let mut cmd = shipper_cmd();
+    let mut cmd = loopback_shipper_cmd();
     let out = cmd
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
@@ -1204,7 +1208,7 @@ fn inspect_receipt_command_with_git_context() {
     let registry = spawn_registry(vec![404, 200], 2);
 
     // First publish to create a receipt
-    let mut publish = shipper_cmd();
+    let mut publish = loopback_shipper_cmd();
     publish
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
@@ -1228,7 +1232,7 @@ fn inspect_receipt_command_with_git_context() {
     registry.join();
 
     // Now inspect receipt
-    let mut inspect = shipper_cmd();
+    let mut inspect = loopback_shipper_cmd();
     let out = inspect
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
@@ -1276,7 +1280,7 @@ fn inspect_receipt_command_with_environment_fingerprint() {
     let registry = spawn_registry(vec![404, 200], 2);
 
     // First publish to create a receipt
-    let mut publish = shipper_cmd();
+    let mut publish = loopback_shipper_cmd();
     publish
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
@@ -1300,7 +1304,7 @@ fn inspect_receipt_command_with_environment_fingerprint() {
     registry.join();
 
     // Now inspect receipt
-    let mut inspect = shipper_cmd();
+    let mut inspect = loopback_shipper_cmd();
     let out = inspect
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
@@ -1330,7 +1334,7 @@ fn preflight_command_json_output_structure() {
     fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
     let registry = spawn_registry(vec![404], 2);
 
-    let mut cmd = shipper_cmd();
+    let mut cmd = loopback_shipper_cmd();
     let out = cmd
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
@@ -1435,7 +1439,7 @@ fn preflight_json_reports_trusted_publishing_without_minted_token() {
     fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
     let registry = spawn_registry(vec![404], 2);
 
-    let mut cmd = shipper_cmd();
+    let mut cmd = loopback_shipper_cmd();
     let out = cmd
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))

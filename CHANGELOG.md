@@ -55,7 +55,9 @@ Post-0.4.0 release cleanup. Resolves the carry-over items flagged in the
 
 - **Registry destination trust boundary.** Registry API and sparse-index URLs
   now require secure, explicitly validated destinations, trusted host-family
-  alignment, and explicit private/rehearsal opt-ins. Sanitized
+  alignment, and explicit private/rehearsal opt-ins. Custom registries must
+  now declare `index_base`; only the built-in crates.io target retains its
+  well-known index default. Sanitized
   `RegistryPolicyApplied` evidence records the applied posture. The new public
   `RuntimeOptions.registry_policies` field is an intentional API change for
   carrying these per-registry trust choices; downstream struct-literal callers

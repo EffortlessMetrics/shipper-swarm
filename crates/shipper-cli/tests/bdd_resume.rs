@@ -91,7 +91,11 @@ core = { path = "../core" }
 }
 
 fn shipper_cmd() -> Command {
-    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("shipper-cli"));
+    Command::new(assert_cmd::cargo::cargo_bin!("shipper-cli"))
+}
+
+fn loopback_shipper_cmd() -> Command {
+    let mut command = shipper_cmd();
     command.arg("--allow-loopback");
     command
 }
@@ -311,7 +315,7 @@ mod resume_continues_interrupted {
         // Resume confirms visibility with 3 registry requests before success.
         let registry = spawn_registry(vec![200, 404, 404, 404, 200, 200], 5);
 
-        shipper_cmd()
+        loopback_shipper_cmd()
             .arg("--manifest-path")
             .arg(td.path().join("Cargo.toml"))
             .arg("--api-base")
@@ -352,7 +356,7 @@ mod resume_continues_interrupted {
         );
 
         // When: resume with cargo publish succeeding
-        let mut cmd = shipper_cmd();
+        let mut cmd = loopback_shipper_cmd();
         fast_resume_args(
             &mut cmd,
             &td.path().join("Cargo.toml"),
@@ -401,7 +405,7 @@ mod resume_no_state {
         let state_dir = td.path().join("custom-state");
         fs::create_dir_all(&state_dir).expect("mkdir state dir");
 
-        shipper_cmd()
+        loopback_shipper_cmd()
             .arg("--manifest-path")
             .arg(td.path().join("Cargo.toml"))
             .arg("--state-dir")
@@ -423,7 +427,7 @@ mod resume_no_state {
         let state_dir = td.path().join("empty-state");
         fs::create_dir_all(&state_dir).expect("mkdir state dir");
 
-        shipper_cmd()
+        loopback_shipper_cmd()
             .arg("--manifest-path")
             .arg(td.path().join("Cargo.toml"))
             .arg("--state-dir")
@@ -446,7 +450,7 @@ mod resume_no_state {
         fs::create_dir_all(&state_dir).expect("mkdir state dir");
         fs::write(state_dir.join("state.json"), "NOT VALID JSON {{{").expect("write corrupt state");
 
-        shipper_cmd()
+        loopback_shipper_cmd()
             .arg("--manifest-path")
             .arg(td.path().join("Cargo.toml"))
             .arg("--state-dir")
@@ -466,7 +470,7 @@ mod resume_no_state {
         create_single_crate_workspace(td.path());
         let state_dir = td.path().join("does-not-exist");
 
-        shipper_cmd()
+        loopback_shipper_cmd()
             .arg("--manifest-path")
             .arg(td.path().join("Cargo.toml"))
             .arg("--state-dir")
@@ -503,7 +507,7 @@ mod resume_completed_state {
         // Resume: all Published → 0 requests but keep server alive.
         let registry = spawn_registry(vec![404, 200], 2);
 
-        shipper_cmd()
+        loopback_shipper_cmd()
             .arg("--manifest-path")
             .arg(td.path().join("Cargo.toml"))
             .arg("--api-base")
@@ -537,7 +541,7 @@ mod resume_completed_state {
         );
 
         // When: resume with completed state
-        let output = shipper_cmd()
+        let output = loopback_shipper_cmd()
             .arg("--manifest-path")
             .arg(td.path().join("Cargo.toml"))
             .arg("--api-base")
@@ -614,7 +618,7 @@ mod resume_plan_id_mismatch {
         write_state_json(&state_dir, mock_state);
 
         // When: resume with mismatched plan_id
-        shipper_cmd()
+        loopback_shipper_cmd()
             .arg("--manifest-path")
             .arg(td.path().join("Cargo.toml"))
             .arg("--allow-dirty")
@@ -642,7 +646,7 @@ mod resume_plan_id_mismatch {
         // force-resume: resume path touches registry twice while confirming publish completion.
         let registry = spawn_registry(vec![404, 404, 200, 200], 3);
 
-        shipper_cmd()
+        loopback_shipper_cmd()
             .arg("--manifest-path")
             .arg(td.path().join("Cargo.toml"))
             .arg("--api-base")
@@ -676,7 +680,7 @@ mod resume_plan_id_mismatch {
         fs::write(&state_path, serde_json::to_string_pretty(&state).unwrap()).expect("write");
 
         // When: force-resume bypasses mismatch
-        let mut cmd = shipper_cmd();
+        let mut cmd = loopback_shipper_cmd();
         fast_resume_args(
             &mut cmd,
             &td.path().join("Cargo.toml"),
@@ -722,7 +726,7 @@ mod resume_from_specific_package {
         //   core replay includes 3 registry checks before publish success is finalized.
         let registry = spawn_registry(vec![404, 404, 200, 200, 200, 200, 200], 4);
 
-        shipper_cmd()
+        loopback_shipper_cmd()
             .arg("--manifest-path")
             .arg(td.path().join("Cargo.toml"))
             .arg("--api-base")
@@ -762,7 +766,7 @@ mod resume_from_specific_package {
         );
 
         // When: resume from core specifically
-        let mut cmd = shipper_cmd();
+        let mut cmd = loopback_shipper_cmd();
         fast_resume_args(
             &mut cmd,
             &td.path().join("Cargo.toml"),
@@ -820,7 +824,7 @@ mod state_updated_atomically {
         // Resume confirms publish with 2 additional registry checks (plus one from initial pre-check).
         let registry = spawn_registry(vec![404, 404, 200, 200], 3);
 
-        shipper_cmd()
+        loopback_shipper_cmd()
             .arg("--manifest-path")
             .arg(td.path().join("Cargo.toml"))
             .arg("--api-base")
@@ -847,7 +851,7 @@ mod state_updated_atomically {
             .failure();
 
         // When: resume succeeds
-        let mut cmd = shipper_cmd();
+        let mut cmd = loopback_shipper_cmd();
         fast_resume_args(
             &mut cmd,
             &td.path().join("Cargo.toml"),
@@ -895,7 +899,7 @@ mod state_updated_atomically {
 
         let registry = spawn_registry(vec![404, 404, 200, 200], 3);
 
-        shipper_cmd()
+        loopback_shipper_cmd()
             .arg("--manifest-path")
             .arg(td.path().join("Cargo.toml"))
             .arg("--api-base")
@@ -921,7 +925,7 @@ mod state_updated_atomically {
             .assert()
             .failure();
 
-        let mut cmd = shipper_cmd();
+        let mut cmd = loopback_shipper_cmd();
         fast_resume_args(
             &mut cmd,
             &td.path().join("Cargo.toml"),
@@ -1018,7 +1022,7 @@ mod state_updated_atomically {
         // Resume: app confirms publish with 3 registry checks.
         let registry = spawn_registry(vec![200, 404, 404, 404, 200, 200], 5);
 
-        shipper_cmd()
+        loopback_shipper_cmd()
             .arg("--manifest-path")
             .arg(td.path().join("Cargo.toml"))
             .arg("--api-base")
@@ -1045,7 +1049,7 @@ mod state_updated_atomically {
             .failure();
 
         // When: resume
-        let mut cmd = shipper_cmd();
+        let mut cmd = loopback_shipper_cmd();
         fast_resume_args(
             &mut cmd,
             &td.path().join("Cargo.toml"),
