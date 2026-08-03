@@ -69,18 +69,8 @@ pub(in crate::engine) fn prepare_publish_run(
 
     let events_path = events::events_path(&state_dir);
     let mut event_log = events::EventLog::new();
-    let (mut state, allow_legacy_index_fallback) =
-        load_or_initialize_state(ws, opts, &state_dir, reporter)?;
-    let allow_legacy_index_fallback = allow_legacy_index_fallback
-        && state.registry.name == ws.plan.registry.name
-        && state.registry.api_base == ws.plan.registry.api_base;
-    let registry = init_registry_client(
-        ws.plan.registry.clone(),
-        &state_dir,
-        opts,
-        false,
-        allow_legacy_index_fallback,
-    )?;
+    let mut state = load_or_initialize_state(ws, opts, &state_dir, reporter)?;
+    let registry = init_registry_client(ws.plan.registry.clone(), &state_dir, opts)?;
 
     reporter.info(&format!("state dir: {}", state_dir.as_path().display()));
 
@@ -132,10 +122,9 @@ fn load_or_initialize_state(
     opts: &RuntimeOptions,
     state_dir: &Path,
     reporter: &mut dyn Reporter,
-) -> Result<(ExecutionState, bool)> {
+) -> Result<ExecutionState> {
     match state::load_state(state_dir)? {
         Some(existing) => {
-            let matches_plan = existing.plan_id == ws.plan.plan_id;
             if existing.plan_id != ws.plan.plan_id {
                 if !opts.force_resume {
                     bail!(
@@ -146,9 +135,9 @@ fn load_or_initialize_state(
                 }
                 reporter.warn("forcing resume with mismatched plan_id (unsafe)");
             }
-            Ok((existing, matches_plan))
+            Ok(existing)
         }
-        None => Ok((init_state(ws, state_dir)?, false)),
+        None => Ok(init_state(ws, state_dir)?),
     }
 }
 

@@ -28,7 +28,7 @@ use crate::state::execution_state as state;
 use crate::types::ExecutionResult;
 use crate::types::{
     ErrorClass, EventType, ExecutionState, PackageProgress, PackageState, PreflightReport,
-    PublishEvent, Receipt, Registry, RuntimeOptions,
+    PublishEvent, Receipt, Registry, RegistryTrustOptions, RuntimeOptions,
 };
 #[cfg(test)]
 use crate::types::{Finishability, PreflightPackage};
@@ -93,29 +93,19 @@ pub(crate) fn policy_effects(opts: &RuntimeOptions) -> crate::runtime::policy::P
 }
 
 fn init_registry_client(
-    mut registry: Registry,
+    registry: Registry,
     state_dir: &Path,
     opts: &RuntimeOptions,
-    allow_loopback: bool,
-    allow_legacy_index_fallback: bool,
 ) -> Result<RegistryClient> {
     let cache_dir = state_dir.join("cache");
-    if registry.index_base.is_none() && allow_legacy_index_fallback {
-        // 0.4 persisted plans did not always carry an index endpoint. Preserve
-        // their resumability by using the already-persisted API endpoint only
-        // after the resume state has been matched to the current plan and
-        // registry identity. New configuration never guesses an index host.
-        registry.index_base = Some(registry.api_base.clone());
-    }
     let allow_private = opts
         .registry_policies
         .get(&registry.name)
         .is_some_and(|policy| policy.allow_private);
-    let allow_loopback = allow_loopback
-        || opts
-            .registry_policies
-            .get(&registry.name)
-            .is_some_and(|policy| policy.allow_loopback);
+    let allow_loopback = opts
+        .registry_policies
+        .get(&registry.name)
+        .is_some_and(|policy| policy.allow_loopback);
     let policy = RegistryPolicy::secure()
         .with_private(allow_private)
         .with_loopback(allow_loopback);
@@ -495,8 +485,14 @@ pub fn run_rehearsal(
     event_log.write_to_file(&events_path)?;
     event_log.clear();
 
+    let mut rehearsal_opts = opts.clone();
+    let rehearsal_policy = rehearsal_opts
+        .registry_policies
+        .entry(rehearsal_reg.name.clone())
+        .or_insert_with(RegistryTrustOptions::secure);
+    rehearsal_policy.allow_loopback = true;
     let rehearsal_client =
-        init_registry_client(rehearsal_reg.clone(), &state_dir, opts, true, false)?;
+        init_registry_client(rehearsal_reg.clone(), &state_dir, &rehearsal_opts)?;
     event_log.record(PublishEvent {
         timestamp: Utc::now(),
         event_type: EventType::RegistryPolicyApplied {
@@ -955,7 +951,7 @@ mod tests {
         };
         let opts = default_opts(PathBuf::from(".shipper"));
 
-        let err = init_registry_client(registry, td.path(), &opts, false, false)
+        let err = init_registry_client(registry, td.path(), &opts)
             .expect_err("new or unvalidated runs must require explicit index_base");
         assert!(err.to_string().contains("explicit index_base"));
     }

@@ -25,8 +25,11 @@ pub(super) fn resolve_with_policies(
             .get_registries()
             .into_iter()
             .map(|registry| {
-                let allow_loopback =
-                    cli.allow_loopback || rehearsal_allows_loopback(rehearsal, &registry.name);
+                let allow_loopback = cli
+                    .registry_name
+                    .as_deref()
+                    .is_some_and(|name| cli.allow_loopback && name == registry.name)
+                    || rehearsal_allows_loopback(rehearsal, &registry.name);
                 (
                     registry.name,
                     RegistryTrustOptions {
@@ -315,6 +318,22 @@ mod tests {
         assert_eq!(registries[0].name, "private");
         assert!(policies["private"].allow_private);
         assert!(!policies["private"].allow_loopback);
+    }
+
+    #[test]
+    fn resolve_all_registries_scopes_cli_loopback_to_selected_registry() {
+        let config = config_with(vec![registry_config("alpha"), registry_config("beta")]);
+        let cli = CliOverrides {
+            all_registries: true,
+            allow_loopback: true,
+            registry_name: Some("alpha".to_string()),
+            ..CliOverrides::default()
+        };
+
+        let (_, policies) = resolve_with_policies(&config, None, &RehearsalConfig::default(), &cli);
+
+        assert!(policies["alpha"].allow_loopback);
+        assert!(!policies["beta"].allow_loopback);
     }
 
     #[test]
