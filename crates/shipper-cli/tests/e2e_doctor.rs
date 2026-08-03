@@ -43,7 +43,9 @@ edition = "2021"
 }
 
 fn shipper_cmd() -> Command {
-    Command::new(assert_cmd::cargo::cargo_bin!("shipper-cli"))
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("shipper-cli"));
+    command.arg("--allow-loopback");
+    command
 }
 
 fn init_git_repo(root: &Path) {

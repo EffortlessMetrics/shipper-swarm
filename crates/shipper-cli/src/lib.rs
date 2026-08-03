@@ -94,6 +94,11 @@ struct Cli {
     #[arg(long, global = true)]
     api_base: Option<String>,
 
+    /// Permit loopback HTTP for an explicitly configured local test or
+    /// rehearsal registry. Does not permit private-network destinations.
+    #[arg(long, global = true)]
+    allow_loopback: bool,
+
     /// Restrict to specific packages (repeatable). If omitted, publishes all publishable workspace members.
     #[arg(long = "package", global = true)]
     packages: Vec<String>,
@@ -1126,6 +1131,8 @@ pub fn run() -> Result<std::process::ExitCode> {
             .map(parse_duration)
             .transpose()?,
         allow_dirty: cli.allow_dirty,
+        allow_loopback: cli.allow_loopback,
+        registry_name: cli.registry.clone(),
         skip_ownership_check: cli.skip_ownership_check,
         strict_ownership: cli.strict_ownership,
         no_verify: cli.no_verify,
@@ -1390,6 +1397,7 @@ pub fn run() -> Result<std::process::ExitCode> {
                 registry_reports.push(build_status_registry_report(
                     &current_planned,
                     &mut reporter,
+                    &opts,
                 )?);
             }
             let report = StatusReport {
@@ -3818,9 +3826,15 @@ struct StatusPackageReport {
 fn build_status_registry_report(
     ws: &plan::PlannedWorkspace,
     reporter: &mut dyn Reporter,
+    opts: &RuntimeOptions,
 ) -> Result<StatusRegistryReport> {
     reporter.info("initializing registry client...");
-    let reg = shipper_core::registry::RegistryClient::new(ws.plan.registry.clone())?;
+    let trust = opts.registry_policies.get(&ws.plan.registry.name);
+    let policy = shipper_core::registry::RegistryPolicy::secure()
+        .with_private(trust.is_some_and(|policy| policy.allow_private))
+        .with_loopback(trust.is_some_and(|policy| policy.allow_loopback));
+    let reg =
+        shipper_core::registry::RegistryClient::with_policy(ws.plan.registry.clone(), policy)?;
 
     let mut packages = Vec::new();
     for p in &ws.plan.packages {

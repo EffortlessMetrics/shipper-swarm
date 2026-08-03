@@ -25,7 +25,8 @@ pub(super) fn resolve_with_policies(
             .get_registries()
             .into_iter()
             .map(|registry| {
-                let allow_loopback = rehearsal_allows_loopback(rehearsal, &registry.name);
+                let allow_loopback =
+                    cli.allow_loopback || rehearsal_allows_loopback(rehearsal, &registry.name);
                 (
                     registry.name,
                     RegistryTrustOptions {
@@ -51,7 +52,8 @@ pub(super) fn resolve_with_policies(
                     name.clone(),
                     RegistryTrustOptions {
                         allow_private: configured.is_some_and(|registry| registry.allow_private),
-                        allow_loopback: rehearsal_allows_loopback(rehearsal, name),
+                        allow_loopback: cli.allow_loopback
+                            || rehearsal_allows_loopback(rehearsal, name),
                     },
                 )
             })
@@ -62,19 +64,35 @@ pub(super) fn resolve_with_policies(
     // Default: single registry from the plan. Carry policy for the legacy
     // single-registry configuration too; the CLI may override its URL while
     // retaining the explicitly configured trust posture.
-    let policies = single_registry
-        .map(|registry| {
-            let mut policies = BTreeMap::new();
-            policies.insert(
-                registry.name.clone(),
-                RegistryTrustOptions {
-                    allow_private: registry.allow_private,
-                    allow_loopback: rehearsal_allows_loopback(rehearsal, &registry.name),
-                },
-            );
-            policies
-        })
-        .unwrap_or_default();
+    let policies = if let Some(registry) = single_registry {
+        let mut policies = BTreeMap::new();
+        policies.insert(
+            registry.name.clone(),
+            RegistryTrustOptions {
+                allow_private: registry.allow_private,
+                allow_loopback: cli.allow_loopback
+                    || rehearsal_allows_loopback(rehearsal, &registry.name),
+            },
+        );
+        policies
+    } else if cli.allow_loopback {
+        let mut policies = BTreeMap::new();
+        let registry_name = cli
+            .registry_name
+            .as_deref()
+            .unwrap_or("crates-io")
+            .to_string();
+        policies.insert(
+            registry_name,
+            RegistryTrustOptions {
+                allow_private: false,
+                allow_loopback: true,
+            },
+        );
+        policies
+    } else {
+        BTreeMap::new()
+    };
     (vec![], policies)
 }
 
@@ -313,6 +331,44 @@ mod tests {
             Some(&registry),
             &rehearsal,
             &CliOverrides::default(),
+        );
+
+        assert!(policies["local"].allow_loopback);
+        assert!(!policies["local"].allow_private);
+    }
+
+    #[test]
+    fn resolve_cli_loopback_opt_in_is_explicit_and_does_not_allow_private() {
+        let registry = registry_config("local");
+        let cli = CliOverrides {
+            allow_loopback: true,
+            ..CliOverrides::default()
+        };
+
+        let (_, policies) = resolve_with_policies(
+            &MultiRegistryConfig::default(),
+            Some(&registry),
+            &RehearsalConfig::default(),
+            &cli,
+        );
+
+        assert!(policies["local"].allow_loopback);
+        assert!(!policies["local"].allow_private);
+    }
+
+    #[test]
+    fn resolve_cli_loopback_opt_in_tracks_cli_selected_registry() {
+        let cli = CliOverrides {
+            allow_loopback: true,
+            registry_name: Some("local".to_string()),
+            ..CliOverrides::default()
+        };
+
+        let (_, policies) = resolve_with_policies(
+            &MultiRegistryConfig::default(),
+            None,
+            &RehearsalConfig::default(),
+            &cli,
         );
 
         assert!(policies["local"].allow_loopback);

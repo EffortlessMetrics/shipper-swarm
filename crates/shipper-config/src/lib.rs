@@ -493,6 +493,13 @@ pub struct CliOverrides {
     pub readiness_timeout: Option<Duration>,
     pub readiness_poll: Option<Duration>,
     pub allow_dirty: bool,
+    /// Permit loopback HTTP only for an explicitly configured local test or
+    /// rehearsal registry. This never permits private-network destinations.
+    pub allow_loopback: bool,
+    /// Effective single registry name from the CLI, when `--registry` was set.
+    /// Used to attach URL trust posture to a CLI-selected registry without
+    /// changing the multi-registry execution path.
+    pub registry_name: Option<String>,
     pub skip_ownership_check: bool,
     pub strict_ownership: bool,
     pub no_verify: bool,

@@ -219,6 +219,9 @@ fragments are rejected. Literal private-network destinations require the
 explicit `allow_private = true` opt-in; metadata and link-local destinations
 remain rejected. Plain HTTP is reserved for a configured local test registry
 whose `[rehearsal]` section explicitly sets `allow_loopback = true`.
+For command-line-only local fixtures, `--allow-loopback` provides the same
+explicit loopback posture for the selected registry; it never enables private
+network destinations or the live-publish rehearsal gate.
 
 ## CLI Override
 

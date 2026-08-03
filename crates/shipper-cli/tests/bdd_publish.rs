@@ -300,7 +300,9 @@ fn spawn_index_readiness_registry(crate_name: &str, version: &str) -> TestRegist
 }
 
 fn shipper_cmd() -> Command {
-    Command::new(assert_cmd::cargo::cargo_bin!("shipper-cli"))
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("shipper-cli"));
+    command.arg("--allow-loopback");
+    command
 }
 
 // ============================================================================

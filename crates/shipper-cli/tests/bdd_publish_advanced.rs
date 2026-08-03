@@ -231,7 +231,9 @@ fn spawn_registry(statuses: Vec<u16>, expected_requests: usize) -> TestRegistry 
 }
 
 fn shipper_cmd() -> Command {
-    Command::new(assert_cmd::cargo::cargo_bin!("shipper-cli"))
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("shipper-cli"));
+    command.arg("--allow-loopback");
+    command
 }
 
 fn setup_fake_cargo(td: &Path) -> (String, String, String) {

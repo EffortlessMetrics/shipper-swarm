@@ -16,7 +16,9 @@ fn write_file(path: &Path, content: &str) {
 }
 
 fn shipper_cmd() -> Command {
-    Command::new(assert_cmd::cargo::cargo_bin!("shipper-cli"))
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("shipper-cli"));
+    command.arg("--allow-loopback");
+    command
 }
 
 /// Create a simple workspace with a single crate.
