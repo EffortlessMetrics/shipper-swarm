@@ -85,6 +85,8 @@ pub(in crate::engine) fn run(
         },
         package: "all".to_string(),
     });
+    flush_events(&event_log, &events_path)?;
+    event_log.clear();
 
     let token = auth::resolve_token(&ws.plan.registry.name)?;
     let token_detected = token.as_ref().map(|s| !s.is_empty()).unwrap_or(false);

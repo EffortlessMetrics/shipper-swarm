@@ -834,8 +834,13 @@ per_package_timeout = "30m"
 # [registry]
 # name = "crates-io"
 # api_base = "https://crates.io"
+# index_base = "https://index.crates.io"
 # allow_private = false  # opt in only for an explicitly trusted private registry
-# allow_loopback = false # only for an explicitly configured local test registry
+
+# Optional: explicit local rehearsal/test posture
+# [rehearsal]
+# registry = "local"
+# allow_loopback = true
 
 # Optional: Webhook notifications for publish events
 # [webhook]

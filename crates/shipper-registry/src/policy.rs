@@ -9,12 +9,12 @@
 //! does validate all literal IP ranges and preserves the approved authorities
 //! needed by that lane.
 
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use anyhow::{Result, anyhow, bail};
 use url::{Host, Url};
 
-use shipper_types::{Registry, RegistryPolicyEvidence};
+use shipper_types::{Registry, RegistryPolicyEvidence, RegistryPolicyPosture};
 
 const METADATA_HOSTS: &[&str] = &[
     "instance-data",
@@ -130,11 +130,11 @@ impl ValidatedRegistry {
     pub fn sanitized_evidence(&self) -> RegistryPolicyEvidence {
         RegistryPolicyEvidence {
             posture: if self.policy.allow_loopback {
-                "rehearsal_or_test".to_string()
+                RegistryPolicyPosture::RehearsalOrTest
             } else if self.policy.allow_private {
-                "private_opt_in".to_string()
+                RegistryPolicyPosture::PrivateOptIn
             } else {
-                "public_default".to_string()
+                RegistryPolicyPosture::PublicDefault
             },
             allow_private: self.policy.allow_private,
             allow_loopback: self.policy.allow_loopback,
@@ -216,7 +216,7 @@ fn validate_domain(domain: &str, field: &str, policy: RegistryPolicy) -> Result<
 
 fn validate_ip(address: IpAddr, field: &str, policy: RegistryPolicy) -> Result<()> {
     let address = match address {
-        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(IpAddr::V6(v6), IpAddr::V4),
+        IpAddr::V6(v6) => embedded_ipv4(v6).map_or(IpAddr::V6(v6), IpAddr::V4),
         address => address,
     };
 
@@ -234,6 +234,22 @@ fn validate_ip(address: IpAddr, field: &str, policy: RegistryPolicy) -> Result<(
     }
 
     Ok(())
+}
+
+/// Return IPv4 addresses embedded in IPv4-compatible or IPv4-mapped IPv6
+/// forms so they receive the same private, loopback, and metadata checks.
+fn embedded_ipv4(address: Ipv6Addr) -> Option<Ipv4Addr> {
+    let segments = address.segments();
+    if segments[..6].iter().all(|segment| *segment == 0) {
+        return Some(Ipv4Addr::new(
+            (segments[6] >> 8) as u8,
+            segments[6] as u8,
+            (segments[7] >> 8) as u8,
+            segments[7] as u8,
+        ));
+    }
+
+    address.to_ipv4_mapped()
 }
 
 fn host_is_loopback(host: &Host<&str>) -> bool {
@@ -347,13 +363,19 @@ mod tests {
         let validated =
             ValidatedRegistry::new(private, RegistryPolicy::secure().with_private(true))
                 .expect("private opt-in");
-        assert_eq!(validated.sanitized_evidence().posture, "private_opt_in");
+        assert_eq!(
+            validated.sanitized_evidence().posture,
+            RegistryPolicyPosture::PrivateOptIn
+        );
 
         let local = registry("http://127.0.0.1:8080", Some("http://127.0.0.1:8080"));
         ValidatedRegistry::new(local.clone(), RegistryPolicy::secure()).expect_err("loopback");
         let validated =
             ValidatedRegistry::new(local, RegistryPolicy::rehearsal()).expect("rehearsal");
-        assert_eq!(validated.sanitized_evidence().posture, "rehearsal_or_test");
+        assert_eq!(
+            validated.sanitized_evidence().posture,
+            RegistryPolicyPosture::RehearsalOrTest
+        );
     }
 
     #[test]
@@ -395,5 +417,18 @@ mod tests {
             .expect_err("private IPv6 destination must be opted in");
         ValidatedRegistry::new(private, RegistryPolicy::secure().with_private(true))
             .expect("private IPv6 opt-in");
+    }
+
+    #[test]
+    fn ipv4_compatible_ipv6_requires_private_opt_in() {
+        for host in ["[::10.0.0.1]", "[::192.168.1.1]"] {
+            let private = registry(&format!("https://{host}"), Some("https://registry.example"));
+            ValidatedRegistry::new(private, RegistryPolicy::secure())
+                .expect_err("embedded private IPv4 must be rejected");
+        }
+
+        let private = registry("https://[::10.0.0.1]", Some("https://[::10.0.0.2]"));
+        ValidatedRegistry::new(private, RegistryPolicy::secure().with_private(true))
+            .expect("private opt-in should cover embedded IPv4");
     }
 }

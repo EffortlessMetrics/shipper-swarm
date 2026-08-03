@@ -99,9 +99,11 @@ fn init_registry_client(
     allow_loopback: bool,
 ) -> Result<RegistryClient> {
     let cache_dir = state_dir.join("cache");
-    if cfg!(test) && registry.index_base.is_none() {
-        // Legacy unit fixtures model only the API endpoint. Production
-        // configuration is validated strictly and must declare custom index_base.
+    if registry.index_base.is_none() && state_dir.join("state.json").is_file() {
+        // 0.4 persisted plans did not always carry an index endpoint. Preserve
+        // their resumability by using the already-persisted API endpoint only
+        // while resuming an existing state directory; new configuration still
+        // requires an explicit custom index_base.
         registry.index_base = Some(registry.api_base.clone());
     }
     let allow_private = opts
@@ -112,8 +114,7 @@ fn init_registry_client(
         || opts
             .registry_policies
             .get(&registry.name)
-            .is_some_and(|policy| policy.allow_loopback)
-        || cfg!(test);
+            .is_some_and(|policy| policy.allow_loopback);
     let policy = RegistryPolicy::secure()
         .with_private(allow_private)
         .with_loopback(allow_loopback);
@@ -1064,7 +1065,13 @@ mod tests {
             retry_per_error: crate::retry::PerErrorConfig::default(),
             encryption: crate::encryption::EncryptionConfig::default(),
             registries: vec![],
-            registry_policies: Default::default(),
+            registry_policies: std::collections::BTreeMap::from([(
+                "crates-io".to_string(),
+                crate::types::RegistryTrustOptions {
+                    allow_private: false,
+                    allow_loopback: true,
+                },
+            )]),
             resume_from: None,
             rehearsal_registry: None,
             rehearsal_skip: false,
