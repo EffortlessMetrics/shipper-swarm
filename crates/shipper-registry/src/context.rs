@@ -939,8 +939,8 @@ mod tests {
         // Use a non-existent URL to simulate a network error
         let registry = Registry {
             name: "test".to_string(),
-            api_base: "http://nonexistent.invalid:9999".to_string(),
-            index_base: Some("http://nonexistent.invalid:9999".to_string()),
+            api_base: "http://127.0.0.1:9".to_string(),
+            index_base: Some("http://127.0.0.1:9".to_string()),
         };
 
         let cli = test_registry_client(registry).expect("client");
@@ -1250,8 +1250,8 @@ mod tests {
         // Use a non-existent URL to simulate network errors
         let registry = Registry {
             name: "test".to_string(),
-            api_base: "http://nonexistent.invalid:9999".to_string(),
-            index_base: Some("http://nonexistent.invalid:9999".to_string()),
+            api_base: "http://127.0.0.1:9".to_string(),
+            index_base: Some("http://127.0.0.1:9".to_string()),
         };
 
         let cli = test_registry_client(registry).expect("client");
@@ -3419,10 +3419,11 @@ mod tests {
                 .expect("respond");
         });
 
+        let expected_index = format!("{api_base}/index");
         let registry = Registry {
             name: "custom-registry".to_string(),
             api_base: api_base.clone(),
-            index_base: Some("https://index.custom.io".to_string()),
+            index_base: Some(expected_index.clone()),
         };
 
         let cli = test_registry_client(registry).expect("client");
@@ -3430,7 +3431,7 @@ mod tests {
         assert_eq!(cli.registry().api_base, api_base);
         assert_eq!(
             cli.registry().index_base.as_deref(),
-            Some("https://index.custom.io")
+            Some(expected_index.as_str())
         );
     }
 
