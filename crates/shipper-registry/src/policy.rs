@@ -285,6 +285,10 @@ fn validate_ip(address: IpAddr, field: &str, policy: RegistryPolicy) -> Result<(
 /// Return IPv4 addresses embedded in IPv4-compatible or IPv4-mapped IPv6
 /// forms so they receive the same private, loopback, and metadata checks.
 fn embedded_ipv4(address: Ipv6Addr) -> Option<Ipv4Addr> {
+    if address.is_loopback() || address.is_unspecified() {
+        return None;
+    }
+
     let segments = address.segments();
     if segments[..6].iter().all(|segment| *segment == 0) {
         return Some(Ipv4Addr::new(
@@ -305,7 +309,10 @@ fn host_is_loopback(host: &Host<&str>) -> bool {
             domain == "localhost" || domain.ends_with(".localhost")
         }
         Host::Ipv4(address) => address.is_loopback(),
-        Host::Ipv6(address) => address.is_loopback(),
+        Host::Ipv6(address) => {
+            address.is_loopback()
+                || embedded_ipv4(*address).is_some_and(|address| address.is_loopback())
+        }
     }
 }
 
@@ -508,5 +515,20 @@ mod tests {
         let private = registry("https://[::10.0.0.1]", Some("https://[::10.0.0.1]"));
         ValidatedRegistry::new(private, RegistryPolicy::secure().with_private(true))
             .expect("private opt-in should cover embedded IPv4");
+    }
+
+    #[test]
+    fn ipv6_loopback_forms_require_rehearsal_posture() {
+        for host in ["[::1]", "[::ffff:127.0.0.1]", "[::127.0.0.1]"] {
+            let https = format!("https://{host}");
+            let error =
+                ValidatedRegistry::new(registry(&https, Some(&https)), RegistryPolicy::secure())
+                    .expect_err(host);
+            assert!(error.to_string().contains("loopback"), "{host}: {error}");
+
+            let http = format!("http://{host}:8080");
+            ValidatedRegistry::new(registry(&http, Some(&http)), RegistryPolicy::rehearsal())
+                .expect("explicit rehearsal posture should permit IPv6 loopback");
+        }
     }
 }
