@@ -2582,8 +2582,7 @@ fn test_webhook_failure_is_non_blocking_and_mode_parity_holds() {
             .expect("sequential publish");
 
             temp_env::with_var("SHIPPER_CARGO_EXIT", Some("0"), || {
-                crate::engine::publish::notify_publish_started(&ws_par, &opts_par);
-                let par_receipts = run_publish_parallel(
+                let par_receipts = super::run_publish_parallel(
                     &ws_par,
                     &opts_par,
                     &mut par_state,
