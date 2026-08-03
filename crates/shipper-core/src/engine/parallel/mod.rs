@@ -270,6 +270,20 @@ pub fn run_publish_parallel(
     reg: &RegistryClient,
     reporter: &mut dyn crate::engine::Reporter,
 ) -> Result<Vec<PackageReceipt>> {
+    crate::engine::publish::notify_publish_started(ws, opts);
+    run_publish_parallel_without_start(ws, opts, st, state_dir, reg, reporter)
+}
+
+/// Host-reporter entry point for orchestration that has already emitted the
+/// run-level start notification.
+pub(crate) fn run_publish_parallel_without_start(
+    ws: &crate::plan::PlannedWorkspace,
+    opts: &RuntimeOptions,
+    st: &mut ExecutionState,
+    state_dir: &Path,
+    reg: &RegistryClient,
+    reporter: &mut dyn crate::engine::Reporter,
+) -> Result<Vec<PackageReceipt>> {
     let mut adapter = HostReporterAdapter { inner: reporter };
     run_publish_parallel_inner(ws, opts, st, state_dir, reg, &mut adapter)
 }
@@ -406,19 +420,15 @@ fn record_terminal_resume_skips(
             .iter()
             .filter_map(|package| {
                 let key = crate::runtime::execution::pkg_key(&package.name, &package.version);
-                state.packages.get(&key).and_then(|progress| {
+                let progress = state.packages.get(&key)?;
+                {
                     matches!(
                         progress.state,
                         shipper_types::PackageState::Published
                             | shipper_types::PackageState::Skipped { .. }
                     )
-                    .then(|| {
-                        (
-                            progress.clone(),
-                            format!("{}@{}", package.name, package.version),
-                        )
-                    })
-                })
+                    .then(|| (progress.clone(), key))
+                }
             })
             .collect::<Vec<_>>()
     };

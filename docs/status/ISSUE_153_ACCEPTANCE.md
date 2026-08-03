@@ -17,7 +17,7 @@ missing assertion.
 | Ambiguous result -> StillUnknown | `mode_parity_corpus_sequential_matches_parallel` (`still_unknown_resume`); `reconcile_bdd_ambiguous_resolves_to_still_unknown` | Yes for corpus | Compare reconciliation receipt/report evidence. |
 | Upload -> readiness timeout -> later visibility | `mode_parity_corpus_sequential_matches_parallel` (`readiness_timeout_then_visible`) | Yes | Compare readiness evidence delay and event sequence in the full receipt. |
 | Interruption and resume | `rebuild_interrupt_resumes_from_uploaded_checkpoint`; `test_run_publish_mode_parity_from_uploaded_checkpoint` | Partial | Add end-to-end sequential/parallel resume receipt comparison. |
-| `--resume-from` skip | `run_publish_resume_from_skips_before_and_warns`; `test_resume_from_skips_earlier_levels` | No | Remove the parallel fabricated receipt path; compare events, state, receipts, and cargo count. |
+| `--resume-from` skip | `test_resume_from_skip_mode_parity_preserves_durable_evidence`; `run_publish_resume_from_skips_before_and_warns`; `test_resume_from_skips_earlier_levels` | Yes | Parallel fabricated receipt path removed; events, state, receipts, and cargo count are compared. Extend to multi-level and non-terminal pre-resume packages. |
 | Partial multi-package failure | `sm_multi_package_partial_progress`; `test_partial_success_within_level` | Partial | Add one shared scenario with synchronized caller-visible state and receipt comparison. |
 | Parallel worker/join failure | No focused proof | No sequential analogue | Model as explicit parallel-only run error with synchronized state and replayed reporter output. |
 | Webhook delivery failure | `test_webhook_failure_is_non_blocking_and_mode_parity_holds`; `run_publish_sequential_webhooks_send_started_and_completed_once`; `run_publish_parallel_webhooks_send_started_and_completed_once` | Yes | Preparation-failure notification guard is covered by `run_publish_errors_on_invalid_resume_from_target`; later corpus work should compare package/run counts with the full receipt. |
@@ -30,7 +30,7 @@ missing assertion.
 This PR closes the `--resume-from` production divergence and centralizes the
 run-start notification after successful preparation. It does not claim the remaining
 conformance rows are complete; those rows remain follow-up work for the final
-#153 corpus PR.
+`#153` corpus PR.
 
 Proof for this slice:
 

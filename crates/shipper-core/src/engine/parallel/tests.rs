@@ -2429,9 +2429,9 @@ fn test_webhook_events_sent_on_publish() {
         1,
     );
 
-    // The parallel executor announces the start. The outer publish finalizer
-    // owns PublishCompleted so serial and parallel terminal notifications stay
-    // in one place.
+    // The public parallel entry point announces the run start. The outer
+    // publish finalizer owns PublishCompleted so serial and parallel terminal
+    // notifications stay in one place.
     let webhook_server = Server::http("127.0.0.1:0").expect("webhook server");
     let webhook_url = format!("http://{}", webhook_server.server_addr());
     let webhook_received = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -2473,9 +2473,8 @@ fn test_webhook_events_sent_on_publish() {
         "SHIPPER_CARGO_BIN",
         Some(fake_cargo_path(&bin).to_str().expect("utf8")),
         || {
-            crate::engine::publish::notify_publish_started(&ws, &opts);
             let _receipts =
-                run_publish_parallel(&ws, &opts, &mut st, &state_dir, &reg, &mut reporter)
+                super::run_publish_parallel(&ws, &opts, &mut st, &state_dir, &reg, &mut reporter)
                     .expect("parallel publish");
         },
     );
@@ -2911,9 +2910,25 @@ fn test_resume_from_skip_mode_parity_preserves_durable_evidence() {
         assert_eq!(sequential_progress.state, parallel_progress.state);
     }
     assert_eq!(
-        sequential_state.attempt_history,
-        parallel_state.attempt_history
+        sequential_state.attempt_history.len(),
+        parallel_state.attempt_history.len(),
+        "attempt history length"
     );
+    for (sequential, parallel) in sequential_state
+        .attempt_history
+        .iter()
+        .zip(parallel_state.attempt_history.iter())
+    {
+        assert_eq!(sequential.package, parallel.package);
+        assert_eq!(sequential.version, parallel.version);
+        assert_eq!(sequential.attempt, parallel.attempt);
+        assert_eq!(sequential.max_attempts, parallel.max_attempts);
+        assert_eq!(sequential.error_class, parallel.error_class);
+        assert_eq!(
+            sequential.next_attempt_at.is_some(),
+            parallel.next_attempt_at.is_some()
+        );
+    }
     assert!(sequential_events.iter().any(|event| {
         event.contains("base@1.0.0::PackageSkipped")
             && event.contains("resume: state already published")
