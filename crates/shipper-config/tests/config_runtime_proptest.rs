@@ -200,6 +200,7 @@ fn arb_registry_configs() -> impl Strategy<Value = Vec<RegistryConfig>> {
             index_base: None,
             token: None,
             default: false,
+            allow_private: false,
         }),
         0..4,
     )

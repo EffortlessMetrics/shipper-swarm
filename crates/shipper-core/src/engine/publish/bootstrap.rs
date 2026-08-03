@@ -67,7 +67,7 @@ pub(in crate::engine) fn prepare_publish_run(
         git::ensure_git_clean(workspace_root)?;
     }
 
-    let registry = init_registry_client(ws.plan.registry.clone(), &state_dir)?;
+    let registry = init_registry_client(ws.plan.registry.clone(), &state_dir, opts, false)?;
     let events_path = events::events_path(&state_dir);
     let mut event_log = events::EventLog::new();
     let mut state = load_or_initialize_state(ws, opts, &state_dir, reporter)?;
@@ -82,6 +82,7 @@ pub(in crate::engine) fn prepare_publish_run(
         &mut event_log,
         run_started,
         &auth_evidence,
+        &registry.policy_evidence(),
     )?;
     ensure_plan_package_entries(ws, &state_dir, &mut state)?;
 
@@ -147,10 +148,18 @@ fn record_execution_start(
     event_log: &mut events::EventLog,
     run_started: DateTime<Utc>,
     auth_evidence: &AuthEvidence,
+    registry_policy_evidence: &crate::types::RegistryPolicyEvidence,
 ) -> Result<()> {
     event_log.record(PublishEvent {
         timestamp: run_started,
         event_type: EventType::ExecutionStarted,
+        package: "all".to_string(),
+    });
+    event_log.record(PublishEvent {
+        timestamp: run_started,
+        event_type: EventType::RegistryPolicyApplied {
+            evidence: registry_policy_evidence.clone(),
+        },
         package: "all".to_string(),
     });
 

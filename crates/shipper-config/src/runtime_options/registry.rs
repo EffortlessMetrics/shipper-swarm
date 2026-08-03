@@ -1,25 +1,58 @@
-use shipper_types::Registry;
+use std::collections::BTreeMap;
+
+use shipper_types::{Registry, RegistryTrustOptions};
 
 use crate::{CliOverrides, MultiRegistryConfig, RegistryConfig};
 
+#[cfg(test)]
 pub(super) fn resolve(config: &MultiRegistryConfig, cli: &CliOverrides) -> Vec<Registry> {
+    resolve_with_policies(config, cli).0
+}
+
+pub(super) fn resolve_with_policies(
+    config: &MultiRegistryConfig,
+    cli: &CliOverrides,
+) -> (Vec<Registry>, BTreeMap<String, RegistryTrustOptions>) {
     if cli.all_registries {
-        return config
+        let registries = config
             .get_registries()
             .into_iter()
             .map(registry_from_config)
             .collect();
+        let policies = config
+            .get_registries()
+            .into_iter()
+            .map(|registry| {
+                (
+                    registry.name,
+                    RegistryTrustOptions {
+                        allow_private: registry.allow_private,
+                    },
+                )
+            })
+            .collect();
+        return (registries, policies);
     }
 
     if let Some(ref registry_names) = cli.registries {
-        return registry_names
+        let resolved = registry_names
             .iter()
             .map(|name| resolve_named_registry(config, name))
+            .collect::<Vec<_>>();
+        let policies = registry_names
+            .iter()
+            .map(|name| {
+                let allow_private = config
+                    .find_by_name(name)
+                    .is_some_and(|registry| registry.allow_private);
+                (name.clone(), RegistryTrustOptions { allow_private })
+            })
             .collect();
+        return (resolved, policies);
     }
 
     // Default: single registry from the plan.
-    vec![]
+    (vec![], BTreeMap::new())
 }
 
 fn resolve_named_registry(config: &MultiRegistryConfig, name: &str) -> Registry {
@@ -67,7 +100,9 @@ fn is_safe_synthetic_registry_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_registry_for_name, is_safe_synthetic_registry_name, resolve};
+    use super::{
+        default_registry_for_name, is_safe_synthetic_registry_name, resolve, resolve_with_policies,
+    };
     use crate::{CliOverrides, MultiRegistryConfig, RegistryConfig};
 
     fn config_with(registries: Vec<RegistryConfig>) -> MultiRegistryConfig {
@@ -84,6 +119,7 @@ mod tests {
             index_base: Some(format!("https://{name}.example/index")),
             token: None,
             default: false,
+            allow_private: false,
         }
     }
 
@@ -215,6 +251,22 @@ mod tests {
             result[0].index_base.as_deref(),
             Some("https://alpha.example/index")
         );
+    }
+
+    #[test]
+    fn resolve_carries_private_registry_opt_in_separately_from_identity() {
+        let mut private = registry_config("private");
+        private.allow_private = true;
+        let config = config_with(vec![private]);
+        let cli = CliOverrides {
+            all_registries: true,
+            ..CliOverrides::default()
+        };
+
+        let (registries, policies) = resolve_with_policies(&config, &cli);
+
+        assert_eq!(registries[0].name, "private");
+        assert!(policies["private"].allow_private);
     }
 
     #[test]

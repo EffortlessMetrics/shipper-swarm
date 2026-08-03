@@ -207,9 +207,16 @@ Controls parallel publishing behavior. When enabled, packages at the same depend
 [registry]
 name = "crates-io"
 api_base = "https://crates.io"
+# Custom registries must declare their sparse index explicitly.
+# allow_private = false
 ```
 
 Optional custom registry configuration. If not specified, defaults to crates.io.
+Registry API and index URLs must use HTTPS. URLs with userinfo, queries, or
+fragments are rejected. Literal private-network destinations require the
+explicit `allow_private = true` opt-in; metadata and link-local destinations
+remain rejected. Plain HTTP is reserved for a configured rehearsal registry
+whose `[rehearsal]` posture is enabled.
 
 ## CLI Override
 

@@ -9,22 +9,47 @@ use shipper_types::{
     EventType, PublishEvent, ReadinessConfig, ReadinessEvidence, ReadinessMethod, Registry,
 };
 
+use crate::{RegistryPolicy, ValidatedRegistry};
+
 #[derive(Debug, Clone)]
 pub struct RegistryClient {
     registry: Registry,
+    validated: ValidatedRegistry,
     http: Client,
     cache_dir: Option<std::path::PathBuf>,
 }
 
 impl RegistryClient {
+    #[cfg(not(test))]
     pub fn new(registry: Registry) -> Result<Self> {
+        Self::with_policy(registry, RegistryPolicy::secure())
+    }
+
+    #[cfg(test)]
+    pub fn new(mut registry: Registry) -> Result<Self> {
+        // Unit tests use tiny_http loopback fixtures. The test-only default
+        // is an explicit test posture; production callers always use the
+        // secure constructor above.
+        if registry.index_base.is_none() {
+            registry.index_base = Some(registry.api_base.clone());
+        }
+        Self::with_policy(registry, RegistryPolicy::rehearsal())
+    }
+
+    /// Construct a client after validating the registry under explicit trust
+    /// choices. Production callers should use [`Self::new`]; rehearsal and
+    /// mock-server callers must opt into loopback deliberately.
+    pub fn with_policy(registry: Registry, policy: RegistryPolicy) -> Result<Self> {
+        let validated = ValidatedRegistry::new(registry.clone(), policy)?;
         let http = Client::builder()
             .user_agent(format!("shipper/{}", env!("CARGO_PKG_VERSION")))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .context("failed to build HTTP client")?;
 
         Ok(Self {
             registry,
+            validated,
             http,
             cache_dir: None,
         })
@@ -40,10 +65,16 @@ impl RegistryClient {
         &self.registry
     }
 
+    /// Return the sanitized destination and trust posture applied to this
+    /// client. No credentials or URL query material is included.
+    pub fn policy_evidence(&self) -> shipper_types::RegistryPolicyEvidence {
+        self.validated.sanitized_evidence()
+    }
+
     pub fn version_exists(&self, crate_name: &str, version: &str) -> Result<bool> {
         let url = format!(
             "{}/api/v1/crates/{}/{}",
-            self.registry.api_base.trim_end_matches('/'),
+            self.validated.api_base().as_str().trim_end_matches('/'),
             crate_name,
             version
         );
@@ -63,7 +94,7 @@ impl RegistryClient {
     pub fn crate_exists(&self, crate_name: &str) -> Result<bool> {
         let url = format!(
             "{}/api/v1/crates/{}",
-            self.registry.api_base.trim_end_matches('/'),
+            self.validated.api_base().as_str().trim_end_matches('/'),
             crate_name
         );
 
@@ -82,7 +113,7 @@ impl RegistryClient {
     pub fn list_owners(&self, crate_name: &str, token: &str) -> Result<OwnersResponse> {
         let url = format!(
             "{}/api/v1/crates/{}/owners",
-            self.registry.api_base.trim_end_matches('/'),
+            self.validated.api_base().as_str().trim_end_matches('/'),
             crate_name
         );
 
@@ -157,7 +188,7 @@ impl RegistryClient {
 
     /// Fetch the index file content from the registry.
     fn fetch_index_file(&self, index_path: &str) -> Result<String> {
-        let index_base = self.registry.get_index_base();
+        let index_base = self.validated.index_base().as_str();
         let url = format!("{}/{}", index_base.trim_end_matches('/'), index_path);
 
         let cache_file = self.cache_dir.as_ref().map(|d| d.join(index_path));

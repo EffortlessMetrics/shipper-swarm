@@ -8,10 +8,14 @@
 
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
+use shipper_types::Registry;
 
-use crate::{CRATES_IO_API, DEFAULT_TIMEOUT_SECS, USER_AGENT, sparse_index_path};
+use crate::{
+    CRATES_IO_API, DEFAULT_TIMEOUT_SECS, RegistryPolicy, USER_AGENT, ValidatedRegistry,
+    sparse_index_path,
+};
 
 /// Lightweight HTTP registry client that operates on a raw base-URL.
 ///
@@ -23,23 +27,58 @@ pub struct HttpRegistryClient {
     timeout: Duration,
     client: reqwest::blocking::Client,
     cache_dir: Option<std::path::PathBuf>,
+    policy: RegistryPolicy,
+    validation_error: Option<String>,
 }
 
 impl HttpRegistryClient {
     /// Create a new registry client for the given base URL
     pub fn new(base_url: &str) -> Self {
-        let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
-            .user_agent(USER_AGENT)
-            .build()
-            .unwrap_or_else(|_| reqwest::blocking::Client::new());
-
-        Self {
-            base_url: base_url.trim_end_matches('/').to_string(),
-            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
-            client,
-            cache_dir: None,
+        let policy = if cfg!(test) {
+            // Unit tests use loopback mock servers. Production callers always
+            // receive the secure default and must opt into rehearsal explicitly.
+            RegistryPolicy::rehearsal()
+        } else {
+            RegistryPolicy::secure()
+        };
+        match Self::try_with_policy(base_url, policy) {
+            Ok(client) => client,
+            Err(error) => Self {
+                base_url: base_url.trim_end_matches('/').to_string(),
+                timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+                client: build_client(Duration::from_secs(DEFAULT_TIMEOUT_SECS)),
+                cache_dir: None,
+                policy,
+                validation_error: Some(error.to_string()),
+            },
         }
+    }
+
+    /// Construct a client with explicit registry trust choices.
+    pub fn with_policy(base_url: &str, policy: RegistryPolicy) -> Result<Self> {
+        Self::try_with_policy(base_url, policy)
+    }
+
+    fn try_with_policy(base_url: &str, policy: RegistryPolicy) -> Result<Self> {
+        let identity = Registry {
+            name: "http-client".to_string(),
+            api_base: base_url.to_string(),
+            index_base: Some(base_url.to_string()),
+        };
+        let validated = ValidatedRegistry::new(identity, policy)?;
+
+        Ok(Self {
+            base_url: validated
+                .api_base()
+                .as_str()
+                .trim_end_matches('/')
+                .to_string(),
+            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+            client: build_client(Duration::from_secs(DEFAULT_TIMEOUT_SECS)),
+            cache_dir: None,
+            policy,
+            validation_error: None,
+        })
     }
 
     /// Set the cache directory for sparse index fragments
@@ -59,13 +98,21 @@ impl HttpRegistryClient {
         self.client = reqwest::blocking::Client::builder()
             .timeout(timeout)
             .user_agent(USER_AGENT)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
-            .unwrap_or_else(|_| reqwest::blocking::Client::new());
+            .unwrap_or_else(|_| build_client(timeout));
         self
+    }
+
+    fn ensure_validated(&self) -> Result<()> {
+        self.validation_error
+            .as_deref()
+            .map_or(Ok(()), |error| Err(anyhow!("{error}")))
     }
 
     /// Check if a crate exists in the registry
     pub fn crate_exists(&self, name: &str) -> Result<bool> {
+        self.ensure_validated()?;
         let url = format!("{}/api/v1/crates/{}", self.base_url, name);
 
         let response = self
@@ -83,6 +130,7 @@ impl HttpRegistryClient {
 
     /// Check if a specific version of a crate exists
     pub fn version_exists(&self, name: &str, version: &str) -> Result<bool> {
+        self.ensure_validated()?;
         let url = format!("{}/api/v1/crates/{}/{}", self.base_url, name, version);
 
         let response = self
@@ -100,6 +148,7 @@ impl HttpRegistryClient {
 
     /// Get crate information
     pub fn get_crate_info(&self, name: &str) -> Result<Option<CrateInfo>> {
+        self.ensure_validated()?;
         let url = format!("{}/api/v1/crates/{}", self.base_url, name);
 
         let response = self
@@ -135,6 +184,7 @@ impl HttpRegistryClient {
         name: &str,
         token: Option<&str>,
     ) -> Result<Option<OwnersResponse>> {
+        self.ensure_validated()?;
         let url = format!("{}/api/v1/crates/{}/owners", self.base_url, name);
         let mut request = self.client.get(&url);
         if let Some(token) = token {
@@ -201,6 +251,14 @@ impl HttpRegistryClient {
 
     /// Fetch sparse-index content for a crate.
     pub fn fetch_sparse_index_file(&self, index_base: &str, name: &str) -> Result<String> {
+        self.ensure_validated()?;
+        let index_identity = Registry {
+            name: "http-client-index".to_string(),
+            api_base: index_base.to_string(),
+            index_base: Some(index_base.to_string()),
+        };
+        ValidatedRegistry::new(index_identity, self.policy)
+            .context("invalid sparse index destination")?;
         let index_base = index_base.trim_end_matches('/');
         let index_path = sparse_index_path(name);
         let url = format!("{}/{}", index_base, index_path);
@@ -260,6 +318,15 @@ impl HttpRegistryClient {
     pub fn base_url(&self) -> &str {
         &self.base_url
     }
+}
+
+fn build_client(timeout: Duration) -> reqwest::blocking::Client {
+    reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .user_agent(USER_AGENT)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap_or_else(|_| reqwest::blocking::Client::new())
 }
 
 /// Crate information from the registry
@@ -336,6 +403,29 @@ mod tests {
     fn client_with_custom_url() {
         let client = HttpRegistryClient::new("https://custom.registry.io/");
         assert_eq!(client.base_url(), "https://custom.registry.io");
+    }
+
+    #[test]
+    fn invalid_destination_fails_before_any_credentialed_request() {
+        let client = HttpRegistryClient::new("https://user:fixture-secret@registry.example");
+        let error = client.list_owners("demo", "fixture-token").unwrap_err();
+
+        assert!(!error.to_string().contains("fixture-secret"));
+        assert!(!error.to_string().contains("fixture-token"));
+    }
+
+    #[test]
+    fn private_destination_requires_explicit_policy() {
+        assert!(
+            HttpRegistryClient::with_policy("https://10.0.0.5", RegistryPolicy::secure(),).is_err()
+        );
+        assert!(
+            HttpRegistryClient::with_policy(
+                "https://10.0.0.5",
+                RegistryPolicy::secure().with_private(true),
+            )
+            .is_ok()
+        );
     }
 
     #[test]

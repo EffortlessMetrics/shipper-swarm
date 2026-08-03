@@ -74,6 +74,16 @@ pub struct Registry {
     pub index_base: Option<String>,
 }
 
+/// Explicit network-trust choices carried from configuration into the engine.
+///
+/// This stays separate from [`Registry`] so the public registry identity and
+/// persisted plan shape do not silently acquire policy semantics.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RegistryTrustOptions {
+    /// Permit private-network destinations after URL validation.
+    pub allow_private: bool,
+}
+
 impl Registry {
     /// Creates a new [`Registry`] configured for crates.io.
     ///
@@ -527,6 +537,7 @@ impl Default for ParallelConfig {
 ///     webhook: shipper::webhook::WebhookConfig::default(),
 ///     encryption: shipper::encryption::EncryptionConfig::default(),
 ///     registries: vec![],
+///     registry_policies: std::collections::BTreeMap::new(),
 /// };
 /// ```
 #[derive(Debug, Clone)]
@@ -579,6 +590,8 @@ pub struct RuntimeOptions {
     pub encryption: EncryptionSettings,
     /// Target registries for multi-registry publishing
     pub registries: Vec<Registry>,
+    /// Trust choices keyed by configured registry name.
+    pub registry_policies: BTreeMap<String, RegistryTrustOptions>,
     /// Optional package name to resume from (skips all packages before this one)
     pub resume_from: Option<String>,
     /// Rehearsal registry name (#97) ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â if `Some`, `shipper rehearse` publishes
@@ -1628,6 +1641,10 @@ pub enum EventType {
     AuthEvidenceRecorded {
         evidence: AuthEvidence,
     },
+    /// Sanitized registry destination and trust posture applied to this run.
+    RegistryPolicyApplied {
+        evidence: RegistryPolicyEvidence,
+    },
 
     // Package events
     PackageStarted {
@@ -1916,6 +1933,17 @@ pub struct AuthEvidence {
     pub token_detected: bool,
     pub oidc_request_url_present: bool,
     pub oidc_request_token_present: bool,
+}
+
+/// Non-secret evidence of the validated registry destination and trust
+/// posture used by a run.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RegistryPolicyEvidence {
+    pub posture: String,
+    pub allow_private: bool,
+    pub allow_loopback: bool,
+    pub credential_authority: String,
+    pub index_authority: String,
 }
 
 /// Non-secret authentication mode observed for a publish or resume run.
@@ -2810,6 +2838,7 @@ mod tests {
             webhook: WebhookConfig::default(),
             encryption: EncryptionSettings::default(),
             registries: vec![],
+            registry_policies: BTreeMap::new(),
             resume_from: None,
             rehearsal_registry: None,
             rehearsal_skip: false,
@@ -5441,6 +5470,7 @@ mod tests {
                     webhook: WebhookConfig::default(),
                     encryption: EncryptionSettings::default(),
                     registries: vec![],
+                    registry_policies: BTreeMap::new(),
                     resume_from: None,
             rehearsal_registry: None,
             rehearsal_skip: false,

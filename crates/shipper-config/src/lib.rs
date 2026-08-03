@@ -45,6 +45,7 @@ pub use shipper_types::{
 };
 pub use shipper_webhook::WebhookConfig;
 
+use shipper_registry::{RegistryPolicy, ValidatedRegistry};
 use shipper_retry::{PerErrorConfig, RetryPolicy, RetryStrategyType};
 use shipper_types::storage::{CloudStorageConfig, StorageType};
 
@@ -401,6 +402,10 @@ pub struct RegistryConfig {
     /// Whether this is the default registry (used when publishing to all registries)
     #[serde(default)]
     pub default: bool,
+
+    /// Permit private-network registry destinations after validation.
+    #[serde(default)]
+    pub allow_private: bool,
 }
 
 /// Multiple registry configuration
@@ -426,6 +431,7 @@ impl MultiRegistryConfig {
                 index_base: Some("https://index.crates.io".to_string()),
                 token: None,
                 default: true,
+                allow_private: false,
             }]
         } else {
             self.registries.clone()
@@ -445,6 +451,7 @@ impl MultiRegistryConfig {
                 index_base: Some("https://index.crates.io".to_string()),
                 token: None,
                 default: true,
+                allow_private: false,
             })
     }
 
@@ -676,6 +683,11 @@ impl ShipperConfig {
             if registry.api_base.is_empty() {
                 bail!("registry.api_base cannot be empty");
             }
+            validate_registry_destination(
+                registry,
+                self.rehearsal.enabled
+                    && self.rehearsal.registry.as_deref() == Some(registry.name.as_str()),
+            )?;
         }
 
         // Validate multiple registries if present
@@ -686,6 +698,11 @@ impl ShipperConfig {
             if reg.api_base.is_empty() {
                 bail!("registries[].api_base cannot be empty");
             }
+            validate_registry_destination(
+                reg,
+                self.rehearsal.enabled
+                    && self.rehearsal.registry.as_deref() == Some(reg.name.as_str()),
+            )?;
         }
 
         // Ensure only one default registry
@@ -804,6 +821,7 @@ per_package_timeout = "30m"
 # [registry]
 # name = "crates-io"
 # api_base = "https://crates.io"
+# allow_private = false  # opt in only for an explicitly trusted private registry
 
 # Optional: Webhook notifications for publish events
 # [webhook]
@@ -817,6 +835,20 @@ per_package_timeout = "30m"
 # timeout = "30s"
 "#.to_string()
     }
+}
+
+fn validate_registry_destination(registry: &RegistryConfig, allow_loopback: bool) -> Result<()> {
+    let identity = Registry {
+        name: registry.name.clone(),
+        api_base: registry.api_base.clone(),
+        index_base: registry.index_base.clone(),
+    };
+    let policy = RegistryPolicy::secure()
+        .with_private(registry.allow_private)
+        .with_loopback(allow_loopback);
+    ValidatedRegistry::new(identity, policy)
+        .map(|_| ())
+        .with_context(|| format!("invalid registry '{}' destination", registry.name))
 }
 
 #[cfg(test)]
@@ -879,6 +911,7 @@ mod tests {
                 index_base: None,
                 token: None,
                 default: false,
+                allow_private: false,
             }),
             ..Default::default()
         };
@@ -890,8 +923,57 @@ mod tests {
             index_base: None,
             token: None,
             default: false,
+            allow_private: false,
         });
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn registry_validation_requires_explicit_private_and_index_policy() {
+        let mut config = ShipperConfig {
+            registries: MultiRegistryConfig {
+                registries: vec![RegistryConfig {
+                    name: "private".to_string(),
+                    api_base: "https://10.0.0.5".to_string(),
+                    index_base: Some("https://10.0.0.6".to_string()),
+                    token: None,
+                    default: false,
+                    allow_private: false,
+                }],
+                default_registries: vec![],
+            },
+            ..ShipperConfig::default()
+        };
+        assert!(config.validate().is_err());
+
+        config.registries.registries[0].allow_private = true;
+        assert!(config.validate().is_ok());
+
+        config.registries.registries[0].index_base = None;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn loopback_registry_requires_rehearsal_posture() {
+        let mut config = ShipperConfig {
+            registries: MultiRegistryConfig {
+                registries: vec![RegistryConfig {
+                    name: "local".to_string(),
+                    api_base: "http://127.0.0.1:8080".to_string(),
+                    index_base: Some("http://127.0.0.1:8080".to_string()),
+                    token: None,
+                    default: false,
+                    allow_private: false,
+                }],
+                default_registries: vec![],
+            },
+            ..ShipperConfig::default()
+        };
+        assert!(config.validate().is_err());
+
+        config.rehearsal.enabled = true;
+        config.rehearsal.registry = Some("local".to_string());
+        assert!(config.validate().is_ok());
     }
 
     #[test]
@@ -1286,6 +1368,7 @@ enabled = true
                     index_base: Some("https://index.my-registry.example.com".to_string()),
                     token: None,
                     default: true,
+                    allow_private: false,
                 }),
                 registries: MultiRegistryConfig::default(),
                 webhook: WebhookConfig::default(),
@@ -1358,6 +1441,7 @@ enabled = true
                     index_base: None,
                     token: None,
                     default: false,
+                    allow_private: false,
                 }),
                 ..ShipperConfig::default()
             };
@@ -1520,6 +1604,7 @@ per_package_timeout = "15m"
                     index_base: None,
                     token: None,
                     default: false,
+                    allow_private: false,
                 }),
                 ..ShipperConfig::default()
             };
@@ -1561,6 +1646,7 @@ per_package_timeout = "15m"
                         index_base: None,
                         token: None,
                         default: false,
+                        allow_private: false,
                     }],
                     default_registries: vec![],
                 },
@@ -1580,6 +1666,7 @@ per_package_timeout = "15m"
                         index_base: None,
                         token: None,
                         default: false,
+                        allow_private: false,
                     }],
                     default_registries: vec![],
                 },
@@ -1597,16 +1684,18 @@ per_package_timeout = "15m"
                         RegistryConfig {
                             name: "reg-a".to_string(),
                             api_base: "https://a.example.com".to_string(),
-                            index_base: None,
+                            index_base: Some("https://index.a.example.com".to_string()),
                             token: None,
                             default: true,
+                            allow_private: false,
                         },
                         RegistryConfig {
                             name: "reg-b".to_string(),
                             api_base: "https://b.example.com".to_string(),
-                            index_base: None,
+                            index_base: Some("https://index.b.example.com".to_string()),
                             token: None,
                             default: true,
+                            allow_private: false,
                         },
                     ],
                     default_registries: vec![],
@@ -2052,6 +2141,7 @@ per_package_timeout = "2h"
 [registry]
 name = "my-reg"
 api_base = "https://example.com"
+index_base = "https://index.example.com"
 "#;
             let config: ShipperConfig = toml::from_str(toml).unwrap();
             let reg = config.registry.as_ref().unwrap();
@@ -2138,16 +2228,18 @@ max_delay = "5s"
                         RegistryConfig {
                             name: "reg-a".to_string(),
                             api_base: "https://a.example.com".to_string(),
-                            index_base: None,
+                            index_base: Some("https://index.a.example.com".to_string()),
                             token: None,
                             default: true,
+                            allow_private: false,
                         },
                         RegistryConfig {
                             name: "reg-b".to_string(),
                             api_base: "https://b.example.com".to_string(),
-                            index_base: None,
+                            index_base: Some("https://index.b.example.com".to_string()),
                             token: None,
                             default: true,
+                            allow_private: false,
                         },
                     ],
                     default_registries: vec![],
@@ -2172,6 +2264,7 @@ max_delay = "5s"
                         index_base: None,
                         token: None,
                         default: false,
+                        allow_private: false,
                     }],
                     default_registries: vec![],
                 },
@@ -2190,6 +2283,7 @@ max_delay = "5s"
                         index_base: None,
                         token: None,
                         default: false,
+                        allow_private: false,
                     }],
                     default_registries: vec![],
                 },
@@ -2243,7 +2337,7 @@ max_delay = "5s"
         fn very_long_registry_name() {
             let long_name = "r".repeat(11_000);
             let toml = format!(
-                "[registry]\nname = \"{}\"\napi_base = \"https://example.com\"",
+                "[registry]\nname = \"{}\"\napi_base = \"https://example.com\"\nindex_base = \"https://index.example.com\"",
                 long_name
             );
             let config: ShipperConfig = toml::from_str(&toml).unwrap();
@@ -2254,7 +2348,10 @@ max_delay = "5s"
         #[test]
         fn very_long_api_base_url() {
             let long_url = format!("https://example.com/{}", "x".repeat(11_000));
-            let toml = format!("[registry]\nname = \"reg\"\napi_base = \"{}\"", long_url);
+            let toml = format!(
+                "[registry]\nname = \"reg\"\napi_base = \"{}\"\nindex_base = \"https://index.example.com\"",
+                long_url
+            );
             let config: ShipperConfig = toml::from_str(&toml).unwrap();
             assert!(config.validate().is_ok());
         }
@@ -2299,6 +2396,7 @@ max_delay = "5s"
 [registry]
 name = "登録-ré̀gistry-🦀"
 api_base = "https://例え.jp/api"
+index_base = "https://index.例え.jp"
 "#;
             let config: ShipperConfig = toml::from_str(toml).unwrap();
             let reg = config.registry.as_ref().unwrap();
@@ -2468,6 +2566,7 @@ mode = "turbo"
                         index_base: None,
                         token: None,
                         default: false,
+                        allow_private: false,
                     },
                     RegistryConfig {
                         name: "second".to_string(),
@@ -2475,6 +2574,7 @@ mode = "turbo"
                         index_base: None,
                         token: None,
                         default: true,
+                        allow_private: false,
                     },
                 ],
                 default_registries: vec![],
@@ -2492,6 +2592,7 @@ mode = "turbo"
                     index_base: None,
                     token: None,
                     default: false,
+                    allow_private: false,
                 }],
                 default_registries: vec![],
             };

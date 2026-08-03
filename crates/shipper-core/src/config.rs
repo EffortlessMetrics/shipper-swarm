@@ -577,6 +577,7 @@ lines = 123
                         index_base: None,
                         token: None,
                         default: true,
+                        allow_private: false,
                     },
                     RegistryConfig {
                         name: "reg-b".to_string(),
@@ -584,6 +585,7 @@ lines = 123
                         index_base: None,
                         token: None,
                         default: false,
+                        allow_private: false,
                     },
                 ],
                 default_registries: vec![],
@@ -611,6 +613,7 @@ lines = 123
                         index_base: Some("https://index.a.example.com".to_string()),
                         token: None,
                         default: true,
+                        allow_private: false,
                     },
                     RegistryConfig {
                         name: "reg-b".to_string(),
@@ -618,6 +621,7 @@ lines = 123
                         index_base: None,
                         token: None,
                         default: false,
+                        allow_private: false,
                     },
                 ],
                 default_registries: vec![],
@@ -1188,6 +1192,7 @@ bucket = "bucket"
                     index_base: None,
                     token: None,
                     default: false,
+                    allow_private: false,
                 },
                 RegistryConfig {
                     name: "beta".to_string(),
@@ -1195,6 +1200,7 @@ bucket = "bucket"
                     index_base: None,
                     token: None,
                     default: false,
+                    allow_private: false,
                 },
             ],
             default_registries: vec![],
