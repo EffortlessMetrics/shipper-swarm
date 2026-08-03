@@ -644,6 +644,25 @@ impl ShipperConfig {
     /// `true` only when the operator explicitly supplied the loopback opt-in;
     /// private, link-local, and metadata destinations remain rejected.
     pub fn validate_with_loopback(&self, allow_loopback: bool) -> Result<()> {
+        self.validate_inner(allow_loopback, true)
+    }
+
+    /// Validate configuration for `shipper doctor`.
+    ///
+    /// Doctor must be able to inspect a configured registry even when its
+    /// destination violates the publish trust policy. The connectivity check
+    /// reports that condition as a redacted diagnostic; publish-facing
+    /// commands continue to use [`Self::validate_with_loopback`] and fail
+    /// closed before network access.
+    pub fn validate_for_diagnostics(&self) -> Result<()> {
+        self.validate_inner(false, false)
+    }
+
+    fn validate_inner(
+        &self,
+        allow_loopback: bool,
+        validate_registry_destinations: bool,
+    ) -> Result<()> {
         // Validate schema version format
         shipper_types::schema::parse_schema_version(&self.schema_version)
             .context("invalid schema_version format")?;
@@ -726,40 +745,46 @@ impl ShipperConfig {
             }
         }
 
-        // Validate registry if present
+        // Validate registry if present. Doctor intentionally defers the
+        // destination trust decision to its connectivity diagnostic so an
+        // invalid URL is reported instead of preventing the diagnostic run.
         if let Some(ref registry) = self.registry {
-            if registry.name.is_empty() {
-                bail!("registry.name cannot be empty");
+            if validate_registry_destinations {
+                if registry.name.is_empty() {
+                    bail!("registry.name cannot be empty");
+                }
+                if registry.api_base.is_empty() {
+                    bail!("registry.api_base cannot be empty");
+                }
+                validate_registry_destination(
+                    registry,
+                    allow_loopback
+                        || ((self.rehearsal.enabled || self.rehearsal.allow_loopback)
+                            && self.rehearsal.registry.as_deref() == Some(registry.name.as_str())),
+                )?;
             }
-            if registry.api_base.is_empty() {
-                bail!("registry.api_base cannot be empty");
-            }
-            validate_registry_destination(
-                registry,
-                allow_loopback
-                    || ((self.rehearsal.enabled || self.rehearsal.allow_loopback)
-                        && self.rehearsal.registry.as_deref() == Some(registry.name.as_str())),
-            )?;
         }
 
         // Validate multiple registries if present
         let mut registry_names = HashSet::new();
         for reg in &self.registries.registries {
-            if reg.name.is_empty() {
-                bail!("registries[].name cannot be empty");
+            if validate_registry_destinations {
+                if reg.name.is_empty() {
+                    bail!("registries[].name cannot be empty");
+                }
+                if reg.api_base.is_empty() {
+                    bail!("registries[].api_base cannot be empty");
+                }
+                validate_registry_destination(
+                    reg,
+                    allow_loopback
+                        || ((self.rehearsal.enabled || self.rehearsal.allow_loopback)
+                            && self.rehearsal.registry.as_deref() == Some(reg.name.as_str())),
+                )?;
             }
             if !registry_names.insert(reg.name.as_str()) {
                 bail!("duplicate registry name '{}'", reg.name);
             }
-            if reg.api_base.is_empty() {
-                bail!("registries[].api_base cannot be empty");
-            }
-            validate_registry_destination(
-                reg,
-                allow_loopback
-                    || ((self.rehearsal.enabled || self.rehearsal.allow_loopback)
-                        && self.rehearsal.registry.as_deref() == Some(reg.name.as_str())),
-            )?;
         }
 
         // Ensure only one default registry

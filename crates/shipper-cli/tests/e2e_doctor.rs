@@ -304,6 +304,63 @@ fn doctor_json_format_redacts_registry_url_secrets() {
     assert!(!error.contains("url-key-secret"));
 }
 
+#[test]
+fn doctor_json_reports_invalid_configured_registry_without_aborting() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+    fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
+    write_file(
+        &td.path().join(".shipper.toml"),
+        r#"schema_version = "shipper.config.v1"
+
+[registry]
+name = "unsafe-test"
+api_base = "http://user:config-secret@127.0.0.1:9/api?token=url-secret"
+"#,
+    );
+
+    let output = shipper_cmd()
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--format")
+        .arg("json")
+        .arg("doctor")
+        .env("CARGO_HOME", td.path().join("cargo-home"))
+        .env_remove("CARGO_REGISTRY_TOKEN")
+        .env_remove("CARGO_REGISTRIES_CRATES_IO_TOKEN")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(output).expect("utf8");
+    assert!(!stdout.contains("config-secret"), "{stdout}");
+    assert!(!stdout.contains("url-secret"), "{stdout}");
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert_eq!(
+        json.pointer("/reports/0/registry/name")
+            .and_then(serde_json::Value::as_str),
+        Some("unsafe-test")
+    );
+    assert!(
+        json.pointer("/reports/0/findings")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|findings| {
+                findings.iter().any(|finding| {
+                    finding.get("id").and_then(serde_json::Value::as_str)
+                        == Some("registry-unreachable")
+                })
+            }),
+        "{stdout}"
+    );
+    assert_eq!(
+        json.pointer("/reports/0/connectivity/registry_reachable")
+            .and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
+}
+
 /// 4. Doctor reports missing token when not set
 #[test]
 fn doctor_reports_missing_token() {

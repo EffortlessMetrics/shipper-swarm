@@ -1059,18 +1059,25 @@ pub fn run() -> Result<std::process::ExitCode> {
         };
 
     // Validate loaded configuration before using it for runtime options.
+    // `doctor` intentionally keeps destination validation in its connectivity
+    // report so an unsafe configured URL is diagnosed and redacted rather than
+    // aborting the diagnostic command before the registry is applied.
     if let Some(ref cfg) = config {
         let config_path = cli
             .config
             .clone()
             .unwrap_or_else(|| planned.workspace_root.join(".shipper.toml"));
-        cfg.validate_with_loopback(cli.allow_loopback)
-            .with_context(|| {
-                format!(
-                    "Configuration validation failed for {}",
-                    config_path.display()
-                )
-            })?;
+        let validation = if matches!(cli.cmd.as_ref(), Some(Commands::Doctor)) {
+            cfg.validate_for_diagnostics()
+        } else {
+            cfg.validate_with_loopback(cli.allow_loopback)
+        };
+        validation.with_context(|| {
+            format!(
+                "Configuration validation failed for {}",
+                config_path.display()
+            )
+        })?;
     }
 
     // Apply registry from config if CLI didn't set it
