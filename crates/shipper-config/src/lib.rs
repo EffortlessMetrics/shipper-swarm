@@ -364,6 +364,7 @@ pub struct ShipperConfig {
 /// [rehearsal]
 /// enabled = true
 /// registry = "kellnr-local"  # name must match an entry in [[registries]]
+/// # allow_loopback = true      # local HTTP test posture; does not enable the gate
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RehearsalConfig {
@@ -371,6 +372,11 @@ pub struct RehearsalConfig {
     /// (opt-in until the phase-2 execution PR lands).
     #[serde(default)]
     pub enabled: bool,
+
+    /// Permit loopback HTTP for an explicitly configured local rehearsal or
+    /// test registry without enabling the live-publish rehearsal gate.
+    #[serde(default)]
+    pub allow_loopback: bool,
 
     /// Name of the registry (declared under `[[registries]]`) to use for
     /// rehearsal. Must differ from the live target registry.
@@ -685,7 +691,7 @@ impl ShipperConfig {
             }
             validate_registry_destination(
                 registry,
-                self.rehearsal.enabled
+                (self.rehearsal.enabled || self.rehearsal.allow_loopback)
                     && self.rehearsal.registry.as_deref() == Some(registry.name.as_str()),
             )?;
         }
@@ -700,7 +706,7 @@ impl ShipperConfig {
             }
             validate_registry_destination(
                 reg,
-                self.rehearsal.enabled
+                (self.rehearsal.enabled || self.rehearsal.allow_loopback)
                     && self.rehearsal.registry.as_deref() == Some(reg.name.as_str()),
             )?;
         }
@@ -822,6 +828,7 @@ per_package_timeout = "30m"
 # name = "crates-io"
 # api_base = "https://crates.io"
 # allow_private = false  # opt in only for an explicitly trusted private registry
+# allow_loopback = false # only for an explicitly configured local test registry
 
 # Optional: Webhook notifications for publish events
 # [webhook]
@@ -971,7 +978,7 @@ mod tests {
         };
         assert!(config.validate().is_err());
 
-        config.rehearsal.enabled = true;
+        config.rehearsal.allow_loopback = true;
         config.rehearsal.registry = Some("local".to_string());
         assert!(config.validate().is_ok());
     }
@@ -1050,6 +1057,7 @@ api_base = "https://my-registry.example.com"
             config.rehearsal.registry.is_none(),
             "rehearsal registry default is None"
         );
+        assert!(!config.rehearsal.allow_loopback);
     }
 
     #[test]

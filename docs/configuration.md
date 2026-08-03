@@ -209,14 +209,16 @@ name = "crates-io"
 api_base = "https://crates.io"
 # Custom registries must declare their sparse index explicitly.
 # allow_private = false
+# Loopback HTTP is disabled by default. Enable it only for a named local test
+# registry with [rehearsal].allow_loopback = true.
 ```
 
 Optional custom registry configuration. If not specified, defaults to crates.io.
 Registry API and index URLs must use HTTPS. URLs with userinfo, queries, or
 fragments are rejected. Literal private-network destinations require the
 explicit `allow_private = true` opt-in; metadata and link-local destinations
-remain rejected. Plain HTTP is reserved for a configured rehearsal registry
-whose `[rehearsal]` posture is enabled.
+remain rejected. Plain HTTP is reserved for a configured local test registry
+whose `[rehearsal]` section explicitly sets `allow_loopback = true`.
 
 ## CLI Override
 

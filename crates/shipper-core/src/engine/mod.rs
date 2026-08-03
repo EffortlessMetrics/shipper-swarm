@@ -108,7 +108,12 @@ fn init_registry_client(
         .registry_policies
         .get(&registry.name)
         .is_some_and(|policy| policy.allow_private);
-    let allow_loopback = allow_loopback || cfg!(test);
+    let allow_loopback = allow_loopback
+        || opts
+            .registry_policies
+            .get(&registry.name)
+            .is_some_and(|policy| policy.allow_loopback)
+        || cfg!(test);
     let policy = RegistryPolicy::secure()
         .with_private(allow_private)
         .with_loopback(allow_loopback);

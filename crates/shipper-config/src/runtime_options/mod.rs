@@ -15,7 +15,12 @@ pub(crate) fn build(config: &ShipperConfig, cli: CliOverrides) -> RuntimeOptions
     let parallel = resolve_parallel(config, &cli);
     let webhook = secrets::resolve_webhook(&config.webhook, &cli);
     let encryption = secrets::resolve_encryption(&config.encryption, &cli);
-    let (registries, registry_policies) = registry::resolve_with_policies(&config.registries, &cli);
+    let (registries, registry_policies) = registry::resolve_with_policies(
+        &config.registries,
+        config.registry.as_ref(),
+        &config.rehearsal,
+        &cli,
+    );
     let rehearsal_registry = resolve_rehearsal_registry(config, &cli);
 
     RuntimeOptions {

@@ -2,15 +2,17 @@ use std::collections::BTreeMap;
 
 use shipper_types::{Registry, RegistryTrustOptions};
 
-use crate::{CliOverrides, MultiRegistryConfig, RegistryConfig};
+use crate::{CliOverrides, MultiRegistryConfig, RegistryConfig, RehearsalConfig};
 
 #[cfg(test)]
 pub(super) fn resolve(config: &MultiRegistryConfig, cli: &CliOverrides) -> Vec<Registry> {
-    resolve_with_policies(config, cli).0
+    resolve_with_policies(config, None, &RehearsalConfig::default(), cli).0
 }
 
 pub(super) fn resolve_with_policies(
     config: &MultiRegistryConfig,
+    single_registry: Option<&RegistryConfig>,
+    rehearsal: &RehearsalConfig,
     cli: &CliOverrides,
 ) -> (Vec<Registry>, BTreeMap<String, RegistryTrustOptions>) {
     if cli.all_registries {
@@ -23,10 +25,12 @@ pub(super) fn resolve_with_policies(
             .get_registries()
             .into_iter()
             .map(|registry| {
+                let allow_loopback = rehearsal_allows_loopback(rehearsal, &registry.name);
                 (
                     registry.name,
                     RegistryTrustOptions {
                         allow_private: registry.allow_private,
+                        allow_loopback,
                     },
                 )
             })
@@ -42,17 +46,41 @@ pub(super) fn resolve_with_policies(
         let policies = registry_names
             .iter()
             .map(|name| {
-                let allow_private = config
-                    .find_by_name(name)
-                    .is_some_and(|registry| registry.allow_private);
-                (name.clone(), RegistryTrustOptions { allow_private })
+                let configured = config.find_by_name(name);
+                (
+                    name.clone(),
+                    RegistryTrustOptions {
+                        allow_private: configured.is_some_and(|registry| registry.allow_private),
+                        allow_loopback: rehearsal_allows_loopback(rehearsal, name),
+                    },
+                )
             })
             .collect();
         return (resolved, policies);
     }
 
-    // Default: single registry from the plan.
-    (vec![], BTreeMap::new())
+    // Default: single registry from the plan. Carry policy for the legacy
+    // single-registry configuration too; the CLI may override its URL while
+    // retaining the explicitly configured trust posture.
+    let policies = single_registry
+        .map(|registry| {
+            let mut policies = BTreeMap::new();
+            policies.insert(
+                registry.name.clone(),
+                RegistryTrustOptions {
+                    allow_private: registry.allow_private,
+                    allow_loopback: rehearsal_allows_loopback(rehearsal, &registry.name),
+                },
+            );
+            policies
+        })
+        .unwrap_or_default();
+    (vec![], policies)
+}
+
+fn rehearsal_allows_loopback(rehearsal: &RehearsalConfig, registry_name: &str) -> bool {
+    (rehearsal.enabled || rehearsal.allow_loopback)
+        && rehearsal.registry.as_deref() == Some(registry_name)
 }
 
 fn resolve_named_registry(config: &MultiRegistryConfig, name: &str) -> Registry {
@@ -103,7 +131,7 @@ mod tests {
     use super::{
         default_registry_for_name, is_safe_synthetic_registry_name, resolve, resolve_with_policies,
     };
-    use crate::{CliOverrides, MultiRegistryConfig, RegistryConfig};
+    use crate::{CliOverrides, MultiRegistryConfig, RegistryConfig, RehearsalConfig};
 
     fn config_with(registries: Vec<RegistryConfig>) -> MultiRegistryConfig {
         MultiRegistryConfig {
@@ -263,10 +291,32 @@ mod tests {
             ..CliOverrides::default()
         };
 
-        let (registries, policies) = resolve_with_policies(&config, &cli);
+        let (registries, policies) =
+            resolve_with_policies(&config, None, &RehearsalConfig::default(), &cli);
 
         assert_eq!(registries[0].name, "private");
         assert!(policies["private"].allow_private);
+        assert!(!policies["private"].allow_loopback);
+    }
+
+    #[test]
+    fn resolve_default_carries_single_registry_rehearsal_posture() {
+        let registry = registry_config("local");
+        let config = config_with(vec![]);
+        let rehearsal = RehearsalConfig {
+            enabled: true,
+            allow_loopback: false,
+            registry: Some("local".to_string()),
+        };
+        let (_, policies) = resolve_with_policies(
+            &config,
+            Some(&registry),
+            &rehearsal,
+            &CliOverrides::default(),
+        );
+
+        assert!(policies["local"].allow_loopback);
+        assert!(!policies["local"].allow_private);
     }
 
     #[test]

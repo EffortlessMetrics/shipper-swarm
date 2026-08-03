@@ -82,6 +82,9 @@ pub struct Registry {
 pub struct RegistryTrustOptions {
     /// Permit private-network destinations after URL validation.
     pub allow_private: bool,
+    /// Permit loopback HTTP for an explicitly configured rehearsal/test
+    /// registry. This is separate from private-network opt-in.
+    pub allow_loopback: bool,
 }
 
 impl Registry {

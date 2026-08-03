@@ -347,6 +347,15 @@ fn live_registry_addr() -> String {
         .unwrap_or_else(|_| "127.0.0.1:39197".to_string())
 }
 
+fn write_live_rehearsal_config(root: &Path, registry_url: &str) {
+    write_file(
+        &root.join(".shipper.toml"),
+        &format!(
+            "[registry]\nname = \"crates-io\"\napi_base = \"{registry_url}\"\nindex_base = \"{registry_url}\"\n\n[rehearsal]\nallow_loopback = true\nregistry = \"crates-io\"\n"
+        ),
+    );
+}
+
 fn fake_cargo_log(state_dir: &Path) -> PathBuf {
     state_dir.join("fake-cargo.log")
 }
@@ -625,6 +634,7 @@ fn live_runner_interruption_seed_uploads_shipper_artifact() {
 
     let (registry_url, registry_stop, registry) = spawn_registry_at(&live_registry_addr());
     registry.pin_404("crate-c");
+    write_live_rehearsal_config(&root, &registry_url);
 
     let mut cmd = shipper_cmd();
     common_args(
