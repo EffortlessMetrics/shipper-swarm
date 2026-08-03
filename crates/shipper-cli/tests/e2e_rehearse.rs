@@ -691,6 +691,7 @@ fn live_runner_interruption_resume_downloaded_artifact_preserves_invariants() {
     assert_live_rehearsal_interrupted_state(&state_dir);
 
     let (registry_url, registry_stop, _registry) = spawn_registry_at(&live_registry_addr());
+    write_live_rehearsal_config(&root, &registry_url);
 
     let mut resume = shipper_cmd();
     common_args_with_max_attempts(
