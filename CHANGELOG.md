@@ -39,6 +39,15 @@ artifacts written by 0.5.0.
 
 ### Changed
 
+- **Shared package execution and scheduler conformance.** Sequential and
+  parallel publishing now use one per-package execution authority, event-first
+  transitions, resume-skip operation, readiness evidence, and run-start
+  notification contract. The exact evidence is tracked in
+  `plans/0.5.0-scheduler-conformance.md`.
+- **Readiness authority.** Registry polling, attempt numbering, backoff, actual
+  sleep-duration evidence, timeout posture, and visibility evidence now have one
+  shared registry-client kernel; the engine retains local-index selection and
+  durable event adaptation.
 - **`PackageUploaded` is a durable readiness checkpoint.** The window between a
   successful `cargo publish` upload and registry-visible readiness is now
   recorded in `events.jsonl` and projected into `state.json` rather than held in
@@ -141,15 +150,6 @@ artifacts written by 0.5.0.
 
 ### Security
 
-- **Shared package execution and scheduler conformance.** Sequential and
-  parallel publishing now use one per-package execution authority, event-first
-  transitions, resume-skip operation, readiness evidence, and run-start
-  notification contract. The exact evidence is tracked in
-  `plans/0.5.0-scheduler-conformance.md`.
-- **Readiness authority.** Registry polling, attempt numbering, backoff, actual
-  sleep-duration evidence, timeout posture, and visibility evidence now have one
-  shared registry-client kernel; the engine retains local-index selection and
-  durable event adaptation.
 - **Versioned encryption migration.** New encrypted payloads use versioned
   PBKDF2-HMAC-SHA256 parameters at the stronger 600,000-iteration default.
   Existing unversioned KDF v1 payloads remain decryptable at their legacy
@@ -171,16 +171,6 @@ artifacts written by 0.5.0.
   carrying these per-registry trust choices; downstream struct-literal callers
   must initialize it (or migrate to their own options constructor).
 
-- **Package execution timeout policy.** Sequential and parallel publish paths
-  now apply the configured finite `per_package_timeout` ceiling to each Cargo
-  package operation. The existing parallel configuration key remains the
-  compatibility source for this shared runtime policy for one migration cycle.
-
-- **`duration_suboptimal_units` clippy lint activated.** All 223 workspace
-  sites rewritten to their optimal `Duration` unit via `cargo clippy --fix`
-  (behavior-preserving exact aliases), and the lint moved from `[[planned]]` →
-  `[[active]]` in `policy/clippy-lints.toml`. Closes the last planned lint from
-  the #191 Clippy ratchet rollout and the 0.4.0 readiness carry-over.
 - **`quinn-proto` security patch.** Bumped `quinn-proto` 0.11.14 → 0.11.15 in
   `Cargo.lock` to pick up the upstream security fix.
 
