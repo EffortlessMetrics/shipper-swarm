@@ -65,16 +65,20 @@ pub(super) fn resolve_with_policies(
     }
 
     // Default: single registry from the plan. Carry policy for the legacy
-    // single-registry configuration too; the CLI may override its URL while
-    // retaining the explicitly configured trust posture.
+    // single-registry configuration too; the CLI may override its identity
+    // and URL while retaining the explicitly configured trust posture.
     let policies = if let Some(registry) = single_registry {
         let mut policies = BTreeMap::new();
+        let effective_name = cli
+            .registry_name
+            .as_deref()
+            .unwrap_or(registry.name.as_str());
         policies.insert(
-            registry.name.clone(),
+            effective_name.to_string(),
             RegistryTrustOptions {
                 allow_private: registry.allow_private,
                 allow_loopback: cli.allow_loopback
-                    || rehearsal_allows_loopback(rehearsal, &registry.name),
+                    || rehearsal_allows_loopback(rehearsal, effective_name),
             },
         );
         policies
@@ -392,6 +396,27 @@ mod tests {
 
         assert!(policies["local"].allow_loopback);
         assert!(!policies["local"].allow_private);
+    }
+
+    #[test]
+    fn resolve_single_registry_rekeys_policy_for_cli_selected_registry() {
+        let mut registry = registry_config("configured-registry");
+        registry.allow_private = true;
+        let cli = CliOverrides {
+            registry_name: Some("selected-registry".to_string()),
+            ..CliOverrides::default()
+        };
+
+        let (_, policies) = resolve_with_policies(
+            &MultiRegistryConfig::default(),
+            Some(&registry),
+            &RehearsalConfig::default(),
+            &cli,
+        );
+
+        assert_eq!(policies.len(), 1);
+        assert!(policies["selected-registry"].allow_private);
+        assert!(!policies.contains_key("configured-registry"));
     }
 
     #[test]
