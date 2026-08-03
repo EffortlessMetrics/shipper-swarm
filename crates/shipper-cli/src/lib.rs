@@ -960,6 +960,15 @@ pub fn report_error(error: &anyhow::Error) {
     eprintln!("{}", format_error(error));
 }
 
+/// Doctor may defer only a registry-destination policy error to its
+/// connectivity report. Other configuration errors remain fail-closed.
+fn is_registry_destination_validation_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        let message = cause.to_string();
+        message.starts_with("invalid registry '") && message.contains("' destination")
+    })
+}
+
 /// CLI entry point. Exposed for the `shipper` crate's binary target
 /// and for the `shipper-cli` crate's own `shipper-cli` binary — both
 /// are three-line `fn main() { shipper_cli::run() }` wrappers over
@@ -1067,11 +1076,16 @@ pub fn run() -> Result<std::process::ExitCode> {
             .config
             .clone()
             .unwrap_or_else(|| planned.workspace_root.join(".shipper.toml"));
-        let validation = if matches!(cli.cmd.as_ref(), Some(Commands::Doctor)) {
-            cfg.validate_for_diagnostics()
-        } else {
-            cfg.validate_with_loopback(cli.allow_loopback)
-        };
+        let validation = cfg.validate_with_loopback(cli.allow_loopback);
+        let validation = validation.or_else(|error| {
+            if matches!(cli.cmd.as_ref(), Some(Commands::Doctor))
+                && is_registry_destination_validation_error(&error)
+            {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        });
         validation.with_context(|| {
             format!(
                 "Configuration validation failed for {}",
