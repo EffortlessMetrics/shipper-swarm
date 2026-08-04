@@ -24,7 +24,7 @@ winget install miniscruff.changie
 
 These package-manager commands install the current packaged release. The hook checks for v1.25.1 exactly; when Changie advances, update the repository pin and local tool together rather than silently accepting a different formatter. A manual v1.25.1 binary can also be downloaded from Changie's GitHub Releases page and placed on `PATH`.
 
-The hook is local-only. No GitHub Actions workflow installs or runs Changie. It validates the staged Git index so unstaged working-tree edits cannot satisfy or break the check.
+The hook is local-only. No GitHub Actions workflow installs or runs Changie. It validates the staged Git index so unstaged working-tree edits cannot satisfy or break the check. The installed dispatcher also boots Cargo, `.cargo/config.toml`, and `xtask` from a private checkout of the staged index; an unstaged tooling edit cannot replace the implementation that decides the commit.
 
 ## Add a fragment
 
