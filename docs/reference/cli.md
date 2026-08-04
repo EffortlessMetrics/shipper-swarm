@@ -19,6 +19,10 @@ shipper preflight
 `status` compares local versions to the registry, and `preflight` gives the
 release-readiness verdict.
 
+`status` is read-only. Its help shows only controls that affect inspection;
+publish and resume controls remain accepted for command-line compatibility but
+are intentionally omitted from that help surface.
+
 For CI, internal developer portals, or agent consumers, `shipper doctor`,
 `shipper plan`, `shipper status`, `shipper preflight`, `shipper publish`,
 and `shipper resume` support `--format json`. `publish` and `resume` emit

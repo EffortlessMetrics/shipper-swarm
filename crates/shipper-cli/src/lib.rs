@@ -322,12 +322,11 @@ const ADVANCED_RELEASE_ARG_IDS: &[&str] = &[
 
 // Subcommands whose help should not advertise publish/resume control
 // flags. These commands either read nothing (`ci`, `completion`,
-// `config`) or only touch `state_dir` (`clean`, `inspect-*`), so listing
-// `--retry-jitter`, `--webhook-secret`, or `--max-concurrent` under them
-// is pure noise — `shipper clean --help` was 153 lines for one real flag.
-// Release-execution commands (publish, resume, preflight, rehearse,
-// status) keep the full list, because there the flags apply.
-const FIRST_RUN_HELP_SUBCOMMANDS: &[&str] = &[
+// `config`, `status`) or only touch `state_dir` (`clean`, `inspect-*`), so
+// listing `--retry-jitter`, `--webhook-secret`, or `--max-concurrent` under
+// them is pure noise. Release-execution commands (publish, resume,
+// preflight, rehearse) keep the full list, because those flags apply there.
+const NON_EXECUTING_HELP_SUBCOMMANDS: &[&str] = &[
     "plan",
     "doctor",
     "ci",
@@ -336,6 +335,7 @@ const FIRST_RUN_HELP_SUBCOMMANDS: &[&str] = &[
     "completion",
     "inspect-events",
     "inspect-receipt",
+    "status",
 ];
 const DOCTOR_HELP_HIDDEN_ARG_IDS: &[&str] = &["verbose"];
 
@@ -344,7 +344,7 @@ fn cli_command() -> Command {
     command.build();
 
     let mut command = hide_args_from_help(command, ADVANCED_RELEASE_ARG_IDS);
-    for subcommand in FIRST_RUN_HELP_SUBCOMMANDS {
+    for subcommand in NON_EXECUTING_HELP_SUBCOMMANDS {
         command = command.mut_subcommand(*subcommand, |subcommand_args| {
             let subcommand_args = hide_args_from_help(subcommand_args, ADVANCED_RELEASE_ARG_IDS);
             if *subcommand == "doctor" {
@@ -5101,6 +5101,53 @@ mod tests {
             Some(Commands::Status { watch }) => assert!(watch),
             other => panic!("expected Status, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn status_help_omits_publish_controls_but_keeps_compatibility_parsing() {
+        let mut status_command = cli_command()
+            .find_subcommand("status")
+            .expect("status command")
+            .clone();
+        let help = status_command.render_help().to_string();
+
+        assert!(
+            help.contains("--watch"),
+            "status help lost its read-only watch option"
+        );
+        for flag in [
+            "--allow-dirty",
+            "--no-verify",
+            "--max-attempts",
+            "--parallel",
+            "--webhook-secret",
+            "--encrypt-passphrase",
+        ] {
+            assert!(
+                !help.contains(flag),
+                "status help leaked publish control {flag}"
+            );
+        }
+
+        // Global flags remain parseable after a subcommand for compatibility
+        // with existing scripts, even when the command help omits controls
+        // that do not affect read-only status inspection.
+        let cli = Cli::try_parse_from([
+            "shipper",
+            "status",
+            "--no-verify",
+            "--max-attempts",
+            "2",
+            "--parallel",
+            "--webhook-secret",
+            "compatibility-value",
+        ])
+        .expect("compatibility flags should remain parseable");
+        assert!(cli.no_verify);
+        assert_eq!(cli.max_attempts, Some(2));
+        assert!(cli.parallel);
+        assert_eq!(cli.webhook_secret.as_deref(), Some("compatibility-value"));
+        assert!(matches!(cli.cmd, Some(Commands::Status { watch: false })));
     }
 
     #[test]
