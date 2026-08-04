@@ -206,8 +206,7 @@ fn run_at(root: &Path) -> Result<()> {
         ));
     }
 
-    let changie_allow_no_changes =
-        release_note_paths.is_empty() && fragment_paths.is_empty();
+    let changie_allow_no_changes = release_note_paths.is_empty() && fragment_paths.is_empty();
     let mut changie_version = None;
     let mut changie_validated = false;
     if changie_required && (changelog_exemption.is_none() || changie_surface_changed) {
@@ -848,9 +847,7 @@ mod tests {
         );
 
         let release_note_paths = ["crates/shipper-core/src/lib.rs".to_string()];
-        assert!(!(
-            release_note_paths.is_empty() && no_fragments.is_empty()
-        ));
+        assert!(!(release_note_paths.is_empty() && no_fragments.is_empty()));
     }
 
     #[test]
