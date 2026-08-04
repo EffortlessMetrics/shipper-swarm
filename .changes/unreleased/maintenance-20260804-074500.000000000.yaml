@@ -1,0 +1,6 @@
+kind: maintenance
+body: Establish a lossless pre-Changie history baseline and local round-trip proof.
+time: 2026-08-04T07:45:00Z
+custom:
+  Audience: Maintainers
+  Importance: Maintenance
