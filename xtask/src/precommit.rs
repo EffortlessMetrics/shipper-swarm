@@ -148,6 +148,14 @@ pub(crate) fn uninstall() -> Result<()> {
 
 fn run_at(root: &Path) -> Result<()> {
     let staged = staged_paths(root)?;
+    let indexed_symlinks = indexed_symlink_paths(root)?;
+    if !indexed_symlinks.is_empty() {
+        bail!(
+            "pre-commit refuses to execute Cargo or Changie from a staged index containing symbolic links because a link can escape the private snapshot: {}; replace the links with regular files or land a separately reviewed containment policy before retrying",
+            indexed_symlinks.join(", ")
+        );
+    }
+
     let base_ref =
         env::var("SHIPPER_PRECOMMIT_BASE").unwrap_or_else(|_| DEFAULT_BASE_REF.to_string());
     let branch_paths = changed_paths_from_base(root, &base_ref)?;
@@ -450,6 +458,48 @@ fn staged_paths(root: &Path) -> Result<Vec<String>> {
     parse_nul_paths(&output.stdout)
 }
 
+fn indexed_symlink_paths(root: &Path) -> Result<Vec<String>> {
+    let output = command_output(
+        root,
+        "git",
+        ["-c", "core.quotepath=false", "ls-files", "-s", "-z"],
+    )
+    .context("failed to enumerate staged index modes")?;
+    if !output.status.success() {
+        bail!(
+            "failed to enumerate staged index modes: {}",
+            output_text(&output)
+        );
+    }
+    parse_index_symlink_paths(&output.stdout)
+}
+
+fn parse_index_symlink_paths(bytes: &[u8]) -> Result<Vec<String>> {
+    let mut paths = Vec::new();
+    for record in bytes.split(|byte| *byte == 0) {
+        if record.is_empty() {
+            continue;
+        }
+        let Some(tab) = record.iter().position(|byte| *byte == b'\t') else {
+            bail!("Git index record did not contain a path separator")
+        };
+        let metadata = &record[..tab];
+        let mode = metadata
+            .split(|byte| *byte == b' ')
+            .next()
+            .unwrap_or_default();
+        if mode == b"120000" {
+            paths.push(
+                String::from_utf8(record[tab + 1..].to_vec())
+                    .context("Git symlink path was not UTF-8")?,
+            );
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
 fn changed_paths_from_base(root: &Path, base_ref: &str) -> Result<Option<Vec<String>>> {
     let verify_ref = format!("{base_ref}^{{commit}}");
     let verify = command_output(root, "git", ["rev-parse", "--verify", verify_ref.as_str()])
@@ -656,7 +706,7 @@ fn git_text(root: &Path, args: &[&str]) -> Result<String> {
 
 fn hook_script() -> String {
     format!(
-        "#!/bin/sh\n{HOOK_MARKER}\nset -eu\nrepo_root=$(git rev-parse --show-toplevel)\nsnapshot=$(mktemp -d \"${{TMPDIR:-/tmp}}/shipper-precommit-hook.XXXXXX\")\ncleanup() {{\n  rm -rf \"$snapshot\"\n}}\ntrap 'status=$?; trap - EXIT HUP INT TERM; cleanup || true; exit \"$status\"' EXIT\ntrap 'exit 129' HUP\ntrap 'exit 130' INT\ntrap 'exit 143' TERM\nprefix=\"$snapshot/\"\ngit -C \"$repo_root\" checkout-index --all --force --prefix=\"$prefix\"\ncd \"$snapshot\"\nexport {PRECOMMIT_HOOK_ENV}=1\nexport {PRECOMMIT_REPO_ROOT_ENV}=\"$repo_root\"\nexport CARGO_TARGET_DIR=\"$repo_root/target/precommit-staged\"\ncargo run --locked --manifest-path \"$snapshot/xtask/Cargo.toml\" --package xtask -- precommit run\n"
+        "#!/bin/sh\n{HOOK_MARKER}\nset -eu\nrepo_root=$(git rev-parse --show-toplevel)\nif git -C \"$repo_root\" ls-files -s | grep -q '^120000 '; then\n  echo 'pre-commit: symbolic links in the staged index are not supported because they can escape the private snapshot' >&2\n  exit 1\nfi\nsnapshot=$(mktemp -d \"${{TMPDIR:-/tmp}}/shipper-precommit-hook.XXXXXX\")\ncleanup() {{\n  rm -rf \"$snapshot\"\n}}\ntrap 'status=$?; trap - EXIT HUP INT TERM; cleanup || true; exit \"$status\"' EXIT\ntrap 'exit 129' HUP\ntrap 'exit 130' INT\ntrap 'exit 143' TERM\nprefix=\"$snapshot/\"\ngit -C \"$repo_root\" checkout-index --all --force --prefix=\"$prefix\"\ncd \"$snapshot\"\nexport {PRECOMMIT_HOOK_ENV}=1\nexport {PRECOMMIT_REPO_ROOT_ENV}=\"$repo_root\"\nexport CARGO_TARGET_DIR=\"$repo_root/target/precommit-staged\"\ncargo run --locked --manifest-path \"$snapshot/xtask/Cargo.toml\" --package xtask -- precommit run\n"
     )
 }
 
@@ -811,6 +861,8 @@ mod tests {
     fn installed_hook_dispatches_to_staged_sources() {
         let script = hook_script();
         assert!(script.contains(HOOK_MARKER));
+        assert!(script.contains("ls-files -s"));
+        assert!(script.contains("^120000 "));
         assert!(script.contains("git -C \"$repo_root\" checkout-index"));
         assert!(script.contains("--manifest-path \"$snapshot/xtask/Cargo.toml\""));
         assert!(script.contains(PRECOMMIT_REPO_ROOT_ENV));
@@ -818,6 +870,17 @@ mod tests {
         assert!(script.contains("cleanup || true"));
         assert!(script.contains("status=$?"));
         assert!(!script.contains("exec cargo precommit run"));
+    }
+
+    #[test]
+    fn index_symlink_records_are_detected() -> Result<()> {
+        let records = b"100644 1111111111111111111111111111111111111111 0\tCargo.toml\0\
+120000 2222222222222222222222222222222222222222 0\tlinked docs/guide.md\0";
+        assert_eq!(
+            parse_index_symlink_paths(records)?,
+            vec!["linked docs/guide.md".to_string()]
+        );
+        Ok(())
     }
 
     #[test]
