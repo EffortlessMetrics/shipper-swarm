@@ -145,8 +145,8 @@ pub(crate) fn uninstall() -> Result<()> {
 
 fn run_at(root: &Path) -> Result<()> {
     let staged = staged_paths(root)?;
-    let base_ref = env::var("SHIPPER_PRECOMMIT_BASE")
-        .unwrap_or_else(|_| DEFAULT_BASE_REF.to_string());
+    let base_ref =
+        env::var("SHIPPER_PRECOMMIT_BASE").unwrap_or_else(|_| DEFAULT_BASE_REF.to_string());
     let branch_paths = changed_paths_from_base(root, &base_ref)?;
     let base_ref_available = branch_paths.is_some();
     let branch_paths = branch_paths.unwrap_or_default();
@@ -195,9 +195,7 @@ fn run_at(root: &Path) -> Result<()> {
         })
         .unwrap_or_default();
 
-    if !release_note_paths.is_empty()
-        && fragment_paths.is_empty()
-        && changelog_exemption.is_none()
+    if !release_note_paths.is_empty() && fragment_paths.is_empty() && changelog_exemption.is_none()
     {
         failures.push(format!(
             "release-note-relevant staged paths require a branch-local Changie fragment: {}; run `changie new`, stage `.changes/unreleased/*.yaml`, and retry. For a genuinely non-user-facing exception, set {CHANGELOG_EXEMPT_ENV} to a substantive reason for this commit",
@@ -240,10 +238,7 @@ fn run_at(root: &Path) -> Result<()> {
     write_receipt(root, &receipt)?;
 
     eprintln!("pre-commit staged paths: {}", staged.len());
-    eprintln!(
-        "release-note-relevant paths: {}",
-        release_note_paths.len()
-    );
+    eprintln!("release-note-relevant paths: {}", release_note_paths.len());
     eprintln!("branch-local fragments: {}", fragment_paths.len());
     if let Some(reason) = changelog_exemption.as_deref() {
         eprintln!("changelog exemption: {reason}");
@@ -267,14 +262,16 @@ fn run_at(root: &Path) -> Result<()> {
 }
 
 fn changelog_exemption() -> Result<Option<String>> {
-    let Some(raw) = env::var_os(CHANGELOG_EXEMPT_ENV) else {
+    parse_changelog_exemption(env::var_os(CHANGELOG_EXEMPT_ENV).as_deref())
+}
+
+fn parse_changelog_exemption(raw: Option<&OsStr>) -> Result<Option<String>> {
+    let Some(raw) = raw else {
         return Ok(None);
     };
     let reason = raw.to_string_lossy().trim().to_string();
     if reason.len() < 12 {
-        bail!(
-            "{CHANGELOG_EXEMPT_ENV} must contain a substantive reason of at least 12 characters"
-        );
+        bail!("{CHANGELOG_EXEMPT_ENV} must contain a substantive reason of at least 12 characters");
     }
     Ok(Some(reason))
 }
@@ -325,8 +322,7 @@ fn validate_changie(snapshot: &Path) -> Result<String> {
 }
 
 fn write_receipt(root: &Path, input: &ReceiptInput<'_>) -> Result<()> {
-    let head =
-        git_text(root, &["rev-parse", "HEAD"]).unwrap_or_else(|_| "unborn".to_string());
+    let head = git_text(root, &["rev-parse", "HEAD"]).unwrap_or_else(|_| "unborn".to_string());
     let receipt = json!({
         "schema_version": RECEIPT_SCHEMA_VERSION,
         "generated_at": Utc::now().to_rfc3339(),
@@ -396,12 +392,8 @@ fn staged_paths(root: &Path) -> Result<Vec<String>> {
 
 fn changed_paths_from_base(root: &Path, base_ref: &str) -> Result<Option<Vec<String>>> {
     let verify_ref = format!("{base_ref}^{{commit}}");
-    let verify = command_output(
-        root,
-        "git",
-        ["rev-parse", "--verify", verify_ref.as_str()],
-    )
-    .context("failed to verify the pre-commit base ref")?;
+    let verify = command_output(root, "git", ["rev-parse", "--verify", verify_ref.as_str()])
+        .context("failed to verify the pre-commit base ref")?;
     if !verify.status.success() {
         return Ok(None);
     }
@@ -448,10 +440,7 @@ fn create_staged_snapshot(root: &Path) -> Result<Snapshot> {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let path = env::temp_dir().join(format!(
-        "shipper-precommit-{}-{nonce}",
-        std::process::id()
-    ));
+    let path = env::temp_dir().join(format!("shipper-precommit-{}-{nonce}", std::process::id()));
     fs::create_dir_all(&path)
         .with_context(|| format!("failed to create staged snapshot {}", path.display()))?;
 
@@ -654,9 +643,7 @@ mod tests {
         assert!(is_release_note_relevant(
             "docs/how-to/publish-missing-workspace-crates.md"
         ));
-        assert!(is_release_note_relevant(
-            ".github/workflows/release.yml"
-        ));
+        assert!(is_release_note_relevant(".github/workflows/release.yml"));
         assert!(is_release_note_relevant("rust-toolchain.toml"));
     }
 
@@ -682,9 +669,7 @@ mod tests {
         assert!(is_unreleased_fragment(
             ".changes/unreleased/fixed-20260804-120000.yaml"
         ));
-        assert!(!is_unreleased_fragment(
-            ".changes/unreleased/.gitkeep"
-        ));
+        assert!(!is_unreleased_fragment(".changes/unreleased/.gitkeep"));
         assert!(!is_unreleased_fragment(".changes/0.5.0.md"));
         assert!(!is_unreleased_fragment("docs/change.yaml"));
     }
@@ -697,9 +682,7 @@ mod tests {
             HookState::Current
         );
         assert_eq!(
-            hook_state_from_text(Some(
-                "#!/bin/sh\n# shipper-swarm pre-commit hook v0\n"
-            )),
+            hook_state_from_text(Some("#!/bin/sh\n# shipper-swarm pre-commit hook v0\n")),
             HookState::Stale
         );
         assert_eq!(
@@ -717,8 +700,13 @@ mod tests {
     }
 
     #[test]
-    fn changelog_exemption_requires_a_substantive_reason() {
-        assert_eq!("test-only inline module".len(), 23);
-        assert!("too short".len() < 12);
+    fn changelog_exemption_requires_a_substantive_reason() -> Result<()> {
+        assert_eq!(parse_changelog_exemption(None)?, None);
+        assert!(parse_changelog_exemption(Some(OsStr::new("too short"))).is_err());
+        assert_eq!(
+            parse_changelog_exemption(Some(OsStr::new("test-only inline module")))?,
+            Some("test-only inline module".to_string())
+        );
+        Ok(())
     }
 }
