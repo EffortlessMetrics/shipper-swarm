@@ -488,7 +488,10 @@ fn create_private_snapshot_dir() -> Result<PathBuf> {
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => {
                 return Err(error).with_context(|| {
-                    format!("failed to create private snapshot directory {}", path.display())
+                    format!(
+                        "failed to create private snapshot directory {}",
+                        path.display()
+                    )
                 });
             }
         }
