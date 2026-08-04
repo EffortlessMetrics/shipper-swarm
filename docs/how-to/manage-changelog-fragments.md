@@ -18,6 +18,8 @@ cargo precommit install
 cargo precommit status
 ```
 
+Use a packaged or release binary that reports v1.25.1. Homebrew and Winget install the current packaged release; a manual v1.25.1 asset is available from Changie's GitHub Releases page. When Changie advances, update the repository pin and local binary together rather than silently accepting changed rendering behavior.
+
 The hook installer is idempotent and refuses to overwrite a foreign hook. Remove only the Shipper-owned hook with:
 
 ```bash
