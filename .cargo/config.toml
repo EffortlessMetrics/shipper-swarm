@@ -9,3 +9,8 @@ xtask = "run --package xtask --"
 # implementation used by the repository-owned Git hook. Keep the local gate on
 # the reviewed lockfile rather than resolving dependency changes during commit.
 precommit = "run --locked --package xtask -- precommit"
+
+# Local release-maintainer proof: require the pinned Changie binary, render a
+# dry-run merge, and compare it with the tracked changelog. This is not a CI
+# alias and no workflow installs Changie.
+changelog-roundtrip = "run --locked --package xtask --bin changie-roundtrip --"
