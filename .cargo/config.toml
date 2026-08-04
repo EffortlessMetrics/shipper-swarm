@@ -1,4 +1,5 @@
 # Cargo alias config for the shipper workspace.
+# exact-head proof pulse; removed by the next commit
 
 [alias]
 # `cargo xtask <cmd>` -> `cargo run --package xtask --bin xtask -- <cmd>`
