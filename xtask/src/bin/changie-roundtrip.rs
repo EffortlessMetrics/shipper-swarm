@@ -29,8 +29,8 @@ fn main() -> Result<()> {
         bail!("Changie merge dry-run failed: {}", output_text(&merge));
     }
 
-    let rendered = String::from_utf8(merge.stdout)
-        .context("Changie merge output was not valid UTF-8")?;
+    let rendered =
+        String::from_utf8(merge.stdout).context("Changie merge output was not valid UTF-8")?;
     let tracked_path = root.join("CHANGELOG.md");
     let tracked = fs::read_to_string(&tracked_path)
         .with_context(|| format!("failed to read {}", tracked_path.display()))?;
@@ -90,7 +90,24 @@ fn normalize_final_newline(text: &str) -> &str {
         .unwrap_or(text)
 }
 
+fn trailing_newline_count(mut text: &str) -> usize {
+    let mut count = 0;
+    loop {
+        if let Some(rest) = text.strip_suffix("\r\n") {
+            text = rest;
+            count += 1;
+        } else if let Some(rest) = text.strip_suffix('\n') {
+            text = rest;
+            count += 1;
+        } else {
+            return count;
+        }
+    }
+}
+
 fn first_mismatch(rendered: &str, tracked: &str) -> String {
+    let rendered_trailing_newlines = trailing_newline_count(rendered);
+    let tracked_trailing_newlines = trailing_newline_count(tracked);
     let rendered = normalize_final_newline(rendered);
     let tracked = normalize_final_newline(tracked);
     let rendered_lines: Vec<&str> = rendered.lines().collect();
@@ -116,7 +133,23 @@ fn first_mismatch(rendered: &str, tracked: &str) -> String {
         );
     }
 
-    "The files differ outside the permitted final-newline normalization.".to_string()
+    if rendered_trailing_newlines != tracked_trailing_newlines {
+        return format!(
+            "Trailing-newline mismatch: rendered {rendered_trailing_newlines}; tracked {tracked_trailing_newlines}. Zero or one final newline is permitted, but additional trailing blank lines are not."
+        );
+    }
+
+    let shared_bytes = rendered.len().min(tracked.len());
+    let offset = rendered
+        .bytes()
+        .zip(tracked.bytes())
+        .position(|(left, right)| left != right)
+        .unwrap_or(shared_bytes);
+    format!(
+        "Byte-level mismatch at offset {offset}: rendered {} bytes; tracked {} bytes.",
+        rendered.len(),
+        tracked.len()
+    )
 }
 
 fn command_output<I, S>(cwd: &Path, program: &str, args: I) -> io::Result<Output>
@@ -162,6 +195,13 @@ mod tests {
     }
 
     #[test]
+    fn trailing_newlines_are_counted_by_logical_line_ending() {
+        assert_eq!(trailing_newline_count("body"), 0);
+        assert_eq!(trailing_newline_count("body\n"), 1);
+        assert_eq!(trailing_newline_count("body\r\n\r\n"), 2);
+    }
+
+    #[test]
     fn mismatch_reports_the_first_different_line() {
         assert_eq!(
             first_mismatch("one\ntwo\n", "one\nthree"),
@@ -174,6 +214,14 @@ mod tests {
         assert_eq!(
             first_mismatch("one\n", "one\ntwo\n"),
             "Line-count mismatch after line 1: rendered 1 lines; tracked 2 lines."
+        );
+    }
+
+    #[test]
+    fn mismatch_reports_additional_trailing_blank_lines() {
+        assert_eq!(
+            first_mismatch("one\n", "one\n\n"),
+            "Trailing-newline mismatch: rendered 1; tracked 2. Zero or one final newline is permitted, but additional trailing blank lines are not."
         );
     }
 }
