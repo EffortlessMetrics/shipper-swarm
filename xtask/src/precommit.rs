@@ -198,7 +198,7 @@ fn run_at(root: &Path) -> Result<()> {
     if !release_note_paths.is_empty() && fragment_paths.is_empty() && changelog_exemption.is_none()
     {
         failures.push(format!(
-            "release-note-relevant staged paths require a branch-local Changie fragment: {}; run `changie new`, stage `.changes/unreleased/*.yaml`, and retry. For a genuinely non-user-facing exception, set {CHANGELOG_EXEMPT_ENV} to a substantive reason for this commit",
+            "release-note-relevant staged paths require a branch-local Changie fragment: {}; run `changie new`, stage `.changes/unreleased/*.yaml`, and retry. For a genuinely non-user-facing exception, set {CHANGELOG_EXEMPT_ENV} to a substantive reason of at least 12 characters for this commit",
             release_note_paths.join(", ")
         ));
     }
@@ -488,11 +488,13 @@ fn is_release_note_relevant(path: &str) -> bool {
             | "rust-toolchain.toml"
             | ".github/workflows/release.yml"
             | "docs/INVARIANTS.md"
+            | "docs/README.md"
             | "docs/configuration.md"
             | "docs/failure-modes.md"
             | "docs/preflight.md"
             | "docs/product.md"
             | "docs/readiness.md"
+            | "docs/release-runbook.md"
     ) {
         return true;
     }
@@ -509,10 +511,13 @@ fn is_release_note_relevant(path: &str) -> bool {
     if !path.starts_with("crates/") {
         return false;
     }
+    if is_test_artifact(path) {
+        return false;
+    }
     if path.ends_with("/Cargo.toml") || path.ends_with("/README.md") {
         return true;
     }
-    path.contains("/src/") && !is_test_artifact(path)
+    path.contains("/src/")
 }
 
 fn is_test_artifact(path: &str) -> bool {
@@ -650,6 +655,8 @@ mod tests {
         assert!(is_release_note_relevant(
             "docs/how-to/publish-missing-workspace-crates.md"
         ));
+        assert!(is_release_note_relevant("docs/README.md"));
+        assert!(is_release_note_relevant("docs/release-runbook.md"));
         assert!(is_release_note_relevant(".github/workflows/release.yml"));
         assert!(is_release_note_relevant("rust-toolchain.toml"));
     }
@@ -658,6 +665,9 @@ mod tests {
     fn test_policy_and_internal_surfaces_are_automatically_exempt() {
         assert!(!is_release_note_relevant(
             "crates/shipper-core/tests/publish.rs"
+        ));
+        assert!(!is_release_note_relevant(
+            "crates/shipper-core/tests/fixtures/example/Cargo.toml"
         ));
         assert!(!is_release_note_relevant(
             "crates/shipper-core/src/engine/tests.rs"
