@@ -131,7 +131,7 @@ The tree-equality check is blocking:
 
 ```bash
 test "$(git rev-parse swarm/main)" = "$SWARM_SHA"
-test "$(git rev-parse \"$SWARM_SHA^{tree}\")" = "$SWARM_TREE"
+test "$(git rev-parse "$SWARM_SHA^{tree}")" = "$SWARM_TREE"
 test "$(git rev-parse HEAD^{tree})" = "$SWARM_TREE"
 ```
 

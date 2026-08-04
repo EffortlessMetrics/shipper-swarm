@@ -11,7 +11,6 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const CHANGIE_VERSION: &str = "1.25.1";
 
@@ -24,19 +23,12 @@ fn main() -> Result<()> {
         );
     }
 
-    let mut staging = UnreleasedStaging::new(&root.join(".changes/unreleased"))?;
-    let merge_result = (|| -> Result<Output> {
-        let merge = command_output(&root, "changie", ["merge", "--dry-run"])
-            .context("failed to launch `changie merge --dry-run`")?;
-        if !merge.status.success() {
-            bail!("Changie merge dry-run failed: {}", output_text(&merge));
-        }
-        Ok(merge)
-    })();
-    staging
-        .restore()
-        .context("failed to restore unreleased Changie fragments")?;
-    let merge = merge_result?;
+    let workspace = RoundtripWorkspace::new(&root)?;
+    let merge = command_output(&workspace.root, "changie", ["merge", "--dry-run"])
+        .context("failed to launch `changie merge --dry-run`")?;
+    if !merge.status.success() {
+        bail!("Changie merge dry-run failed: {}", output_text(&merge));
+    }
 
     let rendered =
         String::from_utf8(merge.stdout).context("Changie merge output was not valid UTF-8")?;
@@ -58,93 +50,94 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-struct UnreleasedStaging {
-    staging_dir: PathBuf,
-    moved: Vec<(PathBuf, PathBuf)>,
-    restored: bool,
+struct RoundtripWorkspace {
+    root: PathBuf,
 }
 
-impl UnreleasedStaging {
-    fn new(original_dir: &Path) -> Result<Self> {
-        let parent = original_dir
-            .parent()
-            .context("unreleased directory has no parent")?;
-        let suffix = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .context("system clock is before the Unix epoch")?
-            .as_nanos();
-        let staging_dir = parent.join(format!(
-            ".roundtrip-unreleased-{suffix}-{}",
+impl RoundtripWorkspace {
+    fn new(source_root: &Path) -> Result<Self> {
+        let suffix = chrono::Utc::now()
+            .timestamp_nanos_opt()
+            .context("current time is outside chrono's nanosecond range")?;
+        let root = std::env::temp_dir().join(format!(
+            "shipper-changie-roundtrip-{suffix}-{}",
             std::process::id()
         ));
-        fs::create_dir(&staging_dir)
-            .with_context(|| format!("failed to create {}", staging_dir.display()))?;
-
-        let mut moved = Vec::new();
+        fs::create_dir(&root).with_context(|| format!("failed to create {}", root.display()))?;
         let result = (|| -> Result<()> {
-            for entry in fs::read_dir(original_dir)
-                .with_context(|| format!("failed to read {}", original_dir.display()))?
-            {
-                let entry = entry.context("failed to inspect an unreleased entry")?;
-                let original = entry.path();
-                if original.extension().and_then(OsStr::to_str) != Some("yaml") {
-                    continue;
-                }
-                let file_name = original
-                    .file_name()
-                    .context("unreleased entry has no file name")?;
-                let staged = staging_dir.join(file_name);
-                fs::rename(&original, &staged).with_context(|| {
-                    format!(
-                        "failed to stage {} for the Changie round trip",
-                        original.display()
-                    )
-                })?;
-                moved.push((original, staged));
-            }
+            copy_file(source_root, &root, ".changie.yaml")?;
+            copy_file(source_root, &root, "CHANGELOG.md")?;
+            copy_directory(&source_root.join(".changes"), &root.join(".changes"), true)?;
+            fs::create_dir_all(root.join(".changes/unreleased"))?;
             Ok(())
         })();
 
         if let Err(error) = result {
-            for (original, staged) in moved.iter().rev() {
-                let _ = fs::rename(staged, original);
-            }
-            let _ = fs::remove_dir(&staging_dir);
+            let _ = fs::remove_dir_all(&root);
             return Err(error);
         }
 
-        Ok(Self {
-            staging_dir,
-            moved,
-            restored: false,
-        })
-    }
-
-    fn restore(&mut self) -> Result<()> {
-        for (original, staged) in self.moved.iter().rev() {
-            if staged.exists() {
-                fs::rename(staged, original).with_context(|| {
-                    format!(
-                        "failed to restore staged fragment to {}",
-                        original.display()
-                    )
-                })?;
-            }
-        }
-        fs::remove_dir(&self.staging_dir)
-            .with_context(|| format!("failed to remove {}", self.staging_dir.display()))?;
-        self.restored = true;
-        Ok(())
+        Ok(Self { root })
     }
 }
 
-impl Drop for UnreleasedStaging {
-    fn drop(&mut self) {
-        if self.restored {
-            return;
+fn copy_file(source_root: &Path, destination_root: &Path, relative: &str) -> Result<()> {
+    let source = source_root.join(relative);
+    let destination = destination_root.join(relative);
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(&source, &destination).with_context(|| {
+        format!(
+            "failed to copy {} into the Changie round-trip workspace",
+            source.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn copy_directory(source: &Path, destination: &Path, skip_unreleased: bool) -> Result<()> {
+    fs::create_dir_all(destination)
+        .with_context(|| format!("failed to create {}", destination.display()))?;
+    for entry in
+        fs::read_dir(source).with_context(|| format!("failed to read {}", source.display()))?
+    {
+        let entry = entry.context("failed to inspect a Changie source entry")?;
+        let source_path = entry.path();
+        let file_name = entry.file_name();
+        if skip_unreleased && file_name == "unreleased" {
+            continue;
         }
-        if let Err(error) = self.restore() {
-            eprintln!("warning: failed to restore unreleased fragments: {error:#}");
+        let destination_path = destination.join(&file_name);
+        let file_type = entry
+            .file_type()
+            .context("failed to inspect a Changie source entry type")?;
+        if file_type.is_dir() {
+            copy_directory(&source_path, &destination_path, false)?;
+        } else if file_type.is_file() {
+            fs::copy(&source_path, &destination_path).with_context(|| {
+                format!(
+                    "failed to copy {} into the Changie round-trip workspace",
+                    source_path.display()
+                )
+            })?;
+        } else {
+            bail!(
+                "unsupported Changie source entry: {}",
+                source_path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+impl Drop for RoundtripWorkspace {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_dir_all(&self.root) {
+            eprintln!(
+                "warning: failed to remove Changie round-trip workspace {}: {error}",
+                self.root.display()
+            );
         }
     }
 }

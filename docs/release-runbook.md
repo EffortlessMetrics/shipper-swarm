@@ -113,7 +113,8 @@ The generated version file is an editorial starting point. Reorder and edit it t
 Run from a clean checkout of `shipper-swarm/main` after every intended release change is merged:
 
 ```bash
-git status --short
+set -euo pipefail
+test -z "$(git status --short)"
 git rev-parse HEAD
 git rev-parse HEAD^{tree}
 
@@ -134,9 +135,9 @@ cargo xtask check-doc-contracts --mode advisory
 cargo xtask policy-report
 
 PACKAGE_TARGET_DIR=$(mktemp -d)
+trap 'rm -rf "$PACKAGE_TARGET_DIR"' EXIT
 CARGO_TARGET_DIR="$PACKAGE_TARGET_DIR" \
   cargo package --workspace --locked --exclude xtask
-rm -rf "$PACKAGE_TARGET_DIR"
 
 cargo changelog-roundtrip
 git diff --check
@@ -235,7 +236,7 @@ git fetch origin --prune --tags
 git fetch swarm --prune
 
 test "$(git rev-parse swarm/main)" = "$SWARM_SHA"
-test "$(git rev-parse \"$SWARM_SHA^{tree}\")" = "$SWARM_TREE"
+test "$(git rev-parse "$SWARM_SHA^{tree}")" = "$SWARM_TREE"
 git merge-base --is-ancestor origin/main "$SWARM_SHA"
 
 git switch -c sync/shipper-swarm-YYYY-MM-DD origin/main
@@ -277,6 +278,11 @@ RELEASE_TREE=$(git rev-parse HEAD^{tree})
 
 Any release-authority-only change after promotion must be a separate reviewed PR. Update the approved SHA and rerun the full candidate gate after it lands.
 
+Record an immutable release-workflow ref and its definition SHA in the release
+record. If the GitHub CLI accepts the approved commit as a workflow ref, use
+`RELEASE_SHA`; otherwise use a protected release-preparation tag and record its
+definition SHA before dispatching.
+
 Run the section 3 commands again in the release-authority checkout, including `cargo changelog-roundtrip`.
 
 ### Non-publishing rehearsal
@@ -284,9 +290,13 @@ Run the section 3 commands again in the release-authority checkout, including `c
 Dispatch against the exact approved SHA:
 
 ```bash
+WORKFLOW_REF=<recorded-immutable-release-workflow-ref>
+WORKFLOW_SHA=<recorded-release-workflow-definition-sha>
+test "$(git rev-parse "$WORKFLOW_REF^{commit}")" = "$WORKFLOW_SHA"
+
 gh workflow run release.yml \
   --repo EffortlessMetrics/shipper \
-  --ref main \
+  --ref "$WORKFLOW_REF" \
   -f mode=rehearse \
   -f ref="$RELEASE_SHA"
 ```
@@ -298,7 +308,7 @@ The rehearsal must produce and retain plan, preflight, state, event, receipt, au
 ```bash
 gh workflow run release.yml \
   --repo EffortlessMetrics/shipper \
-  --ref main \
+  --ref "$WORKFLOW_REF" \
   -f mode=binaries \
   -f ref="$RELEASE_SHA"
 ```
@@ -391,14 +401,17 @@ Use the release record's approved version and SHA. Identify the run that uploade
 ```bash
 VERSION=<recorded-release-version>
 RELEASE_SHA=<recorded-approved-release-sha>
+WORKFLOW_REF=<recorded-immutable-release-workflow-ref>
+WORKFLOW_SHA=<recorded-release-workflow-definition-sha>
 
 git fetch origin --prune --tags
 test "$(git rev-parse origin/main)" = "$RELEASE_SHA"
-test "$(git rev-list -n 1 \"v$VERSION\")" = "$RELEASE_SHA"
+test "$(git rev-list -n 1 "v$VERSION")" = "$RELEASE_SHA"
+test "$(git rev-parse "$WORKFLOW_REF^{commit}")" = "$WORKFLOW_SHA"
 
 gh workflow run release.yml \
   --repo EffortlessMetrics/shipper \
-  --ref main \
+  --ref "$WORKFLOW_REF" \
   -f mode=resume \
   -f ref="$RELEASE_SHA" \
   -f artifact_run_id=<source-run-id>

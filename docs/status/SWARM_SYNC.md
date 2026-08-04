@@ -63,16 +63,17 @@ Before pushing the sync branch, prove:
 
 ```bash
 test "$(git rev-parse swarm/main)" = "$SWARM_SHA"
-test "$(git rev-parse \"$SWARM_SHA^{tree}\")" = "$SWARM_TREE"
+test "$(git rev-parse "$SWARM_SHA^{tree}")" = "$SWARM_TREE"
 git merge-base --is-ancestor origin/main "$SWARM_SHA"
 
 test "$(git rev-parse HEAD^{tree})" = \
   "$SWARM_TREE"
 ```
 
-The first command proves release-authority main is an ancestor of the frozen
-swarm candidate. The second proves the non-fast-forward promotion merge did not
-change the candidate tree.
+The SHA and tree checks prove that the fetched swarm ref is still the recorded
+frozen candidate. The ancestry check proves release-authority main is an
+ancestor of that candidate. The final check proves the non-fast-forward
+promotion merge did not change the candidate tree.
 
 A conflict, manual content edit, or tree mismatch is not an acceptable
 promotion repair. Stop, reconcile release-authority changes back into swarm,

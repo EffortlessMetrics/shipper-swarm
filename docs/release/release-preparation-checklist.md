@@ -27,6 +27,8 @@ Command blocks use a POSIX shell for compactness. On Windows, run the equivalent
 | Release-authority approved SHA | `TBD` |
 | Release-authority approved tree | `TBD` |
 | Release rehearsal run | `TBD` |
+| Release workflow ref | `TBD` |
+| Release workflow definition SHA | `TBD` |
 | Binary matrix run | `TBD` |
 | Interruption/resume proof | `TBD` |
 | Tag | `TBD` |
@@ -114,7 +116,13 @@ changie batch 9999.0.0-baseline-proof --dry-run --allow-no-changes=true
 Run from a clean checkout of the proposed swarm candidate:
 
 ```bash
-git status --short
+set -euo pipefail
+SWARM_SHA=<recorded-candidate-sha>
+SWARM_TREE=<recorded-candidate-tree>
+
+test -z "$(git status --short)"
+test "$(git rev-parse HEAD)" = "$SWARM_SHA"
+test "$(git rev-parse HEAD^{tree})" = "$SWARM_TREE"
 git rev-parse HEAD
 git rev-parse HEAD^{tree}
 
@@ -135,9 +143,9 @@ cargo xtask check-doc-contracts --mode advisory
 cargo xtask policy-report
 
 PACKAGE_TARGET_DIR=$(mktemp -d)
+trap 'rm -rf "$PACKAGE_TARGET_DIR"' EXIT
 CARGO_TARGET_DIR="$PACKAGE_TARGET_DIR" \
   cargo package --workspace --locked --exclude xtask
-rm -rf "$PACKAGE_TARGET_DIR"
 
 cargo changelog-roundtrip
 git diff --check
@@ -235,7 +243,7 @@ git fetch origin --prune --tags
 git fetch swarm --prune
 
 test "$(git rev-parse swarm/main)" = "$SWARM_SHA"
-test "$(git rev-parse \"$SWARM_SHA^{tree}\")" = "$SWARM_TREE"
+test "$(git rev-parse "$SWARM_SHA^{tree}")" = "$SWARM_TREE"
 git merge-base --is-ancestor origin/main "$SWARM_SHA"
 
 git switch -c sync/shipper-swarm-YYYY-MM-DD origin/main
@@ -265,6 +273,9 @@ Confirm repository and identity:
 
 ```bash
 test "$(gh repo view --json nameWithOwner -q .nameWithOwner)" = "EffortlessMetrics/shipper"
+git fetch origin --prune --tags
+git switch main
+git reset --hard origin/main
 RELEASE_SHA=$(git rev-parse origin/main)
 RELEASE_TREE=$(git rev-parse origin/main^{tree})
 ```
@@ -275,18 +286,27 @@ RELEASE_TREE=$(git rev-parse origin/main^{tree})
 - [ ] `cargo changelog-roundtrip` passes in the release-authority checkout.
 - [ ] Release credentials were not exposed to untrusted code or copied into swarm.
 
+Record an immutable release-workflow ref and its definition SHA in the release
+record. If the GitHub CLI accepts the approved commit as a workflow ref, use
+`RELEASE_SHA`; otherwise use a protected release-preparation tag and record its
+definition SHA before dispatching.
+
 Dispatch non-publishing proof on the exact SHA:
 
 ```bash
+WORKFLOW_REF=<recorded-immutable-release-workflow-ref>
+WORKFLOW_SHA=<recorded-release-workflow-definition-sha>
+test "$(git rev-parse "$WORKFLOW_REF^{commit}")" = "$WORKFLOW_SHA"
+
 gh workflow run release.yml \
   --repo EffortlessMetrics/shipper \
-  --ref main \
+  --ref "$WORKFLOW_REF" \
   -f mode=rehearse \
   -f ref="$RELEASE_SHA"
 
 gh workflow run release.yml \
   --repo EffortlessMetrics/shipper \
-  --ref main \
+  --ref "$WORKFLOW_REF" \
   -f mode=binaries \
   -f ref="$RELEASE_SHA"
 ```
