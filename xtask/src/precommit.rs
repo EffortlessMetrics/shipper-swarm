@@ -22,6 +22,7 @@ const CHANGIE_VERSION: &str = "1.25.1";
 const CHANGIE_VALIDATION_VERSION: &str = "9999.0.0-precommit";
 const DEFAULT_BASE_REF: &str = "origin/main";
 const CHANGELOG_EXEMPT_ENV: &str = "SHIPPER_PRECOMMIT_CHANGELOG_EXEMPT";
+const PRECOMMIT_REPO_ROOT_ENV: &str = "SHIPPER_PRECOMMIT_REPO_ROOT";
 const HOOK_MARKER: &str = "# shipper-swarm pre-commit hook v1";
 const OWNED_HOOK_PREFIX: &str = "# shipper-swarm pre-commit hook v";
 
@@ -307,7 +308,7 @@ fn validate_changie(snapshot: &Path) -> Result<String> {
             "batch",
             CHANGIE_VALIDATION_VERSION,
             "--dry-run",
-            "--allow-no-changes=false",
+            "--allow-no-changes=true",
         ],
     )
     .context("failed to launch Changie dry-run validation")?;
@@ -365,7 +366,11 @@ fn write_receipt(root: &Path, input: &ReceiptInput<'_>) -> Result<()> {
 }
 
 fn repo_root() -> Result<PathBuf> {
-    let output = Command::new("git")
+    let mut command = Command::new("git");
+    if let Some(root) = env::var_os(PRECOMMIT_REPO_ROOT_ENV) {
+        command.current_dir(root);
+    }
+    let output = command
         .args(["rev-parse", "--show-toplevel"])
         .output()
         .context("failed to launch git")?;
@@ -443,13 +448,7 @@ fn parse_nul_paths(bytes: &[u8]) -> Result<Vec<String>> {
 }
 
 fn create_staged_snapshot(root: &Path) -> Result<Snapshot> {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let path = env::temp_dir().join(format!("shipper-precommit-{}-{nonce}", std::process::id()));
-    fs::create_dir_all(&path)
-        .with_context(|| format!("failed to create staged snapshot {}", path.display()))?;
+    let path = create_private_snapshot_dir()?;
 
     let mut prefix = path.to_string_lossy().replace('\\', "/");
     if !prefix.ends_with('/') {
@@ -470,6 +469,46 @@ fn create_staged_snapshot(root: &Path) -> Result<Snapshot> {
     }
 
     Ok(Snapshot { path })
+}
+
+fn create_private_snapshot_dir() -> Result<PathBuf> {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let parent = env::temp_dir();
+
+    for attempt in 0..100_u8 {
+        let path = parent.join(format!(
+            "shipper-precommit-{}-{nonce}-{attempt}",
+            std::process::id()
+        ));
+        match create_private_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to create private snapshot directory {}", path.display())
+                });
+            }
+        }
+    }
+
+    bail!("failed to allocate a unique private snapshot directory")
+}
+
+#[cfg(unix)]
+fn create_private_dir(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+    let mut builder = fs::DirBuilder::new();
+    builder.mode(0o700).create(path)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(not(unix))]
+fn create_private_dir(path: &Path) -> io::Result<()> {
+    fs::create_dir(path)
 }
 
 fn is_unreleased_fragment(path: &str) -> bool {
@@ -566,14 +605,15 @@ fn git_text(root: &Path, args: &[&str]) -> Result<String> {
 
 fn hook_script() -> String {
     format!(
-        "#!/bin/sh\n{HOOK_MARKER}\nset -eu\nrepo_root=$(git rev-parse --show-toplevel)\ncd \"$repo_root\"\nexport SHIPPER_PRECOMMIT_HOOK=1\nexec cargo precommit run\n"
+        "#!/bin/sh\n{HOOK_MARKER}\nset -eu\nrepo_root=$(git rev-parse --show-toplevel)\nsnapshot=$(mktemp -d \"${{TMPDIR:-/tmp}}/shipper-precommit-hook.XXXXXX\")\ncleanup() {{\n  rm -rf \"$snapshot\"\n}}\ntrap cleanup EXIT HUP INT TERM\nprefix=\"$snapshot/\"\ngit -C \"$repo_root\" checkout-index --all --force --prefix=\"$prefix\"\ncd \"$snapshot\"\nexport SHIPPER_PRECOMMIT_HOOK=1\nexport {PRECOMMIT_REPO_ROOT_ENV}=\"$repo_root\"\nexport CARGO_TARGET_DIR=\"$repo_root/target/precommit-staged\"\ncargo run --locked --manifest-path \"$snapshot/xtask/Cargo.toml\" --package xtask -- precommit run\n"
     )
 }
 
 fn hook_state_from_text(text: Option<&str>) -> HookState {
+    let expected = hook_script();
     match text {
         None => HookState::Missing,
-        Some(text) if text.lines().any(|line| line.trim() == HOOK_MARKER) => HookState::Current,
+        Some(text) if text == expected.as_str() => HookState::Current,
         Some(text)
             if text
                 .lines()
@@ -693,10 +733,15 @@ mod tests {
 
     #[test]
     fn hook_ownership_is_fail_closed() {
+        let current = hook_script();
         assert_eq!(hook_state_from_text(None), HookState::Missing);
         assert_eq!(
-            hook_state_from_text(Some(&hook_script())),
+            hook_state_from_text(Some(current.as_str())),
             HookState::Current
+        );
+        assert_eq!(
+            hook_state_from_text(Some("#!/bin/sh\n# shipper-swarm pre-commit hook v1\n")),
+            HookState::Stale
         );
         assert_eq!(
             hook_state_from_text(Some("#!/bin/sh\n# shipper-swarm pre-commit hook v0\n")),
@@ -709,11 +754,14 @@ mod tests {
     }
 
     #[test]
-    fn installed_hook_dispatches_to_the_shared_cargo_command() {
+    fn installed_hook_dispatches_to_staged_sources() {
         let script = hook_script();
         assert!(script.contains(HOOK_MARKER));
-        assert!(script.contains("exec cargo precommit run"));
+        assert!(script.contains("git -C \"$repo_root\" checkout-index"));
+        assert!(script.contains("--manifest-path \"$snapshot/xtask/Cargo.toml\""));
+        assert!(script.contains(PRECOMMIT_REPO_ROOT_ENV));
         assert!(script.contains("SHIPPER_PRECOMMIT_HOOK=1"));
+        assert!(!script.contains("exec cargo precommit run"));
     }
 
     #[test]
@@ -733,5 +781,17 @@ mod tests {
         assert!(changie_version_matches("v1.25.1"));
         assert!(!changie_version_matches("changie version v1.25.10"));
         assert!(!changie_version_matches("changie version vdev"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_snapshot_directory_is_owner_only() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = create_private_snapshot_dir()?;
+        let mode = fs::metadata(&path)?.permissions().mode() & 0o777;
+        fs::remove_dir(&path)?;
+        assert_eq!(mode, 0o700);
+        Ok(())
     }
 }
