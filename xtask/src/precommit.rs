@@ -294,7 +294,7 @@ fn validate_changie(snapshot: &Path) -> Result<String> {
     }
 
     let version = output_text(&version_output);
-    if !version.contains(CHANGIE_VERSION) {
+    if !changie_version_matches(&version) {
         bail!(
             "expected Changie v{CHANGIE_VERSION}, received `{version}`; align the local tool before committing"
         );
@@ -319,6 +319,13 @@ fn validate_changie(snapshot: &Path) -> Result<String> {
     }
 
     Ok(version)
+}
+
+fn changie_version_matches(output: &str) -> bool {
+    output
+        .split_whitespace()
+        .map(|token| token.trim_start_matches('v'))
+        .any(|token| token == CHANGIE_VERSION)
 }
 
 fn write_receipt(root: &Path, input: &ReceiptInput<'_>) -> Result<()> {
@@ -708,5 +715,13 @@ mod tests {
             Some("test-only inline module".to_string())
         );
         Ok(())
+    }
+
+    #[test]
+    fn changie_version_match_is_exact() {
+        assert!(changie_version_matches("changie version v1.25.1"));
+        assert!(changie_version_matches("v1.25.1"));
+        assert!(!changie_version_matches("changie version v1.25.10"));
+        assert!(!changie_version_matches("changie version vdev"));
     }
 }
