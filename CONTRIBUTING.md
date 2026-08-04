@@ -127,9 +127,10 @@ cargo precommit
 Test-only, snapshot-only, ordinary CI, policy, agent-control, and internal status
 changes are exempt by path. For an unusual behavior-preserving change inside a
 normally user-facing source path, set
-`SHIPPER_PRECOMMIT_CHANGELOG_EXEMPT` to a substantive reason for that commit;
-the reason is retained in the local receipt and should be stated in the PR.
-See [.changes/README.md](.changes/README.md) for the full workflow.
+`SHIPPER_PRECOMMIT_CHANGELOG_EXEMPT` to a substantive reason of at least 12
+characters for that commit; the reason is retained in the local receipt and
+should be stated in the PR. See [.changes/README.md](.changes/README.md) for the
+full workflow.
 
 No GitHub Actions workflow installs or runs Changie. The hook is bypassable and
 is not merge authority; normal hosted Rust, policy, and review gates remain
