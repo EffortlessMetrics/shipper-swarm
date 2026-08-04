@@ -26,6 +26,8 @@ These package-manager commands install the current packaged release. The hook ch
 
 The hook is local-only. No GitHub Actions workflow installs or runs Changie. It validates the staged Git index so unstaged working-tree edits cannot satisfy or break the check. The installed dispatcher also boots Cargo, `.cargo/config.toml`, and `xtask` from a private checkout of the staged index; an unstaged tooling edit cannot replace the implementation that decides the commit.
 
+Before materializing or executing the staged checkout, both the installed dispatcher and the Rust command reject any Git index entry with symbolic-link mode `120000`. This repository-owned gate deliberately does not follow staged symlinks, because a link can escape the private checkout and expose unstaged files to Cargo or Changie. A future contained-symlink policy must be reviewed separately before symlinks can enter this execution surface.
+
 ## Add a fragment
 
 For a user-visible or compatibility-relevant change:
