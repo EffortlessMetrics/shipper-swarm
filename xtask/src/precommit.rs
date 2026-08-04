@@ -706,7 +706,7 @@ fn git_text(root: &Path, args: &[&str]) -> Result<String> {
 
 fn hook_script() -> String {
     format!(
-        "#!/bin/sh\n{HOOK_MARKER}\nset -eu\nrepo_root=$(git rev-parse --show-toplevel)\nif git -C \"$repo_root\" ls-files -s | grep -q '^120000 '; then\n  echo 'pre-commit: symbolic links in the staged index are not supported because they can escape the private snapshot' >&2\n  exit 1\nfi\nsnapshot=$(mktemp -d \"${{TMPDIR:-/tmp}}/shipper-precommit-hook.XXXXXX\")\ncleanup() {{\n  rm -rf \"$snapshot\"\n}}\ntrap 'status=$?; trap - EXIT HUP INT TERM; cleanup || true; exit \"$status\"' EXIT\ntrap 'exit 129' HUP\ntrap 'exit 130' INT\ntrap 'exit 143' TERM\nprefix=\"$snapshot/\"\ngit -C \"$repo_root\" checkout-index --all --force --prefix=\"$prefix\"\ncd \"$snapshot\"\nexport {PRECOMMIT_HOOK_ENV}=1\nexport {PRECOMMIT_REPO_ROOT_ENV}=\"$repo_root\"\nexport CARGO_TARGET_DIR=\"$repo_root/target/precommit-staged\"\ncargo run --locked --manifest-path \"$snapshot/xtask/Cargo.toml\" --package xtask -- precommit run\n"
+        "#!/bin/sh\n{HOOK_MARKER}\nset -eu\nrepo_root=$(git rev-parse --show-toplevel)\nif git -C \"$repo_root\" ls-files -s | grep -q '^120000 '; then\n  echo 'pre-commit: symbolic links in the staged index are not supported because they can escape the private snapshot' >&2\n  exit 1\nfi\nsnapshot=$(mktemp -d \"${{TMPDIR:-/tmp}}/shipper-precommit-hook.XXXXXX\")\ncleanup() {{\n  rm -rf \"$snapshot\"\n}}\ntrap 'status=$?; trap - EXIT HUP INT TERM; cleanup || true; exit \"$status\"' EXIT\ntrap 'exit 129' HUP\ntrap 'exit 130' INT\ntrap 'exit 143' TERM\nprefix=\"$snapshot/\"\ngit -C \"$repo_root\" checkout-index --all --force --prefix=\"$prefix\"\ncd \"$snapshot\"\nexport {PRECOMMIT_HOOK_ENV}=1\nexport {PRECOMMIT_REPO_ROOT_ENV}=\"$repo_root\"\nexport CARGO_TARGET_DIR=\"$repo_root/target/precommit-staged\"\ncargo run --locked --manifest-path \"$snapshot/xtask/Cargo.toml\" --package xtask --bin xtask -- precommit run\n"
     )
 }
 
@@ -865,6 +865,7 @@ mod tests {
         assert!(script.contains("^120000 "));
         assert!(script.contains("git -C \"$repo_root\" checkout-index"));
         assert!(script.contains("--manifest-path \"$snapshot/xtask/Cargo.toml\""));
+        assert!(script.contains("--package xtask --bin xtask -- precommit run"));
         assert!(script.contains(PRECOMMIT_REPO_ROOT_ENV));
         assert!(script.contains(PRECOMMIT_HOOK_ENV));
         assert!(script.contains("cleanup || true"));
