@@ -41,13 +41,19 @@ The operating policy is documented in
 - Source-repo sync and credential rules are mirrored in
   [docs/status/SWARM_SYNC.md](docs/status/SWARM_SYNC.md).
 
-1. Fork the development repository
+1. Fork the development repository.
 2. Clone your fork:
    ```bash
    git clone https://github.com/YOUR_USERNAME/shipper-swarm.git
    cd shipper-swarm
    ```
-3. Create a branch for your changes:
+3. Install Changie v1.25.1 and the repository-owned local pre-commit hook:
+   ```bash
+   changie --version
+   cargo precommit install
+   cargo precommit status
+   ```
+4. Create a branch for your changes:
    ```bash
    git checkout -b my-feature
    ```
@@ -60,6 +66,7 @@ The operating policy is documented in
 
 - **Rust**: 1.95 or later (check with `rustc --version`)
 - **Git**: For version control
+- **Changie**: v1.25.1 for local change-fragment authoring and pre-commit validation
 - **cargo-nextest** (optional): For better test output
 
 ### Building
@@ -91,8 +98,43 @@ cargo run --package shipper -- plan --help
 - Check existing [issues](https://github.com/effortlessmetrics/shipper/issues)
   for related work. Issue tracking remains in the release-authority repo until
   it is explicitly moved.
-- For significant changes, open an issue first to discuss the approach
-- Keep changes focused and atomic
+- For significant changes, open an issue first to discuss the approach.
+- Keep changes focused and atomic.
+
+### Changelog fragments
+
+Shipper uses Changie as a **local pre-commit authoring contract**, not a CI gate.
+For user-visible, compatibility-relevant, security, recovery, or operational
+changes, create and stage a fragment with the implementation:
+
+```bash
+changie new
+```
+
+The resulting YAML file lives under `.changes/unreleased/`. Choose its kind,
+primary audience, and release-note importance deliberately so the release-prep
+campaign can promote headline changes, retain useful detail, and demote
+maintenance work without reconstructing intent months later.
+
+The repository-owned hook validates the staged Git index, checks that relevant
+changes have a branch-local fragment, validates Changie v1.25.1 with a dry-run
+batch, and writes `target/hooks/pre-commit.json`:
+
+```bash
+cargo precommit
+```
+
+Test-only, snapshot-only, ordinary CI, policy, agent-control, and internal status
+changes are exempt by path. For an unusual behavior-preserving change inside a
+normally user-facing source path, set
+`SHIPPER_PRECOMMIT_CHANGELOG_EXEMPT` to a substantive reason of at least 12
+characters for that commit; the reason is retained in the local receipt and
+should be stated in the PR. See [.changes/README.md](.changes/README.md) for the
+full workflow.
+
+No GitHub Actions workflow installs or runs Changie. The hook is bypassable and
+is not merge authority; normal hosted Rust, policy, and review gates remain
+separate.
 
 ### Code Organization
 
@@ -149,10 +191,10 @@ cargo test --package shipper
 
 ### Writing Tests
 
-- Place unit tests in `#[cfg(test)]` modules within source files
-- Place integration tests in the `tests/` directory
-- Use descriptive test names: `given_X_when_Y_then_Z`
-- Add property tests for complex logic using `proptest`
+- Place unit tests in `#[cfg(test)]` modules within source files.
+- Place integration tests in the `tests/` directory.
+- Use descriptive test names: `given_X_when_Y_then_Z`.
+- Add property tests for complex logic using `proptest`.
 
 ---
 
@@ -160,23 +202,31 @@ cargo test --package shipper
 
 ### Before Submitting
 
-1. **Format your code:**
+1. **Run the staged local gate:**
+   ```bash
+   cargo precommit
+   ```
+
+2. **Format your code:**
    ```bash
    cargo fmt
    ```
 
-2. **Run clippy:**
+3. **Run clippy:**
    ```bash
    cargo clippy --workspace -- -D warnings
    ```
    All warnings must be resolved.
 
-3. **Run all tests:**
+4. **Run all tests:**
    ```bash
    cargo test --workspace
    ```
 
-4. **Update documentation** if your changes affect user-facing behavior.
+5. **Update documentation** if your changes affect user-facing behavior.
+
+6. **Check the Changie disposition:** include a fragment for a relevant change,
+   or state the explicit exemption reason in the PR.
 
 ### PR Guidelines
 
@@ -186,9 +236,10 @@ cargo test --package shipper
   - `docs: update configuration examples`
   - `refactor: simplify publish loop`
 
-- **Description**: Explain what and why, not how
-- **Link issues**: Reference any related issues
-- **Small PRs**: Keep changes focused and reviewable
+- **Description**: Explain what and why, not how.
+- **Link issues**: Reference any related issues.
+- **Small PRs**: Keep changes focused and reviewable.
+- **Changelog disposition**: identify the fragment or the reason no fragment is needed.
 - **Required gate**: `shipper-swarm/main` requires `Shipper Rust Small Result`;
   do not require route-specific implementation jobs directly because only one
   route runs per attempt.
@@ -198,11 +249,11 @@ cargo test --package shipper
 
 ### Review Process
 
-1. All PRs require at least one approval
-2. CI must pass (tests, clippy, fmt)
-3. Address review feedback promptly
+1. All PRs require at least one approval.
+2. CI must pass (tests, clippy, fmt).
+3. Address review feedback promptly.
 4. Squash-merge normal development PRs into `shipper-swarm/main`; merge
-   source-backfill PRs with a merge commit
+   source-backfill PRs with a merge commit.
 
 ---
 
@@ -210,8 +261,8 @@ cargo test --package shipper
 
 ### Formatting
 
-- Use `cargo fmt` before committing
-- Maximum line length: 100 characters (rustfmt default)
+- Use `cargo fmt` before committing.
+- Maximum line length: 100 characters (rustfmt default).
 
 ### Naming Conventions
 
@@ -224,15 +275,15 @@ cargo test --package shipper
 
 ### Documentation
 
-- Add rustdoc comments (`///`) for public items
-- Include examples in doc comments when helpful
-- Keep line comments (`//`) for implementation notes
+- Add rustdoc comments (`///`) for public items.
+- Include examples in doc comments when helpful.
+- Keep line comments (`//`) for implementation notes.
 
 ### Error Handling
 
-- Use `Result<T, E>` for fallible operations
-- Use `thiserror` for custom error types
-- Provide actionable error messages
+- Use `Result<T, E>` for fallible operations.
+- Use `thiserror` for custom error types.
+- Provide actionable error messages.
 
 ### Commit Messages
 

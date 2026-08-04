@@ -57,6 +57,13 @@ cargo test --test cli_e2e -p shipper-cli           # CLI integration tests only
 cargo fmt --all
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+# Local staged-tree and changelog authoring
+changie new                                        # add a release-note fragment
+cargo precommit                                    # validate staged index + fragment
+cargo precommit install                            # install repository-owned hook
+cargo precommit status
+cargo precommit uninstall
 ```
 
 ## Architecture
@@ -107,7 +114,7 @@ In `state.json`, package status is at `.packages[].state.state`, not `.packages[
 
 ## Product context
 
-[**MISSION.md**](MISSION.md) is the north star — mission, vision, audience, and the nine convictions that produce every design decision. Read it before scoping non-trivial work.
+[**MISSION.md**](MISSION.md) is the north star — mission, vision, audience, beliefs, and the nine convictions that produce every design decision. Read it before scoping non-trivial work.
 
 Cargo 1.90 stabilized multi-package workspace publishing. Shipper's value is what Cargo still doesn't do, organized as nine competencies: **Prove, Survive, Reconcile, Narrate, Remediate, Harden, Profile, Integrate, Ergonomics**. See [ROADMAP.md](ROADMAP.md) and master tracking issue [#109](https://github.com/EffortlessMetrics/shipper/issues/109). **Reconcile is now stable:** ambiguous `cargo publish` outcomes must reconcile against registry truth and stop on `StillUnknown` instead of blind-retrying. The current open proof lane is Trusted Publishing default evidence; keep fallback/default claims bounded by `.shipper-meta/goals/active.toml` and [docs/status/SUPPORT_TIERS.md](docs/status/SUPPORT_TIERS.md).
 
@@ -122,6 +129,9 @@ Cargo 1.90 stabilized multi-package workspace publishing. Shipper's value is wha
 - Configuration can be set via `.shipper.toml` in workspace root; CLI flags override config file values. Config sections: `[policy]`, `[verify]`, `[readiness]`, `[output]`, `[lock]`, `[retry]`, `[flags]`, `[parallel]`, `[registry]`. Ownership/git settings live in `[flags]`, not a separate `[preflight]` section.
 - `config init` uses `-o`/`--output`; `config validate` uses `-p`/`--path`.
 - `prefer_index` and `index_path` (readiness) are config-file-only settings with no CLI flags.
+- User-visible, compatibility, security, recovery, and operational changes carry a Changie fragment under `.changes/unreleased/`. The repository-owned local pre-commit hook validates the staged index; Changie is intentionally not a CI gate.
+- Test-only and internal changes are exempt by path. For an exceptional behavior-preserving edit inside a normally user-facing path, use `SHIPPER_PRECOMMIT_CHANGELOG_EXEMPT` with a substantive reason of at least 12 characters and repeat that reason in the PR.
+- The tracked changelog through 0.5.0 is the pre-Changie baseline. Do not run `changie merge` until the focused baseline-migration PR proves a lossless round trip; never batch 0.5.0 again. See [docs/how-to/manage-changelog-fragments.md](docs/how-to/manage-changelog-fragments.md).
 
 ## Automated review
 

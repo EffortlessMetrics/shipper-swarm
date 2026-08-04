@@ -4,3 +4,8 @@
 # `cargo xtask <cmd>` -> `cargo run --package xtask -- <cmd>`
 # See xtask/src/main.rs and docs/policy/NON_RUST_ROLLOUT.md.
 xtask = "run --package xtask --"
+
+# `cargo precommit [run|install|status|uninstall]` delegates to the same xtask
+# implementation used by the repository-owned Git hook. Keep the local gate on
+# the reviewed lockfile rather than resolving dependency changes during commit.
+precommit = "run --locked --package xtask -- precommit"

@@ -19,6 +19,7 @@ mod mutants;
 mod no_panic;
 mod package_surface;
 mod policy_report;
+mod precommit;
 mod propose;
 mod ripr;
 mod workflow_checks;
@@ -92,6 +93,10 @@ enum Command {
     /// Validate source-of-truth document contracts.
     #[command(name = "check-doc-contracts")]
     CheckDocContracts(DocContractsArgs),
+
+    /// Run or manage the repository-owned local pre-commit gate.
+    #[command(name = "precommit")]
+    Precommit(PrecommitArgs),
 
     /// Run the advisory ripr lane (`ripr pilot --root .`) — #182.
     ///
@@ -188,6 +193,25 @@ struct DocContractsArgs {
     mode: doc_contracts::Mode,
 }
 
+#[derive(Args, Debug)]
+struct PrecommitArgs {
+    /// Hook lifecycle action. With no action, validates the staged index.
+    #[command(subcommand)]
+    action: Option<PrecommitAction>,
+}
+
+#[derive(Subcommand, Debug)]
+enum PrecommitAction {
+    /// Validate the staged index and branch-local Changie disposition.
+    Run,
+    /// Install the repository-owned pre-commit dispatcher.
+    Install,
+    /// Report whether the effective hook is current.
+    Status,
+    /// Remove only a repository-owned current or stale hook.
+    Uninstall,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
@@ -213,6 +237,12 @@ fn main() -> Result<()> {
         Command::CheckLintPolicy => clippy_checks::check_lint_policy()?,
         Command::CheckClippyExceptions => clippy_checks::check_clippy_exceptions()?,
         Command::CheckDocContracts(args) => doc_contracts::check(args.mode)?,
+        Command::Precommit(args) => match args.action.unwrap_or(PrecommitAction::Run) {
+            PrecommitAction::Run => precommit::run()?,
+            PrecommitAction::Install => precommit::install()?,
+            PrecommitAction::Status => precommit::status()?,
+            PrecommitAction::Uninstall => precommit::uninstall()?,
+        },
         Command::RiprPr(args) => ripr::ripr_pr(&args)?,
         Command::RepoRiprBadgeArtifacts => ripr::repo_badge_artifacts()?,
         Command::MutantsPr(args) => mutants::mutants_pr(&args)?,
