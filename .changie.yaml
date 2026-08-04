@@ -1,10 +1,10 @@
 # Changie configuration for Shipper's PR-time change-fragment ledger.
 #
 # Changie is deliberately enforced by the repository-owned local pre-commit
-# hook, not by GitHub Actions. The hook validates the staged index and can be
-# bypassed with `git commit --no-verify`; it is a shift-left authoring aid, not
-# merge authority. Release notes and CHANGELOG.md remain reviewed release
-# artifacts.
+# hook, not by GitHub Actions. The hook validates the staged index and supports
+# a reasoned local exemption for genuinely non-user-facing changes inside
+# normally user-facing paths; it is a shift-left authoring aid, not merge
+# authority. Release notes and CHANGELOG.md remain reviewed release artifacts.
 #
 # Version selection is a deliberate release decision. There are no automatic
 # semver bump mappings in this file.
@@ -15,8 +15,8 @@ headerPath: header.tpl.md
 changelogPath: CHANGELOG.md
 versionExt: md
 
-# Filesystem-friendly and conflict-resistant fragment names.
-fragmentFileFormat: '{{.Kind}}-{{.Time.Format "20060102-150405"}}'
+# Nanosecond precision avoids filename collisions under parallel agent work.
+fragmentFileFormat: '{{.Kind}}-{{.Time.Format "20060102-150405.000000000"}}'
 versionFileFormat: '{{.VersionNoPrefix}}.md'
 versionFormat: '## [{{.VersionNoPrefix}}] - {{.Time.Format "2006-01-02"}}'
 
