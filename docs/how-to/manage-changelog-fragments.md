@@ -2,7 +2,7 @@
 
 Shipper uses Changie to capture release-note material at commit time while the implementation context is still fresh. This is a **local pre-commit workflow**, not a GitHub Actions gate.
 
-The fragment ledger helps the release-prep campaign answer three different editorial questions without treating every merged PR as equally important:
+The fragment ledger helps release preparation answer three different editorial questions without treating every merged PR as equally important:
 
 - What should lead the release notes?
 - What belongs in the detailed changelog?
@@ -96,15 +96,19 @@ The hook is shift-left authoring support. It is intentionally bypassable, depend
 
 No workflow should install Changie merely to repeat this gate. The lasting evidence is the reviewed fragment and the release documents produced from the fragment ledger, not a green hosted hook simulation.
 
-## Prepare a release
+## Historical migration boundary
 
-Shipper's historical changelog predates Changie. Until the focused catch-up campaign has reconciled the history and created a Changie baseline, do not run `changie merge`.
+The tracked changelog through **0.5.0** predates Changie. This intake contract begins collecting forward-looking fragments, but it does not itself rewrite existing release history.
 
-After the baseline exists, release preparation is:
+Until a focused baseline-migration PR imports the existing 0.5.0-and-earlier text and proves a lossless round trip, do not run `changie merge` and do not batch 0.5.0 again. The migration must demonstrate that a clean merge reproduces the tracked `CHANGELOG.md` exactly and must retain a regression check against accidental history truncation.
+
+## Prepare a later release
+
+After the baseline migration exists, release preparation is:
 
 ```bash
-changie batch 0.5.0
-# Curate and review .changes/0.5.0.md.
+changie batch <next-version>
+# Curate and review .changes/<next-version>.md.
 changie merge
 ```
 
