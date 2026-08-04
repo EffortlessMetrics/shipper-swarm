@@ -74,7 +74,7 @@ The hook expects a fragment for changes to:
 
 It automatically exempts test directories and files, snapshots, ordinary CI workflows, policy ledgers, agent-control files, xtask internals, and internal status documents.
 
-Inline test-only edits inside a production source file cannot be inferred safely from the path. For a genuine exception, keep the rest of the hook active and provide a substantive reason:
+Inline test-only edits inside a production source file cannot be inferred safely from the path. For a genuine exception, keep the rest of the hook active and provide a substantive reason of at least 12 characters:
 
 ```bash
 SHIPPER_PRECOMMIT_CHANGELOG_EXEMPT="test-only inline module" git commit
