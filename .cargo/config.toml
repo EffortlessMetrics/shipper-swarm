@@ -6,5 +6,6 @@
 xtask = "run --package xtask --"
 
 # `cargo precommit [run|install|status|uninstall]` delegates to the same xtask
-# implementation used by the repository-owned Git hook.
-precommit = "run --package xtask -- precommit"
+# implementation used by the repository-owned Git hook. Keep the local gate on
+# the reviewed lockfile rather than resolving dependency changes during commit.
+precommit = "run --locked --package xtask -- precommit"
