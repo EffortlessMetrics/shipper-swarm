@@ -96,20 +96,35 @@ The hook is shift-left authoring support. It is intentionally bypassable, depend
 
 No workflow should install Changie merely to repeat this gate. The lasting evidence is the reviewed fragment and the release documents produced from the fragment ledger, not a green hosted hook simulation.
 
-## Historical migration boundary
+## Historical baseline and round-trip proof
 
-The tracked changelog through **0.5.0** predates Changie. This intake contract begins collecting forward-looking fragments, but it does not itself rewrite existing release history.
+The tracked changelog through **0.5.0** predates Changie. `.changes/0.5.0.md` retains the complete historical body from 0.5.0 through 0.1.0, while `.changes/header.tpl.md` retains the title, format statement, and `[Unreleased]` heading.
 
-Until a focused baseline-migration PR imports the existing 0.5.0-and-earlier text and proves a lossless round trip, do not run `changie merge` and do not batch 0.5.0 again. The migration must demonstrate that a clean merge reproduces the tracked `CHANGELOG.md` exactly and must retain a regression check against accidental history truncation.
+This intentionally treats pre-Changie history as one opaque baseline. Do not split, reorder, or rewrite the old sections merely to make them look like newly batched Changie output.
+
+Validate the baseline locally with:
+
+```bash
+cargo changelog-roundtrip
+```
+
+The command:
+
+1. requires the exact pinned Changie v1.25.1 binary;
+2. runs `changie merge --dry-run` from the repository root;
+3. compares the rendered output with `CHANGELOG.md`;
+4. permits only a final-newline difference;
+5. reports the first mismatching line or missing-history line count.
+
+Do not run a writing merge while that command fails. Never batch 0.5.0 again.
 
 ## Prepare a later release
-
-After the baseline migration exists, release preparation is:
 
 ```bash
 changie batch <next-version>
 # Curate and review .changes/<next-version>.md.
 changie merge
+cargo changelog-roundtrip
 ```
 
-The batch output is an editorial starting point. Release notes, migration notes, support-tier claims, and readiness evidence still receive focused review. Changie does not select the release version.
+The final round-trip proof must pass before the generated changelog is accepted. The batch output is still an editorial starting point: release notes, migration notes, support-tier claims, and readiness evidence receive focused review, and Changie does not select the release version.
