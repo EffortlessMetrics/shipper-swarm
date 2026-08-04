@@ -74,23 +74,30 @@ target/hooks/pre-commit.json
 
 Use `SHIPPER_PRECOMMIT_BASE=<ref>` when the branch should be compared with something other than `origin/main`.
 
-## Historical boundary
+## Historical baseline
 
-The tracked changelog through **0.5.0** predates Changie and is the migration baseline. This intake PR does not rewrite that history and must not batch 0.5.0 again.
+The tracked changelog through **0.5.0** predates Changie. Its complete 0.5.0-and-earlier body is retained verbatim in `.changes/0.5.0.md`; `.changes/header.tpl.md` owns the changelog title and `[Unreleased]` boundary.
 
-Do **not** run `changie merge` until the follow-up baseline migration has:
+The single baseline file is intentional. It preserves the pre-Changie document as an opaque historical record instead of splitting and reinterpreting old release prose. Later Changie version files sort above `0.5.0.md` while the historical body remains unchanged.
 
-1. imported the existing 0.5.0-and-earlier changelog text into retained Changie version files;
-2. proved that a clean `changie merge` reproduces the tracked `CHANGELOG.md` without loss or rewording;
-3. recorded the exact baseline boundary and recovery procedure;
-4. added a regression check that prevents future history truncation.
+Before changing Changie configuration, retained version files, or `CHANGELOG.md`, run:
 
-After that one-time migration, release preparation is:
+```bash
+cargo changelog-roundtrip
+```
+
+That local command requires Changie v1.25.1, renders `changie merge --dry-run`, and compares it with the tracked changelog. It permits only a final-newline difference and reports the first mismatching line. Do not run a writing `changie merge` when this proof fails.
+
+Never batch 0.5.0 again. A historical correction must deliberately update both the tracked changelog and retained baseline, pass the round-trip proof, and remain separately reviewable.
+
+## Prepare a later release
 
 ```bash
 changie batch <next-version>
 # Curate and review .changes/<next-version>.md.
+cargo changelog-roundtrip   # expected to fail until CHANGELOG.md is intentionally regenerated
 changie merge
+cargo changelog-roundtrip   # must pass on the resulting tracked state
 ```
 
 The batch output is an editorial starting point. Release notes, migration notes, support-tier claims, and readiness evidence still receive focused review. Version selection remains a deliberate release decision; Changie does not choose it.
