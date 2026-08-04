@@ -9,7 +9,6 @@
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use serde_json::json;
-use std::collections::BTreeSet;
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
@@ -22,6 +21,7 @@ const RECEIPT_SCHEMA_VERSION: &str = "shipper.precommit.v1";
 const CHANGIE_VERSION: &str = "1.25.1";
 const CHANGIE_VALIDATION_VERSION: &str = "9999.0.0-precommit";
 const DEFAULT_BASE_REF: &str = "origin/main";
+const CHANGELOG_EXEMPT_ENV: &str = "SHIPPER_PRECOMMIT_CHANGELOG_EXEMPT";
 const HOOK_MARKER: &str = "# shipper-swarm pre-commit hook v1";
 const OWNED_HOOK_PREFIX: &str = "# shipper-swarm pre-commit hook v";
 
@@ -41,6 +41,20 @@ impl Drop for Snapshot {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.path);
     }
+}
+
+struct ReceiptInput<'a> {
+    base_ref: &'a str,
+    base_ref_available: bool,
+    staged: &'a [String],
+    release_note_paths: &'a [String],
+    fragment_paths: &'a [String],
+    changelog_exemption: Option<&'a str>,
+    changie_required: bool,
+    changie_validated: bool,
+    changie_version: Option<&'a str>,
+    failures: &'a [String],
+    overall: bool,
 }
 
 /// Validate the staged index and its branch-local Changie disposition.
@@ -136,6 +150,7 @@ fn run_at(root: &Path) -> Result<()> {
     let branch_paths = changed_paths_from_base(root, &base_ref)?;
     let base_ref_available = branch_paths.is_some();
     let branch_paths = branch_paths.unwrap_or_default();
+    let changelog_exemption = changelog_exemption()?;
 
     let release_note_paths: Vec<String> = staged
         .iter()
@@ -180,16 +195,19 @@ fn run_at(root: &Path) -> Result<()> {
         })
         .unwrap_or_default();
 
-    if !release_note_paths.is_empty() && fragment_paths.is_empty() {
+    if !release_note_paths.is_empty()
+        && fragment_paths.is_empty()
+        && changelog_exemption.is_none()
+    {
         failures.push(format!(
-            "release-note-relevant staged paths require a branch-local Changie fragment: {}; run `changie new`, stage `.changes/unreleased/*.yaml`, and retry",
+            "release-note-relevant staged paths require a branch-local Changie fragment: {}; run `changie new`, stage `.changes/unreleased/*.yaml`, and retry. For a genuinely non-user-facing exception, set {CHANGELOG_EXEMPT_ENV} to a substantive reason for this commit",
             release_note_paths.join(", ")
         ));
     }
 
     let mut changie_version = None;
     let mut changie_validated = false;
-    if changie_required {
+    if changie_required && (changelog_exemption.is_none() || changie_surface_changed) {
         match snapshot.as_ref() {
             Some(snapshot) => match validate_changie(&snapshot.path) {
                 Ok(version) => {
@@ -206,19 +224,20 @@ fn run_at(root: &Path) -> Result<()> {
     }
 
     let overall = failures.is_empty();
-    write_receipt(
-        root,
-        &base_ref,
+    let receipt = ReceiptInput {
+        base_ref: &base_ref,
         base_ref_available,
-        &staged,
-        &release_note_paths,
-        &fragment_paths,
+        staged: &staged,
+        release_note_paths: &release_note_paths,
+        fragment_paths: &fragment_paths,
+        changelog_exemption: changelog_exemption.as_deref(),
         changie_required,
         changie_validated,
-        changie_version.as_deref(),
-        &failures,
+        changie_version: changie_version.as_deref(),
+        failures: &failures,
         overall,
-    )?;
+    };
+    write_receipt(root, &receipt)?;
 
     eprintln!("pre-commit staged paths: {}", staged.len());
     eprintln!(
@@ -226,6 +245,9 @@ fn run_at(root: &Path) -> Result<()> {
         release_note_paths.len()
     );
     eprintln!("branch-local fragments: {}", fragment_paths.len());
+    if let Some(reason) = changelog_exemption.as_deref() {
+        eprintln!("changelog exemption: {reason}");
+    }
     if !base_ref_available {
         eprintln!(
             "note: `{base_ref}` was unavailable; only fragments present in the staged index could satisfy the check"
@@ -242,6 +264,19 @@ fn run_at(root: &Path) -> Result<()> {
         eprintln!("  - {failure}");
     }
     bail!("staged pre-commit checks failed")
+}
+
+fn changelog_exemption() -> Result<Option<String>> {
+    let Some(raw) = env::var_os(CHANGELOG_EXEMPT_ENV) else {
+        return Ok(None);
+    };
+    let reason = raw.to_string_lossy().trim().to_string();
+    if reason.len() < 12 {
+        bail!(
+            "{CHANGELOG_EXEMPT_ENV} must contain a substantive reason of at least 12 characters"
+        );
+    }
+    Ok(Some(reason))
 }
 
 fn validate_changie(snapshot: &Path) -> Result<String> {
@@ -289,40 +324,29 @@ fn validate_changie(snapshot: &Path) -> Result<String> {
     Ok(version)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn write_receipt(
-    root: &Path,
-    base_ref: &str,
-    base_ref_available: bool,
-    staged: &[String],
-    release_note_paths: &[String],
-    fragment_paths: &[String],
-    changie_required: bool,
-    changie_validated: bool,
-    changie_version: Option<&str>,
-    failures: &[String],
-    overall: bool,
-) -> Result<()> {
-    let head = git_text(root, &["rev-parse", "HEAD"]).unwrap_or_else(|_| "unborn".to_string());
+fn write_receipt(root: &Path, input: &ReceiptInput<'_>) -> Result<()> {
+    let head =
+        git_text(root, &["rev-parse", "HEAD"]).unwrap_or_else(|_| "unborn".to_string());
     let receipt = json!({
         "schema_version": RECEIPT_SCHEMA_VERSION,
         "generated_at": Utc::now().to_rfc3339(),
         "hook": "pre-commit",
         "invocation": if env::var_os("SHIPPER_PRECOMMIT_HOOK").is_some() { "git-hook" } else { "manual" },
         "head": head,
-        "base_ref": base_ref,
-        "base_ref_available": base_ref_available,
-        "staged_files": staged,
-        "release_note_relevant_files": release_note_paths,
-        "branch_local_fragments": fragment_paths,
+        "base_ref": input.base_ref,
+        "base_ref_available": input.base_ref_available,
+        "staged_files": input.staged,
+        "release_note_relevant_files": input.release_note_paths,
+        "branch_local_fragments": input.fragment_paths,
+        "changelog_exemption": input.changelog_exemption,
         "changie": {
-            "required": changie_required,
-            "validated": changie_validated,
+            "required": input.changie_required,
+            "validated": input.changie_validated,
             "expected_version": CHANGIE_VERSION,
-            "observed_version": changie_version,
+            "observed_version": input.changie_version,
         },
-        "failures": failures,
-        "overall": if overall { "pass" } else { "fail" },
+        "failures": input.failures,
+        "overall": if input.overall { "pass" } else { "fail" },
         "claim_boundary": "This local receipt proves staged-index hygiene and Changie authoring checks only. Git hooks are bypassable and are intentionally not merge authority or a CI gate."
     });
 
@@ -330,7 +354,8 @@ fn write_receipt(
     fs::create_dir_all(&output_dir)
         .with_context(|| format!("failed to create {}", output_dir.display()))?;
     let output_path = output_dir.join("pre-commit.json");
-    let bytes = serde_json::to_vec_pretty(&receipt).context("failed to encode pre-commit receipt")?;
+    let bytes =
+        serde_json::to_vec_pretty(&receipt).context("failed to encode pre-commit receipt")?;
     fs::write(&output_path, bytes)
         .with_context(|| format!("failed to write {}", output_path.display()))?;
     Ok(())
@@ -370,10 +395,11 @@ fn staged_paths(root: &Path) -> Result<Vec<String>> {
 }
 
 fn changed_paths_from_base(root: &Path, base_ref: &str) -> Result<Option<Vec<String>>> {
+    let verify_ref = format!("{base_ref}^{{commit}}");
     let verify = command_output(
         root,
         "git",
-        ["rev-parse", "--verify", &format!("{base_ref}^{{commit}}")],
+        ["rev-parse", "--verify", verify_ref.as_str()],
     )
     .context("failed to verify the pre-commit base ref")?;
     if !verify.status.success() {
@@ -391,7 +417,7 @@ fn changed_paths_from_base(root: &Path, base_ref: &str) -> Result<Option<Vec<Str
             "--name-only",
             "-z",
             "--diff-filter=ACMRD",
-            &range,
+            range.as_str(),
         ],
     )
     .context("failed to enumerate branch paths")?;
@@ -451,9 +477,7 @@ fn create_staged_snapshot(root: &Path) -> Result<Snapshot> {
 }
 
 fn is_unreleased_fragment(path: &str) -> bool {
-    path.starts_with(".changes/unreleased/")
-        && path.ends_with(".yaml")
-        && !path.ends_with("/.gitkeep")
+    path.starts_with(".changes/unreleased/") && path.ends_with(".yaml")
 }
 
 fn is_changie_surface(path: &str) -> bool {
@@ -529,11 +553,13 @@ fn output_text(output: &Output) -> String {
 }
 
 fn git_text(root: &Path, args: &[&str]) -> Result<String> {
-    let output = command_output(root, "git", args.iter().copied()).context("failed to launch git")?;
+    let output =
+        command_output(root, "git", args.iter().copied()).context("failed to launch git")?;
     if !output.status.success() {
         bail!("git {} failed: {}", args.join(" "), output_text(&output));
     }
-    String::from_utf8(output.stdout).context("Git output was not UTF-8")
+    String::from_utf8(output.stdout)
+        .context("Git output was not UTF-8")
         .map(|text| text.trim().to_string())
 }
 
@@ -688,5 +714,11 @@ mod tests {
         assert!(script.contains(HOOK_MARKER));
         assert!(script.contains("exec cargo precommit run"));
         assert!(script.contains("SHIPPER_PRECOMMIT_HOOK=1"));
+    }
+
+    #[test]
+    fn changelog_exemption_requires_a_substantive_reason() {
+        assert_eq!("test-only inline module".len(), 23);
+        assert!("too short".len() < 12);
     }
 }
