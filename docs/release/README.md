@@ -13,7 +13,8 @@ A green swarm commit is not publication authorization. A release becomes tag-eli
 
 - [Release operator runbook](../release-runbook.md) — the ordered procedure from changelog preparation through post-release backfill.
 - [Release preparation checklist](release-preparation-checklist.md) — copy this for each candidate and record exact SHAs, trees, workflow runs, artifacts, and stop decisions.
-- [0.5.0 readiness record](0.5.0-readiness.md) — retained product and release evidence for the 0.5 line. Earlier candidate and promotion SHAs remain historical evidence, not authorization for a later candidate after `main` advances.
+- [Current 0.5.0 preparation control record](0.5.0-preparation.md) — live blockers, superseded publication identity, and the fields that must be populated by the next fresh candidate.
+- [0.5.0 readiness record](0.5.0-readiness.md) — retained product, compatibility, semver, binary, and historical candidate evidence for the 0.5 line.
 - [Swarm operation policy](../status/SWARM_OPERATION.md) — development/release authority, merge model, queue freeze, and source-backfill rules.
 - [Swarm sync policy](../status/SWARM_SYNC.md) — history-preserving promotion and backfill mechanics.
 - [Changie workflow](../how-to/manage-changelog-fragments.md) — local fragment intake, the retained pre-Changie baseline, batching, and round-trip proof.
@@ -33,4 +34,4 @@ Do not reuse a green check from a different SHA. Evidence from an earlier candid
 
 ## Current 0.5 posture
 
-The previously recorded 0.5 candidate, promotion, semver proof, and binary matrix remain useful evidence. Subsequent release-preparation changes in `shipper-swarm` reopen the exact-candidate identity, however. Before tagging, create a fresh checklist, freeze a new swarm SHA, promote it again through a merge commit, and rerun the release-authority gates on the new approved SHA.
+The previously recorded 0.5 candidate, promotion, semver proof, and binary matrix remain useful evidence. Subsequent release-preparation changes in `shipper-swarm` reopen the exact-candidate identity, however. The live [0.5.0 preparation record](0.5.0-preparation.md) therefore marks publication authorization `NO` until the focused preparation PRs merge, a new swarm SHA/tree is frozen, a fresh history-preserving promotion lands, and the release-authority gates pass on the new approved SHA.
