@@ -11,6 +11,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const CHANGIE_VERSION: &str = "1.25.1";
 
@@ -23,11 +24,19 @@ fn main() -> Result<()> {
         );
     }
 
-    let merge = command_output(&root, "changie", ["merge", "--dry-run"])
-        .context("failed to launch `changie merge --dry-run`")?;
-    if !merge.status.success() {
-        bail!("Changie merge dry-run failed: {}", output_text(&merge));
-    }
+    let mut staging = UnreleasedStaging::new(&root.join(".changes/unreleased"))?;
+    let merge_result = (|| -> Result<Output> {
+        let merge = command_output(&root, "changie", ["merge", "--dry-run"])
+            .context("failed to launch `changie merge --dry-run`")?;
+        if !merge.status.success() {
+            bail!("Changie merge dry-run failed: {}", output_text(&merge));
+        }
+        Ok(merge)
+    })();
+    staging
+        .restore()
+        .context("failed to restore unreleased Changie fragments")?;
+    let merge = merge_result?;
 
     let rendered =
         String::from_utf8(merge.stdout).context("Changie merge output was not valid UTF-8")?;
@@ -47,6 +56,97 @@ fn main() -> Result<()> {
         normalize_final_newline(&tracked).len()
     );
     Ok(())
+}
+
+struct UnreleasedStaging {
+    staging_dir: PathBuf,
+    moved: Vec<(PathBuf, PathBuf)>,
+    restored: bool,
+}
+
+impl UnreleasedStaging {
+    fn new(original_dir: &Path) -> Result<Self> {
+        let parent = original_dir
+            .parent()
+            .context("unreleased directory has no parent")?;
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .context("system clock is before the Unix epoch")?
+            .as_nanos();
+        let staging_dir = parent.join(format!(
+            ".roundtrip-unreleased-{suffix}-{}",
+            std::process::id()
+        ));
+        fs::create_dir(&staging_dir)
+            .with_context(|| format!("failed to create {}", staging_dir.display()))?;
+
+        let mut moved = Vec::new();
+        let result = (|| -> Result<()> {
+            for entry in fs::read_dir(original_dir)
+                .with_context(|| format!("failed to read {}", original_dir.display()))?
+            {
+                let entry = entry.context("failed to inspect an unreleased entry")?;
+                let original = entry.path();
+                if original.extension().and_then(OsStr::to_str) != Some("yaml") {
+                    continue;
+                }
+                let file_name = original
+                    .file_name()
+                    .context("unreleased entry has no file name")?;
+                let staged = staging_dir.join(file_name);
+                fs::rename(&original, &staged).with_context(|| {
+                    format!(
+                        "failed to stage {} for the Changie round trip",
+                        original.display()
+                    )
+                })?;
+                moved.push((original, staged));
+            }
+            Ok(())
+        })();
+
+        if let Err(error) = result {
+            for (original, staged) in moved.iter().rev() {
+                let _ = fs::rename(staged, original);
+            }
+            let _ = fs::remove_dir(&staging_dir);
+            return Err(error);
+        }
+
+        Ok(Self {
+            staging_dir,
+            moved,
+            restored: false,
+        })
+    }
+
+    fn restore(&mut self) -> Result<()> {
+        for (original, staged) in self.moved.iter().rev() {
+            if staged.exists() {
+                fs::rename(staged, original).with_context(|| {
+                    format!(
+                        "failed to restore staged fragment to {}",
+                        original.display()
+                    )
+                })?;
+            }
+        }
+        fs::remove_dir(&self.staging_dir)
+            .with_context(|| format!("failed to remove {}", self.staging_dir.display()))?;
+        self.restored = true;
+        Ok(())
+    }
+}
+
+impl Drop for UnreleasedStaging {
+    fn drop(&mut self) {
+        if self.restored {
+            return;
+        }
+        if let Err(error) = self.restore() {
+            eprintln!("warning: failed to restore unreleased fragments: {error:#}");
+        }
+    }
 }
 
 fn repo_root() -> Result<PathBuf> {

@@ -98,8 +98,9 @@ fn changie_config_preserves_the_baseline_render_contract() {
         "headerPath: header.tpl.md",
         "changelogPath: CHANGELOG.md",
         "versionExt: md",
+        "kindFormat: '### {{.Kind}}'",
         "afterChangelogHeader: 1",
-        "beforeChangelogVersion: 1",
+        "beforeChangelogVersion: 0",
     ] {
         assert!(
             config.contains(required),

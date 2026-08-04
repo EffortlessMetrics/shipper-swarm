@@ -70,11 +70,11 @@ custom:
     optional: true
 
 changeFormat: '- {{.Body}}{{if .Custom.PR}} ([#{{.Custom.PR}}](https://github.com/EffortlessMetrics/shipper-swarm/pull/{{.Custom.PR}})){{end}}'
-kindFormat: '### {{kindLabel .Kind}}'
+kindFormat: '### {{.Kind}}'
 
 newlines:
   afterChangelogHeader: 1
-  beforeChangelogVersion: 1
+  beforeChangelogVersion: 0
   afterVersion: 1
   beforeKind: 1
   afterKind: 1

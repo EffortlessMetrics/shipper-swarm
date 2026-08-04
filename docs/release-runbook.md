@@ -208,8 +208,8 @@ An earlier proof may be reused only when the checklist records both SHAs, the co
 After the gate passes on merged swarm main:
 
 ```bash
-SWARM_SHA=$(git rev-parse HEAD)
-SWARM_TREE=$(git rev-parse HEAD^{tree})
+SWARM_SHA=<recorded-frozen-swarm-sha>
+SWARM_TREE=<recorded-frozen-swarm-tree>
 printf 'swarm_sha=%s\nswarm_tree=%s\n' "$SWARM_SHA" "$SWARM_TREE"
 ```
 
@@ -234,12 +234,14 @@ git remote add swarm git@github.com:EffortlessMetrics/shipper-swarm.git 2>/dev/n
 git fetch origin --prune --tags
 git fetch swarm --prune
 
-git merge-base --is-ancestor origin/main swarm/main
+test "$(git rev-parse swarm/main)" = "$SWARM_SHA"
+test "$(git rev-parse \"$SWARM_SHA^{tree}\")" = "$SWARM_TREE"
+git merge-base --is-ancestor origin/main "$SWARM_SHA"
 
 git switch -c sync/shipper-swarm-YYYY-MM-DD origin/main
-git merge --no-ff swarm/main -m "merge: sync shipper-swarm development"
+git merge --no-ff "$SWARM_SHA" -m "merge: sync shipper-swarm development"
 
-test "$(git rev-parse HEAD^{tree})" = "$(git rev-parse swarm/main^{tree})"
+test "$(git rev-parse HEAD^{tree})" = "$SWARM_TREE"
 git diff --check
 git push -u origin sync/shipper-swarm-YYYY-MM-DD
 ```
@@ -384,9 +386,16 @@ Cargo output is a hint. Registry truth is the safety boundary. Never blind-retry
 
 ## 9. Resume an interrupted train
 
-Use the release workflow's retained artifact path. Identify the run that uploaded the last valid `.shipper` state and dispatch resume in `EffortlessMetrics/shipper`:
+Use the release record's approved version and SHA. Identify the run that uploaded the last valid `.shipper` state and dispatch resume in `EffortlessMetrics/shipper`:
 
 ```bash
+VERSION=<recorded-release-version>
+RELEASE_SHA=<recorded-approved-release-sha>
+
+git fetch origin --prune --tags
+test "$(git rev-parse origin/main)" = "$RELEASE_SHA"
+test "$(git rev-list -n 1 \"v$VERSION\")" = "$RELEASE_SHA"
+
 gh workflow run release.yml \
   --repo EffortlessMetrics/shipper \
   --ref main \
@@ -430,11 +439,14 @@ When swarm has not advanced:
 
 ```bash
 # From the shipper checkout
+FINAL_SOURCE_SHA=<recorded-final-shipper-main-sha>
+
 git fetch origin --prune --tags
 git fetch swarm --prune
 
-git merge-base --is-ancestor swarm/main origin/main
-git push swarm origin/main:main
+test "$(git rev-parse origin/main)" = "$FINAL_SOURCE_SHA"
+git merge-base --is-ancestor swarm/main "$FINAL_SOURCE_SHA"
+git push swarm "$FINAL_SOURCE_SHA":main
 ```
 
 Do not force push. If swarm advanced after freeze, use the source-backfill merge procedure in [SWARM_OPERATION.md](status/SWARM_OPERATION.md) instead of overwriting development commits.

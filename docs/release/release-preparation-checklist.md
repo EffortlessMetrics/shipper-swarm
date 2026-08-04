@@ -1,6 +1,6 @@
 # Release preparation checklist
 
-Copy this file to `docs/release/<version>-preparation.md` for each release candidate. Fill every identity and evidence field with an exact value or mark it `BLOCKED`, `NOT RUN`, or `NOT APPLICABLE` with a reason. Do not use `pending`, an in-progress job, an earlier head, or an uncited local recollection as proof.
+Copy this file to `docs/release/<version>-preparation.md` for each release candidate. Fill every identity and evidence field with an exact value or mark it `BLOCKED`, `NOT RUN`, `NOT APPLICABLE`, or `SUPERSEDED` with a reason. Do not use `pending`, an in-progress job, an earlier head, or an uncited local recollection as proof.
 
 This checklist coordinates two authorities:
 
@@ -214,8 +214,8 @@ Evidence may be reused only when the record names the earlier SHA, the new SHA, 
 ## D. Freeze the swarm candidate
 
 ```bash
-SWARM_SHA=$(git rev-parse HEAD)
-SWARM_TREE=$(git rev-parse HEAD^{tree})
+SWARM_SHA=<recorded-frozen-swarm-sha>
+SWARM_TREE=<recorded-frozen-swarm-tree>
 ```
 
 - [ ] `SWARM_SHA` is merged `shipper-swarm/main`, not a PR merge ref or branch-only commit.
@@ -234,12 +234,14 @@ git remote add swarm git@github.com:EffortlessMetrics/shipper-swarm.git 2>/dev/n
 git fetch origin --prune --tags
 git fetch swarm --prune
 
-git merge-base --is-ancestor origin/main swarm/main
+test "$(git rev-parse swarm/main)" = "$SWARM_SHA"
+test "$(git rev-parse \"$SWARM_SHA^{tree}\")" = "$SWARM_TREE"
+git merge-base --is-ancestor origin/main "$SWARM_SHA"
 
 git switch -c sync/shipper-swarm-YYYY-MM-DD origin/main
-git merge --no-ff swarm/main -m "merge: sync shipper-swarm development"
+git merge --no-ff "$SWARM_SHA" -m "merge: sync shipper-swarm development"
 
-test "$(git rev-parse HEAD^{tree})" = "$(git rev-parse swarm/main^{tree})"
+test "$(git rev-parse HEAD^{tree})" = "$SWARM_TREE"
 git diff --check
 git push -u origin sync/shipper-swarm-YYYY-MM-DD
 ```
@@ -362,11 +364,14 @@ Backfill the release-authority merge and any final release-only commits before n
 
 ```bash
 # From the shipper checkout
+FINAL_SOURCE_SHA=<recorded-final-shipper-main-sha>
+
 git fetch origin --prune --tags
 git fetch swarm --prune
 
-git merge-base --is-ancestor swarm/main origin/main
-git push swarm origin/main:main
+test "$(git rev-parse origin/main)" = "$FINAL_SOURCE_SHA"
+git merge-base --is-ancestor swarm/main "$FINAL_SOURCE_SHA"
+git push swarm "$FINAL_SOURCE_SHA":main
 ```
 
 - [ ] The ancestry check passes before the fast-forward.

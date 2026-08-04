@@ -118,7 +118,9 @@ When a candidate is frozen:
 2. prove the merged candidate, including `cargo changelog-roundtrip` locally
    with the pinned Changie binary;
 3. record `git rev-parse HEAD` and `git rev-parse HEAD^{tree}`;
-4. promote with `git merge --no-ff swarm/main` from current `shipper/main`;
+4. promote with `git merge --no-ff "$SWARM_SHA"` from current `shipper/main`,
+   after verifying the fetched `swarm/main` ref still equals the recorded
+   frozen SHA and tree;
 5. require the promotion merge tree to equal the frozen swarm tree before any
    separately reviewed release-authority-only change;
 6. merge the promotion PR with a merge commit;
@@ -128,8 +130,9 @@ When a candidate is frozen:
 The tree-equality check is blocking:
 
 ```bash
-test "$(git rev-parse HEAD^{tree})" = \
-  "$(git rev-parse swarm/main^{tree})"
+test "$(git rev-parse swarm/main)" = "$SWARM_SHA"
+test "$(git rev-parse \"$SWARM_SHA^{tree}\")" = "$SWARM_TREE"
+test "$(git rev-parse HEAD^{tree})" = "$SWARM_TREE"
 ```
 
 A conflict, manual content edit, or tree mismatch is not ordinary release

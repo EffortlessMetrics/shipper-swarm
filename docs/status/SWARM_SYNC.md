@@ -62,10 +62,12 @@ Normal swarm merges pause at that point.
 Before pushing the sync branch, prove:
 
 ```bash
-git merge-base --is-ancestor origin/main swarm/main
+test "$(git rev-parse swarm/main)" = "$SWARM_SHA"
+test "$(git rev-parse \"$SWARM_SHA^{tree}\")" = "$SWARM_TREE"
+git merge-base --is-ancestor origin/main "$SWARM_SHA"
 
 test "$(git rev-parse HEAD^{tree})" = \
-  "$(git rev-parse swarm/main^{tree})"
+  "$SWARM_TREE"
 ```
 
 The first command proves release-authority main is an ancestor of the frozen
