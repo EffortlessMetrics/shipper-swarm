@@ -132,7 +132,13 @@ fn doctor_help() {
 
 #[test]
 fn first_run_help_omits_release_execution_controls() {
-    let help_cases: &[&[&str]] = &[&["--help"], &["plan", "--help"], &["doctor", "--help"]];
+    let help_cases: &[&[&str]] = &[
+        &["--help"],
+        &["plan", "--help"],
+        &["doctor", "--help"],
+        &["plan-yank", "--help"],
+        &["fix-forward", "--help"],
+    ];
 
     for args in help_cases {
         let output = shipper_cmd().args(*args).output().expect("failed to run");
@@ -182,6 +188,8 @@ fn hidden_release_controls_remain_parseable_for_compatibility() {
     for args in [
         &["--allow-dirty", "plan", "--help"][..],
         &["plan", "--allow-dirty", "--help"][..],
+        &["plan-yank", "--allow-dirty", "--help"][..],
+        &["fix-forward", "--allow-dirty", "--help"][..],
     ] {
         let output = shipper_cmd().args(args).output().expect("failed to run");
         assert!(

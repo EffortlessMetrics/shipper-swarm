@@ -23,6 +23,10 @@ release-readiness verdict.
 publish and resume controls remain accepted for command-line compatibility but
 are intentionally omitted from that help surface.
 
+The planning-only `plan-yank` and `fix-forward` commands follow the same rule:
+their help focuses on receipt and planning inputs, not controls for executing a
+publish or retrying one.
+
 For CI, internal developer portals, or agent consumers, `shipper doctor`,
 `shipper plan`, `shipper status`, `shipper preflight`, `shipper publish`,
 and `shipper resume` support `--format json`. `publish` and `resume` emit

@@ -335,6 +335,8 @@ const NON_EXECUTING_HELP_SUBCOMMANDS: &[&str] = &[
     "completion",
     "inspect-events",
     "inspect-receipt",
+    "plan-yank",
+    "fix-forward",
     "status",
 ];
 const DOCTOR_HELP_HIDDEN_ARG_IDS: &[&str] = &["verbose"];
