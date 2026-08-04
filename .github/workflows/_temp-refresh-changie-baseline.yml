@@ -1,0 +1,48 @@
+name: Temporary Changie baseline refresh
+
+on:
+  push:
+    branches:
+      - release/0.5-preparation-contract-v2
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    if: >-
+      github.repository == 'EffortlessMetrics/shipper-swarm' &&
+      github.ref == 'refs/heads/release/0.5-preparation-contract-v2'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the exact branch head
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: release/0.5-preparation-contract-v2
+          fetch-depth: 0
+
+      - name: Regenerate the opaque pre-Changie baseline and remove this workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
+          marker = "## [0.5.0] - 2026-08-01"
+          offset = changelog.index(marker)
+          Path(".changes/0.5.0.md").write_text(changelog[offset:], encoding="utf-8")
+          PY
+
+          git rm .github/workflows/_temp-refresh-changie-baseline.yml
+          git diff --check
+          git diff --exit-code -- .changes/0.5.0.md >/dev/null && {
+            echo "baseline did not change" >&2
+            exit 1
+          }
+
+          git config user.name "EffortlessSteven"
+          git config user.email "git@effortlesssteven.com"
+          git add .changes/0.5.0.md
+          git commit -m "fix(changelog): restore the exact retained baseline"
+          git push origin HEAD:release/0.5-preparation-contract-v2
