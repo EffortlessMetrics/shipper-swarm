@@ -96,6 +96,58 @@ merge commit so the next swarm development commit again starts from
 check returns `0 N` again. If the merge-base command fails, use the
 source-backfill path instead; do not force push or squash the sync commit.
 
+## Release Freeze and Promotion Evidence
+
+A release candidate is an exact merged `shipper-swarm/main` commit, not a PR
+head, merge ref, branch name, or collection of green checks from different
+SHAs. Use the [release preparation checklist](../release/release-preparation-checklist.md)
+to record at least:
+
+- frozen swarm candidate SHA and tree;
+- exact candidate-head Rust, policy, package, compatibility, and Changie proof;
+- promotion PR, non-fast-forward merge SHA, and merge tree;
+- release-authority approved SHA and tree after any separately reviewed
+  release-only change;
+- rehearsal, binary, interruption/resume, tag, publish, and final artifact
+  identities;
+- final release-authority-to-swarm backfill SHA.
+
+When a candidate is frozen:
+
+1. pause normal swarm merges;
+2. prove the merged candidate, including `cargo changelog-roundtrip` locally
+   with the pinned Changie binary;
+3. record `git rev-parse HEAD` and `git rev-parse HEAD^{tree}`;
+4. promote with `git merge --no-ff swarm/main` from current `shipper/main`;
+5. require the promotion merge tree to equal the frozen swarm tree before any
+   separately reviewed release-authority-only change;
+6. merge the promotion PR with a merge commit;
+7. keep normal swarm development paused until the resulting source merge and
+   any final release-only commits are backfilled.
+
+The tree-equality check is blocking:
+
+```bash
+test "$(git rev-parse HEAD^{tree})" = \
+  "$(git rev-parse swarm/main^{tree})"
+```
+
+A conflict, manual content edit, or tree mismatch is not ordinary release
+preparation. Stop, restore the source/swarm ancestry relationship through a
+reviewed backfill, rebuild the swarm candidate, and promote again.
+
+Any commit after the frozen swarm SHA supersedes that candidate. Historical
+semver, binary, compatibility, or security proof may support an unchanged claim
+only when the new candidate record names both SHAs, records the complete diff
+boundary, and explains why the diff cannot affect the claim. The exact-head
+Rust gate and release-authority rehearsal are always rerun.
+
+A green swarm candidate is not publication authorization. Tags, rehearsal,
+resume, crates.io publication, GitHub Release creation, signing, and release
+credentials remain release-authority operations in `EffortlessMetrics/shipper`.
+Follow the [release operator runbook](../release-runbook.md) and do not tag while
+the checklist contains a blocking, unavailable, pending, or superseded proof.
+
 ## Source-Backfill Exception
 
 Release-authority PRs may land directly in `shipper` for release evidence,
