@@ -20,11 +20,13 @@ cargo precommit status
 
 Use a packaged or release binary that reports v1.25.1. Homebrew and Winget install the current packaged release; a manual v1.25.1 asset is available from Changie's GitHub Releases page. When Changie advances, update the repository pin and local binary together rather than silently accepting changed rendering behavior.
 
-The hook installer is idempotent and refuses to overwrite a foreign hook. Remove only the Shipper-owned hook with:
+The hook installer is idempotent and refuses to overwrite a foreign hook. A current hook is recognized only when its complete script matches the repository-generated dispatcher; a truncated or older owned hook is reported as stale and repaired by `install`. Remove only the Shipper-owned hook with:
 
 ```bash
 cargo precommit uninstall
 ```
+
+The installed dispatcher creates an owner-only temporary checkout of the staged index and runs Cargo, `.cargo/config.toml`, and `xtask` from that checkout. Git queries still target the original repository through an explicit root handoff. This keeps unstaged tooling edits from changing which staged commit passes.
 
 ## Add a fragment
 
@@ -51,7 +53,7 @@ Stage the generated `.changes/unreleased/*.yaml` file with the implementation.
 - staged whitespace and conflict-marker hygiene;
 - whether release-note-relevant staged paths have a fragment already staged or committed on the branch;
 - Changie v1.25.1 availability when Changie validation is required;
-- a dry-run batch over the staged configuration and fragments.
+- a dry-run batch over the staged configuration and fragments, including a valid empty unreleased ledger after release batching.
 
 The default comparison base is `origin/main`. Override it for a stacked or unusual branch:
 
