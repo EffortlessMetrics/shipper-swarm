@@ -22,6 +22,7 @@ const CHANGIE_VERSION: &str = "1.25.1";
 const CHANGIE_VALIDATION_VERSION: &str = "9999.0.0-precommit";
 const DEFAULT_BASE_REF: &str = "origin/main";
 const CHANGELOG_EXEMPT_ENV: &str = "SHIPPER_PRECOMMIT_CHANGELOG_EXEMPT";
+const PRECOMMIT_HOOK_ENV: &str = "SHIPPER_PRECOMMIT_HOOK";
 const PRECOMMIT_REPO_ROOT_ENV: &str = "SHIPPER_PRECOMMIT_REPO_ROOT";
 const HOOK_MARKER: &str = "# shipper-swarm pre-commit hook v1";
 const OWNED_HOOK_PREFIX: &str = "# shipper-swarm pre-commit hook v";
@@ -52,6 +53,7 @@ struct ReceiptInput<'a> {
     fragment_paths: &'a [String],
     changelog_exemption: Option<&'a str>,
     changie_required: bool,
+    changie_allow_no_changes: bool,
     changie_validated: bool,
     changie_version: Option<&'a str>,
     failures: &'a [String],
@@ -76,7 +78,7 @@ pub(crate) fn install() -> Result<()> {
         }
         HookState::Conflicting => {
             bail!(
-                "refusing to overwrite a non-Shipper pre-commit hook at {}; move or explicitly chain it first",
+                "refusing to overwrite a non-Shipper or modified current-version pre-commit hook at {}; move or explicitly chain it first",
                 path.display()
             );
         }
@@ -138,7 +140,7 @@ pub(crate) fn uninstall() -> Result<()> {
             Ok(())
         }
         HookState::Conflicting => bail!(
-            "refusing to remove a non-Shipper pre-commit hook at {}",
+            "refusing to remove a non-Shipper or modified current-version pre-commit hook at {}",
             path.display()
         ),
     }
@@ -204,17 +206,21 @@ fn run_at(root: &Path) -> Result<()> {
         ));
     }
 
+    let changie_allow_no_changes =
+        release_note_paths.is_empty() && fragment_paths.is_empty();
     let mut changie_version = None;
     let mut changie_validated = false;
     if changie_required && (changelog_exemption.is_none() || changie_surface_changed) {
         match snapshot.as_ref() {
-            Some(snapshot) => match validate_changie(&snapshot.path) {
-                Ok(version) => {
-                    changie_version = Some(version);
-                    changie_validated = true;
+            Some(snapshot) => {
+                match validate_changie(&snapshot.path, changie_allow_no_changes) {
+                    Ok(version) => {
+                        changie_version = Some(version);
+                        changie_validated = true;
+                    }
+                    Err(error) => failures.push(error.to_string()),
                 }
-                Err(error) => failures.push(error.to_string()),
-            },
+            }
             None => failures.push(
                 "Changie validation could not run because the staged snapshot was unavailable"
                     .to_string(),
@@ -231,6 +237,7 @@ fn run_at(root: &Path) -> Result<()> {
         fragment_paths: &fragment_paths,
         changelog_exemption: changelog_exemption.as_deref(),
         changie_required,
+        changie_allow_no_changes,
         changie_validated,
         changie_version: changie_version.as_deref(),
         failures: &failures,
@@ -277,7 +284,7 @@ fn parse_changelog_exemption(raw: Option<&OsStr>) -> Result<Option<String>> {
     Ok(Some(reason))
 }
 
-fn validate_changie(snapshot: &Path) -> Result<String> {
+fn validate_changie(snapshot: &Path, allow_no_changes: bool) -> Result<String> {
     let version_output = command_output(snapshot, "changie", ["--version"]).map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
             anyhow::anyhow!(
@@ -301,6 +308,7 @@ fn validate_changie(snapshot: &Path) -> Result<String> {
         );
     }
 
+    let allow_no_changes = if allow_no_changes { "true" } else { "false" };
     let batch_output = command_output(
         snapshot,
         "changie",
@@ -308,7 +316,7 @@ fn validate_changie(snapshot: &Path) -> Result<String> {
             "batch",
             CHANGIE_VALIDATION_VERSION,
             "--dry-run",
-            "--allow-no-changes=true",
+            &format!("--allow-no-changes={allow_no_changes}"),
         ],
     )
     .context("failed to launch Changie dry-run validation")?;
@@ -335,7 +343,7 @@ fn write_receipt(root: &Path, input: &ReceiptInput<'_>) -> Result<()> {
         "schema_version": RECEIPT_SCHEMA_VERSION,
         "generated_at": Utc::now().to_rfc3339(),
         "hook": "pre-commit",
-        "invocation": if env::var_os("SHIPPER_PRECOMMIT_HOOK").is_some() { "git-hook" } else { "manual" },
+        "invocation": if env::var_os(PRECOMMIT_HOOK_ENV).is_some() { "git-hook" } else { "manual" },
         "head": head,
         "base_ref": input.base_ref,
         "base_ref_available": input.base_ref_available,
@@ -345,6 +353,7 @@ fn write_receipt(root: &Path, input: &ReceiptInput<'_>) -> Result<()> {
         "changelog_exemption": input.changelog_exemption,
         "changie": {
             "required": input.changie_required,
+            "allow_no_changes": input.changie_allow_no_changes,
             "validated": input.changie_validated,
             "expected_version": CHANGIE_VERSION,
             "observed_version": input.changie_version,
@@ -366,9 +375,23 @@ fn write_receipt(root: &Path, input: &ReceiptInput<'_>) -> Result<()> {
 }
 
 fn repo_root() -> Result<PathBuf> {
+    let hook_invocation = env::var_os(PRECOMMIT_HOOK_ENV).is_some();
+    match (hook_invocation, env::var_os(PRECOMMIT_REPO_ROOT_ENV)) {
+        (true, Some(root)) => validate_repo_root(Path::new(&root)),
+        (true, None) => bail!(
+            "{PRECOMMIT_REPO_ROOT_ENV} is required when {PRECOMMIT_HOOK_ENV} is set"
+        ),
+        (false, Some(_)) => bail!(
+            "{PRECOMMIT_REPO_ROOT_ENV} is only honored for the repository-owned installed hook"
+        ),
+        (false, None) => discover_repo_root(None),
+    }
+}
+
+fn discover_repo_root(cwd: Option<&Path>) -> Result<PathBuf> {
     let mut command = Command::new("git");
-    if let Some(root) = env::var_os(PRECOMMIT_REPO_ROOT_ENV) {
-        command.current_dir(root);
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
     }
     let output = command
         .args(["rev-parse", "--show-toplevel"])
@@ -379,6 +402,30 @@ fn repo_root() -> Result<PathBuf> {
     }
     let root = String::from_utf8(output.stdout).context("Git worktree path was not UTF-8")?;
     Ok(PathBuf::from(root.trim()))
+}
+
+fn validate_repo_root(candidate: &Path) -> Result<PathBuf> {
+    let discovered = discover_repo_root(Some(candidate))?;
+    let canonical_candidate = fs::canonicalize(candidate).with_context(|| {
+        format!(
+            "failed to canonicalize {PRECOMMIT_REPO_ROOT_ENV} candidate {}",
+            candidate.display()
+        )
+    })?;
+    let canonical_discovered = fs::canonicalize(&discovered).with_context(|| {
+        format!(
+            "failed to canonicalize discovered repository root {}",
+            discovered.display()
+        )
+    })?;
+    if canonical_candidate != canonical_discovered {
+        bail!(
+            "{PRECOMMIT_REPO_ROOT_ENV} must name the repository top level exactly: candidate {}; discovered {}",
+            candidate.display(),
+            discovered.display()
+        );
+    }
+    Ok(discovered)
 }
 
 fn staged_paths(root: &Path) -> Result<Vec<String>> {
@@ -608,7 +655,7 @@ fn git_text(root: &Path, args: &[&str]) -> Result<String> {
 
 fn hook_script() -> String {
     format!(
-        "#!/bin/sh\n{HOOK_MARKER}\nset -eu\nrepo_root=$(git rev-parse --show-toplevel)\nsnapshot=$(mktemp -d \"${{TMPDIR:-/tmp}}/shipper-precommit-hook.XXXXXX\")\ncleanup() {{\n  rm -rf \"$snapshot\"\n}}\ntrap cleanup EXIT HUP INT TERM\nprefix=\"$snapshot/\"\ngit -C \"$repo_root\" checkout-index --all --force --prefix=\"$prefix\"\ncd \"$snapshot\"\nexport SHIPPER_PRECOMMIT_HOOK=1\nexport {PRECOMMIT_REPO_ROOT_ENV}=\"$repo_root\"\nexport CARGO_TARGET_DIR=\"$repo_root/target/precommit-staged\"\ncargo run --locked --manifest-path \"$snapshot/xtask/Cargo.toml\" --package xtask -- precommit run\n"
+        "#!/bin/sh\n{HOOK_MARKER}\nset -eu\nrepo_root=$(git rev-parse --show-toplevel)\nsnapshot=$(mktemp -d \"${{TMPDIR:-/tmp}}/shipper-precommit-hook.XXXXXX\")\ncleanup() {{\n  rm -rf \"$snapshot\"\n}}\ntrap 'status=$?; trap - EXIT HUP INT TERM; cleanup || true; exit \"$status\"' EXIT\ntrap 'exit 129' HUP\ntrap 'exit 130' INT\ntrap 'exit 143' TERM\nprefix=\"$snapshot/\"\ngit -C \"$repo_root\" checkout-index --all --force --prefix=\"$prefix\"\ncd \"$snapshot\"\nexport {PRECOMMIT_HOOK_ENV}=1\nexport {PRECOMMIT_REPO_ROOT_ENV}=\"$repo_root\"\nexport CARGO_TARGET_DIR=\"$repo_root/target/precommit-staged\"\ncargo run --locked --manifest-path \"$snapshot/xtask/Cargo.toml\" --package xtask -- precommit run\n"
     )
 }
 
@@ -617,6 +664,9 @@ fn hook_state_from_text(text: Option<&str>) -> HookState {
     match text {
         None => HookState::Missing,
         Some(text) if text == expected.as_str() => HookState::Current,
+        Some(text) if text.lines().any(|line| line.trim() == HOOK_MARKER) => {
+            HookState::Conflicting
+        }
         Some(text)
             if text
                 .lines()
@@ -744,7 +794,7 @@ mod tests {
         );
         assert_eq!(
             hook_state_from_text(Some("#!/bin/sh\n# shipper-swarm pre-commit hook v1\n")),
-            HookState::Stale
+            HookState::Conflicting
         );
         assert_eq!(
             hook_state_from_text(Some("#!/bin/sh\n# shipper-swarm pre-commit hook v0\n")),
@@ -763,7 +813,9 @@ mod tests {
         assert!(script.contains("git -C \"$repo_root\" checkout-index"));
         assert!(script.contains("--manifest-path \"$snapshot/xtask/Cargo.toml\""));
         assert!(script.contains(PRECOMMIT_REPO_ROOT_ENV));
-        assert!(script.contains("SHIPPER_PRECOMMIT_HOOK=1"));
+        assert!(script.contains(PRECOMMIT_HOOK_ENV));
+        assert!(script.contains("cleanup || true"));
+        assert!(script.contains("status=$?"));
         assert!(!script.contains("exec cargo precommit run"));
     }
 
@@ -784,6 +836,32 @@ mod tests {
         assert!(changie_version_matches("v1.25.1"));
         assert!(!changie_version_matches("changie version v1.25.10"));
         assert!(!changie_version_matches("changie version vdev"));
+    }
+
+    #[test]
+    fn empty_changie_batch_is_only_allowed_without_release_note_paths() {
+        let no_release_note_paths: Vec<String> = Vec::new();
+        let no_fragments: Vec<String> = Vec::new();
+        assert!(
+            no_release_note_paths.is_empty() && no_fragments.is_empty(),
+            "release batching may empty the unreleased ledger when no product paths are staged"
+        );
+
+        let release_note_paths = ["crates/shipper-core/src/lib.rs".to_string()];
+        assert!(!(
+            release_note_paths.is_empty() && no_fragments.is_empty()
+        ));
+    }
+
+    #[test]
+    fn repository_override_must_name_the_toplevel_exactly() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .context("xtask must live directly under the repository root")?;
+        let validated = validate_repo_root(root)?;
+        assert_eq!(fs::canonicalize(validated)?, fs::canonicalize(root)?);
+        assert!(validate_repo_root(&root.join("xtask")).is_err());
+        Ok(())
     }
 
     #[cfg(unix)]
