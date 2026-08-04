@@ -131,7 +131,7 @@ Cargo 1.90 stabilized multi-package workspace publishing. Shipper's value is wha
 - `config init` uses `-o`/`--output`; `config validate` uses `-p`/`--path`.
 - `prefer_index` and `index_path` (readiness) are config-file-only settings with no CLI flags.
 - User-visible, compatibility, security, recovery, and operational changes carry a Changie fragment under `.changes/unreleased/`. The repository-owned local pre-commit hook validates the staged index; Changie is intentionally not a CI gate.
-- Test-only and internal changes are exempt by path. For an exceptional behavior-preserving edit inside a normally user-facing path, use `SHIPPER_PRECOMMIT_CHANGELOG_EXEMPT` with a substantive reason and repeat that reason in the PR.
+- Test-only and internal changes are exempt by path. For an exceptional behavior-preserving edit inside a normally user-facing path, use `SHIPPER_PRECOMMIT_CHANGELOG_EXEMPT` with a substantive reason of at least 12 characters and repeat that reason in the PR.
 - The tracked changelog through 0.5.0 is retained verbatim in `.changes/0.5.0.md`. Never batch 0.5.0 again. Run `cargo changelog-roundtrip` before accepting changes to Changie configuration, retained version files, or `CHANGELOG.md`; a writing merge is invalid while that local proof fails. See [docs/how-to/manage-changelog-fragments.md](docs/how-to/manage-changelog-fragments.md).
 
 ## Automated review
