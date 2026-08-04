@@ -1,0 +1,692 @@
+//! Repository-owned local pre-commit gate for staged Changie hygiene.
+//!
+//! The gate is deliberately local-only. It validates the Git index, requires a
+//! branch-local Changie fragment for release-note-relevant changes, validates
+//! Changie configuration/fragments with the pinned executable, and writes an
+//! advisory receipt. It is not a GitHub/merge gate and is intentionally not
+//! duplicated in CI.
+
+use anyhow::{Context, Result, bail};
+use chrono::Utc;
+use serde_json::json;
+use std::collections::BTreeSet;
+use std::env;
+use std::ffi::OsStr;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+const RECEIPT_SCHEMA_VERSION: &str = "shipper.precommit.v1";
+const CHANGIE_VERSION: &str = "1.25.1";
+const CHANGIE_VALIDATION_VERSION: &str = "9999.0.0-precommit";
+const DEFAULT_BASE_REF: &str = "origin/main";
+const HOOK_MARKER: &str = "# shipper-swarm pre-commit hook v1";
+const OWNED_HOOK_PREFIX: &str = "# shipper-swarm pre-commit hook v";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HookState {
+    Missing,
+    Current,
+    Stale,
+    Conflicting,
+}
+
+struct Snapshot {
+    path: PathBuf,
+}
+
+impl Drop for Snapshot {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+/// Validate the staged index and its branch-local Changie disposition.
+pub(crate) fn run() -> Result<()> {
+    let root = repo_root()?;
+    run_at(&root)
+}
+
+/// Install the repository-owned `pre-commit` dispatcher.
+pub(crate) fn install() -> Result<()> {
+    let root = repo_root()?;
+    let path = hook_path(&root)?;
+
+    match hook_state(&path)? {
+        HookState::Current => {
+            eprintln!("pre-commit hook is already current: {}", path.display());
+            return Ok(());
+        }
+        HookState::Conflicting => {
+            bail!(
+                "refusing to overwrite a non-Shipper pre-commit hook at {}; move or explicitly chain it first",
+                path.display()
+            );
+        }
+        HookState::Missing | HookState::Stale => {}
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create hook directory {}", parent.display()))?;
+    }
+
+    let temporary = path.with_extension(format!("shipper-tmp-{}", std::process::id()));
+    fs::write(&temporary, hook_script())
+        .with_context(|| format!("failed to write temporary hook {}", temporary.display()))?;
+    make_executable(&temporary)?;
+
+    if path.exists() {
+        fs::remove_file(&path)
+            .with_context(|| format!("failed to remove stale hook {}", path.display()))?;
+    }
+    fs::rename(&temporary, &path).with_context(|| {
+        format!(
+            "failed to move temporary hook {} into {}",
+            temporary.display(),
+            path.display()
+        )
+    })?;
+
+    eprintln!("installed Shipper pre-commit hook: {}", path.display());
+    Ok(())
+}
+
+/// Report whether the effective pre-commit hook is the current Shipper hook.
+pub(crate) fn status() -> Result<()> {
+    let root = repo_root()?;
+    let path = hook_path(&root)?;
+    let state = hook_state(&path)?;
+    eprintln!("pre-commit hook: {state:?} ({})", path.display());
+    if state == HookState::Current {
+        Ok(())
+    } else {
+        bail!("run `cargo precommit install` to install the repository-owned hook")
+    }
+}
+
+/// Remove only a Shipper-owned current or stale pre-commit hook.
+pub(crate) fn uninstall() -> Result<()> {
+    let root = repo_root()?;
+    let path = hook_path(&root)?;
+    match hook_state(&path)? {
+        HookState::Missing => {
+            eprintln!("no pre-commit hook is installed: {}", path.display());
+            Ok(())
+        }
+        HookState::Current | HookState::Stale => {
+            fs::remove_file(&path)
+                .with_context(|| format!("failed to remove hook {}", path.display()))?;
+            eprintln!("removed Shipper pre-commit hook: {}", path.display());
+            Ok(())
+        }
+        HookState::Conflicting => bail!(
+            "refusing to remove a non-Shipper pre-commit hook at {}",
+            path.display()
+        ),
+    }
+}
+
+fn run_at(root: &Path) -> Result<()> {
+    let staged = staged_paths(root)?;
+    let base_ref = env::var("SHIPPER_PRECOMMIT_BASE")
+        .unwrap_or_else(|_| DEFAULT_BASE_REF.to_string());
+    let branch_paths = changed_paths_from_base(root, &base_ref)?;
+    let base_ref_available = branch_paths.is_some();
+    let branch_paths = branch_paths.unwrap_or_default();
+
+    let release_note_paths: Vec<String> = staged
+        .iter()
+        .filter(|path| is_release_note_relevant(path))
+        .cloned()
+        .collect();
+    let changie_surface_changed = staged.iter().any(|path| is_changie_surface(path));
+    let changie_required = !release_note_paths.is_empty() || changie_surface_changed;
+
+    let mut failures = Vec::new();
+    let diff_check = command_output(root, "git", ["diff", "--cached", "--check"])
+        .context("failed to run staged diff hygiene check")?;
+    if !diff_check.status.success() {
+        failures.push(format!(
+            "staged diff hygiene failed: {}",
+            output_text(&diff_check)
+        ));
+    }
+
+    let snapshot = match create_staged_snapshot(root) {
+        Ok(snapshot) => Some(snapshot),
+        Err(error) => {
+            failures.push(format!("failed to materialize the staged index: {error:#}"));
+            None
+        }
+    };
+
+    let mut fragment_candidates = staged.clone();
+    fragment_candidates.extend(branch_paths.iter().cloned());
+    fragment_candidates.sort();
+    fragment_candidates.dedup();
+
+    let fragment_paths = snapshot
+        .as_ref()
+        .map(|snapshot| {
+            fragment_candidates
+                .iter()
+                .filter(|path| is_unreleased_fragment(path))
+                .filter(|path| snapshot.path.join(path).is_file())
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if !release_note_paths.is_empty() && fragment_paths.is_empty() {
+        failures.push(format!(
+            "release-note-relevant staged paths require a branch-local Changie fragment: {}; run `changie new`, stage `.changes/unreleased/*.yaml`, and retry",
+            release_note_paths.join(", ")
+        ));
+    }
+
+    let mut changie_version = None;
+    let mut changie_validated = false;
+    if changie_required {
+        match snapshot.as_ref() {
+            Some(snapshot) => match validate_changie(&snapshot.path) {
+                Ok(version) => {
+                    changie_version = Some(version);
+                    changie_validated = true;
+                }
+                Err(error) => failures.push(error.to_string()),
+            },
+            None => failures.push(
+                "Changie validation could not run because the staged snapshot was unavailable"
+                    .to_string(),
+            ),
+        }
+    }
+
+    let overall = failures.is_empty();
+    write_receipt(
+        root,
+        &base_ref,
+        base_ref_available,
+        &staged,
+        &release_note_paths,
+        &fragment_paths,
+        changie_required,
+        changie_validated,
+        changie_version.as_deref(),
+        &failures,
+        overall,
+    )?;
+
+    eprintln!("pre-commit staged paths: {}", staged.len());
+    eprintln!(
+        "release-note-relevant paths: {}",
+        release_note_paths.len()
+    );
+    eprintln!("branch-local fragments: {}", fragment_paths.len());
+    if !base_ref_available {
+        eprintln!(
+            "note: `{base_ref}` was unavailable; only fragments present in the staged index could satisfy the check"
+        );
+    }
+
+    if overall {
+        eprintln!("pre-commit: PASS");
+        return Ok(());
+    }
+
+    eprintln!("pre-commit: FAIL");
+    for failure in &failures {
+        eprintln!("  - {failure}");
+    }
+    bail!("staged pre-commit checks failed")
+}
+
+fn validate_changie(snapshot: &Path) -> Result<String> {
+    let version_output = command_output(snapshot, "changie", ["--version"]).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            anyhow::anyhow!(
+                "required executable `changie` was not found; install Changie v{CHANGIE_VERSION} and retry"
+            )
+        } else {
+            anyhow::anyhow!("failed to launch Changie: {error}")
+        }
+    })?;
+    if !version_output.status.success() {
+        bail!(
+            "`changie --version` failed: {}",
+            output_text(&version_output)
+        );
+    }
+
+    let version = output_text(&version_output);
+    if !version.contains(CHANGIE_VERSION) {
+        bail!(
+            "expected Changie v{CHANGIE_VERSION}, received `{version}`; align the local tool before committing"
+        );
+    }
+
+    let batch_output = command_output(
+        snapshot,
+        "changie",
+        [
+            "batch",
+            CHANGIE_VALIDATION_VERSION,
+            "--dry-run",
+            "--allow-no-changes=false",
+        ],
+    )
+    .context("failed to launch Changie dry-run validation")?;
+    if !batch_output.status.success() {
+        bail!(
+            "Changie configuration or fragment validation failed: {}",
+            output_text(&batch_output)
+        );
+    }
+
+    Ok(version)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_receipt(
+    root: &Path,
+    base_ref: &str,
+    base_ref_available: bool,
+    staged: &[String],
+    release_note_paths: &[String],
+    fragment_paths: &[String],
+    changie_required: bool,
+    changie_validated: bool,
+    changie_version: Option<&str>,
+    failures: &[String],
+    overall: bool,
+) -> Result<()> {
+    let head = git_text(root, &["rev-parse", "HEAD"]).unwrap_or_else(|_| "unborn".to_string());
+    let receipt = json!({
+        "schema_version": RECEIPT_SCHEMA_VERSION,
+        "generated_at": Utc::now().to_rfc3339(),
+        "hook": "pre-commit",
+        "invocation": if env::var_os("SHIPPER_PRECOMMIT_HOOK").is_some() { "git-hook" } else { "manual" },
+        "head": head,
+        "base_ref": base_ref,
+        "base_ref_available": base_ref_available,
+        "staged_files": staged,
+        "release_note_relevant_files": release_note_paths,
+        "branch_local_fragments": fragment_paths,
+        "changie": {
+            "required": changie_required,
+            "validated": changie_validated,
+            "expected_version": CHANGIE_VERSION,
+            "observed_version": changie_version,
+        },
+        "failures": failures,
+        "overall": if overall { "pass" } else { "fail" },
+        "claim_boundary": "This local receipt proves staged-index hygiene and Changie authoring checks only. Git hooks are bypassable and are intentionally not merge authority or a CI gate."
+    });
+
+    let output_dir = root.join("target/hooks");
+    fs::create_dir_all(&output_dir)
+        .with_context(|| format!("failed to create {}", output_dir.display()))?;
+    let output_path = output_dir.join("pre-commit.json");
+    let bytes = serde_json::to_vec_pretty(&receipt).context("failed to encode pre-commit receipt")?;
+    fs::write(&output_path, bytes)
+        .with_context(|| format!("failed to write {}", output_path.display()))?;
+    Ok(())
+}
+
+fn repo_root() -> Result<PathBuf> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .context("failed to launch git")?;
+    if !output.status.success() {
+        bail!("not inside a Git worktree: {}", output_text(&output));
+    }
+    let root = String::from_utf8(output.stdout).context("Git worktree path was not UTF-8")?;
+    Ok(PathBuf::from(root.trim()))
+}
+
+fn staged_paths(root: &Path) -> Result<Vec<String>> {
+    let output = command_output(
+        root,
+        "git",
+        [
+            "-c",
+            "core.quotepath=false",
+            "diff",
+            "--cached",
+            "--name-only",
+            "-z",
+            "--diff-filter=ACMRDTUXB",
+        ],
+    )
+    .context("failed to enumerate staged paths")?;
+    if !output.status.success() {
+        bail!("failed to enumerate staged paths: {}", output_text(&output));
+    }
+    parse_nul_paths(&output.stdout)
+}
+
+fn changed_paths_from_base(root: &Path, base_ref: &str) -> Result<Option<Vec<String>>> {
+    let verify = command_output(
+        root,
+        "git",
+        ["rev-parse", "--verify", &format!("{base_ref}^{{commit}}")],
+    )
+    .context("failed to verify the pre-commit base ref")?;
+    if !verify.status.success() {
+        return Ok(None);
+    }
+
+    let range = format!("{base_ref}...HEAD");
+    let output = command_output(
+        root,
+        "git",
+        [
+            "-c",
+            "core.quotepath=false",
+            "diff",
+            "--name-only",
+            "-z",
+            "--diff-filter=ACMRD",
+            &range,
+        ],
+    )
+    .context("failed to enumerate branch paths")?;
+    if !output.status.success() {
+        bail!(
+            "failed to enumerate branch paths from `{base_ref}`: {}",
+            output_text(&output)
+        );
+    }
+    parse_nul_paths(&output.stdout).map(Some)
+}
+
+fn parse_nul_paths(bytes: &[u8]) -> Result<Vec<String>> {
+    let mut paths = Vec::new();
+    for raw in bytes.split(|byte| *byte == 0) {
+        if raw.is_empty() {
+            continue;
+        }
+        paths.push(String::from_utf8(raw.to_vec()).context("Git path was not UTF-8")?);
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+fn create_staged_snapshot(root: &Path) -> Result<Snapshot> {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let path = env::temp_dir().join(format!(
+        "shipper-precommit-{}-{nonce}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&path)
+        .with_context(|| format!("failed to create staged snapshot {}", path.display()))?;
+
+    let mut prefix = path.to_string_lossy().replace('\\', "/");
+    if !prefix.ends_with('/') {
+        prefix.push('/');
+    }
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(["checkout-index", "--all", "--force"])
+        .arg(format!("--prefix={prefix}"))
+        .output()
+        .context("failed to launch git checkout-index")?;
+    if !output.status.success() {
+        let _ = fs::remove_dir_all(&path);
+        bail!(
+            "failed to materialize staged snapshot: {}",
+            output_text(&output)
+        );
+    }
+
+    Ok(Snapshot { path })
+}
+
+fn is_unreleased_fragment(path: &str) -> bool {
+    path.starts_with(".changes/unreleased/")
+        && path.ends_with(".yaml")
+        && !path.ends_with("/.gitkeep")
+}
+
+fn is_changie_surface(path: &str) -> bool {
+    path == ".changie.yaml" || path == "CHANGELOG.md" || path.starts_with(".changes/")
+}
+
+fn is_release_note_relevant(path: &str) -> bool {
+    if matches!(
+        path,
+        "README.md"
+            | "Cargo.toml"
+            | "rust-toolchain.toml"
+            | ".github/workflows/release.yml"
+            | "docs/INVARIANTS.md"
+            | "docs/configuration.md"
+            | "docs/failure-modes.md"
+            | "docs/preflight.md"
+            | "docs/product.md"
+            | "docs/readiness.md"
+    ) {
+        return true;
+    }
+
+    if path.starts_with("templates/")
+        || path.starts_with("docs/how-to/")
+        || path.starts_with("docs/tutorials/")
+        || path.starts_with("docs/reference/")
+        || path.starts_with("docs/explanation/")
+    {
+        return true;
+    }
+
+    if !path.starts_with("crates/") {
+        return false;
+    }
+    if path.ends_with("/Cargo.toml") || path.ends_with("/README.md") {
+        return true;
+    }
+    path.contains("/src/") && !is_test_artifact(path)
+}
+
+fn is_test_artifact(path: &str) -> bool {
+    path.contains("/tests/")
+        || path.contains("/benches/")
+        || path.contains("/examples/")
+        || path.contains("/snapshots/")
+        || path.contains("/proptest-regressions/")
+        || path.ends_with("/tests.rs")
+        || path.ends_with("_tests.rs")
+        || path.ends_with(".snap")
+}
+
+fn command_output<I, S>(cwd: &Path, program: &str, args: I) -> io::Result<Output>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    Command::new(program).current_dir(cwd).args(args).output()
+}
+
+fn output_text(output: &Output) -> String {
+    let mut text = String::new();
+    if !output.stdout.is_empty() {
+        text.push_str(&String::from_utf8_lossy(&output.stdout));
+    }
+    if !output.stderr.is_empty() {
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&String::from_utf8_lossy(&output.stderr));
+    }
+    text.trim().to_string()
+}
+
+fn git_text(root: &Path, args: &[&str]) -> Result<String> {
+    let output = command_output(root, "git", args.iter().copied()).context("failed to launch git")?;
+    if !output.status.success() {
+        bail!("git {} failed: {}", args.join(" "), output_text(&output));
+    }
+    String::from_utf8(output.stdout).context("Git output was not UTF-8")
+        .map(|text| text.trim().to_string())
+}
+
+fn hook_script() -> String {
+    format!(
+        "#!/bin/sh\n{HOOK_MARKER}\nset -eu\nrepo_root=$(git rev-parse --show-toplevel)\ncd \"$repo_root\"\nexport SHIPPER_PRECOMMIT_HOOK=1\nexec cargo precommit run\n"
+    )
+}
+
+fn hook_state_from_text(text: Option<&str>) -> HookState {
+    match text {
+        None => HookState::Missing,
+        Some(text) if text.lines().any(|line| line.trim() == HOOK_MARKER) => HookState::Current,
+        Some(text)
+            if text
+                .lines()
+                .any(|line| line.trim().starts_with(OWNED_HOOK_PREFIX)) =>
+        {
+            HookState::Stale
+        }
+        Some(_) => HookState::Conflicting,
+    }
+}
+
+fn hook_path(root: &Path) -> Result<PathBuf> {
+    let raw = git_text(root, &["rev-parse", "--git-path", "hooks/pre-commit"])?;
+    let path = PathBuf::from(raw);
+    Ok(if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    })
+}
+
+fn hook_state(path: &Path) -> Result<HookState> {
+    if !path.exists() {
+        return Ok(HookState::Missing);
+    }
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("failed to read hook {}", path.display()))?;
+    let state = hook_state_from_text(Some(&text));
+    if state == HookState::Current && !is_executable(path)? {
+        Ok(HookState::Stale)
+    } else {
+        Ok(state)
+    }
+}
+
+#[cfg(unix)]
+fn is_executable(path: &Path) -> Result<bool> {
+    use std::os::unix::fs::PermissionsExt;
+    Ok(fs::metadata(path)
+        .with_context(|| format!("failed to stat hook {}", path.display()))?
+        .permissions()
+        .mode()
+        & 0o111
+        != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable(_path: &Path) -> Result<bool> {
+    Ok(true)
+}
+
+#[cfg(unix)]
+fn make_executable(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut permissions = fs::metadata(path)
+        .with_context(|| format!("failed to stat hook {}", path.display()))?
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions)
+        .with_context(|| format!("failed to mark hook executable: {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn make_executable(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn release_note_paths_cover_product_and_user_documentation() {
+        assert!(is_release_note_relevant(
+            "crates/shipper-core/src/engine/mod.rs"
+        ));
+        assert!(is_release_note_relevant("crates/shipper/Cargo.toml"));
+        assert!(is_release_note_relevant("crates/shipper/README.md"));
+        assert!(is_release_note_relevant(
+            "docs/how-to/publish-missing-workspace-crates.md"
+        ));
+        assert!(is_release_note_relevant(
+            ".github/workflows/release.yml"
+        ));
+        assert!(is_release_note_relevant("rust-toolchain.toml"));
+    }
+
+    #[test]
+    fn test_policy_and_internal_surfaces_are_automatically_exempt() {
+        assert!(!is_release_note_relevant(
+            "crates/shipper-core/tests/publish.rs"
+        ));
+        assert!(!is_release_note_relevant(
+            "crates/shipper-core/src/engine/tests.rs"
+        ));
+        assert!(!is_release_note_relevant(
+            "crates/shipper-cli/tests/snapshots/help.snap"
+        ));
+        assert!(!is_release_note_relevant("policy/non-rust-allowlist.toml"));
+        assert!(!is_release_note_relevant("docs/status/SUPPORT_TIERS.md"));
+        assert!(!is_release_note_relevant(".github/workflows/ci.yml"));
+        assert!(!is_release_note_relevant("xtask/src/precommit.rs"));
+    }
+
+    #[test]
+    fn only_unreleased_yaml_files_are_fragments() {
+        assert!(is_unreleased_fragment(
+            ".changes/unreleased/fixed-20260804-120000.yaml"
+        ));
+        assert!(!is_unreleased_fragment(
+            ".changes/unreleased/.gitkeep"
+        ));
+        assert!(!is_unreleased_fragment(".changes/0.5.0.md"));
+        assert!(!is_unreleased_fragment("docs/change.yaml"));
+    }
+
+    #[test]
+    fn hook_ownership_is_fail_closed() {
+        assert_eq!(hook_state_from_text(None), HookState::Missing);
+        assert_eq!(
+            hook_state_from_text(Some(&hook_script())),
+            HookState::Current
+        );
+        assert_eq!(
+            hook_state_from_text(Some(
+                "#!/bin/sh\n# shipper-swarm pre-commit hook v0\n"
+            )),
+            HookState::Stale
+        );
+        assert_eq!(
+            hook_state_from_text(Some("#!/bin/sh\nexec foreign-tool\n")),
+            HookState::Conflicting
+        );
+    }
+
+    #[test]
+    fn installed_hook_dispatches_to_the_shared_cargo_command() {
+        let script = hook_script();
+        assert!(script.contains(HOOK_MARKER));
+        assert!(script.contains("exec cargo precommit run"));
+        assert!(script.contains("SHIPPER_PRECOMMIT_HOOK=1"));
+    }
+}
