@@ -30,12 +30,15 @@ Task-oriented recipes. Each solves one focused problem.
 - [Run the Recover rehearsal](how-to/run-recover-rehearsal.md) — once-per-RC proof that interrupted releases resume cleanly
 - [Rehearse against an alternate registry](how-to/rehearse-against-an-alt-registry.md) — Prove tier 2 walkthrough with kellnr example (#97)
 - [Remediate a compromised release](how-to/remediate-a-compromised-release.md) — yank + fix-forward walkthrough (#98)
-- [Manage Changie fragments locally](how-to/manage-changelog-fragments.md) — staged-index pre-commit authoring, fragment dispositions, and release batching
-- [Migrate `shipper` to `shipper-swarm` (runbook)](how-to/shipper-swarm-migration-runbook.md) — CI lane routing, proof sequence, and cutover checklist
+- [Manage Changie fragments locally](how-to/manage-changelog-fragments.md) — staged-index authoring, retained history, batching, merge, and round-trip proof
+- [Migrate `shipper` to `shipper-swarm` (runbook)](how-to/shipper-swarm-migration-runbook.md) — completed development-authority cutover and CI-routing history
 
-Operator runbook (promotion to how-to pending): [release-runbook.md](release-runbook.md)
+## Release preparation
 
-Current release-line evidence: [0.5.0 release-candidate readiness](release/0.5.0-readiness.md).
+- [Release preparation and evidence index](release/README.md) — authority, exact-identity rules, and current release-line posture
+- [Release operator runbook](release-runbook.md) — ordered candidate, promotion, rehearsal, publication, resume, and backfill procedure
+- [Release preparation checklist](release/release-preparation-checklist.md) — copy per candidate and record exact SHAs, trees, workflow runs, artifacts, and authorization
+- [0.5.0 release-candidate readiness](release/0.5.0-readiness.md) — retained product and historical candidate evidence for the 0.5 line; a later source change requires a fresh candidate identity before publication
 
 ## Reference
 
@@ -78,5 +81,5 @@ The following live at the repo root because they carry repo-wide authority:
 
 Internal inventories and upkeep docs for contributor and assistant context.
 
-- [Status docs](status/README.md) - support tiers and swarm operation policy
+- [Status docs](status/README.md) — support tiers and swarm operation policy
 - [Crate local-doc coverage](reference/crate-coverage.md) — maintenance matrix for crate `README.md`, `CLAUDE.md`, and `AGENTS.md` files

@@ -1,6 +1,6 @@
 # Manage changelog fragments locally
 
-Shipper uses Changie to capture release-note material at commit time while the implementation context is still fresh. This is a **local pre-commit workflow**, not a GitHub Actions gate.
+Shipper uses Changie to capture release-note material at commit time while implementation context is still fresh. This is a **local pre-commit workflow**, not a GitHub Actions gate.
 
 The fragment ledger helps release preparation answer three different editorial questions without treating every merged PR as equally important:
 
@@ -20,7 +20,9 @@ cargo precommit status
 
 Use a packaged or release binary that reports v1.25.1. Homebrew and Winget install the current packaged release; a manual v1.25.1 asset is available from Changie's GitHub Releases page. When Changie advances, update the repository pin and local binary together rather than silently accepting changed rendering behavior.
 
-The hook installer is idempotent and refuses to overwrite a foreign hook. A hook is current only when its complete script matches the repository-generated dispatcher. An older Shipper-owned version is stale and repairable; a truncated or customized script carrying the current marker is conflicting and is never overwritten automatically. Remove only the unmodified current or stale Shipper-owned hook with:
+The hook installer is idempotent and refuses to overwrite a foreign hook. A hook is current only when its complete script matches the repository-generated dispatcher. An older Shipper-owned version is stale and repairable; a truncated or customized script carrying the current marker is conflicting and is never overwritten automatically. Running `cargo precommit install` upgrades the unmodified legacy v1 Shipper hook to the staged-source v2 dispatcher.
+
+Remove only the unmodified current or stale Shipper-owned hook with:
 
 ```bash
 cargo precommit uninstall
@@ -50,7 +52,7 @@ Stage the generated `.changes/unreleased/*.yaml` file with the implementation.
 
 ## What the hook checks
 
-`cargo precommit` materializes a temporary checkout of the staged Git index and performs only local, inexpensive checks:
+`cargo precommit` performs only local, inexpensive checks over the staged Git index:
 
 - staged whitespace and conflict-marker hygiene;
 - symbolic-link rejection before Cargo or Changie can follow staged paths;
@@ -99,24 +101,45 @@ State the same reason in the PR. `git commit --no-verify` remains Git's emergenc
 
 ## Why this is not CI
 
-The hook is shift-left authoring support. It is intentionally bypassable, depends on a developer-local Changie binary, and is not merge authority. GitHub continues to prove candidate-head Rust behavior, policy, security, and review independently.
+The hook is shift-left authoring support. It is intentionally bypassable, depends on a developer-local Changie binary, and is not merge authority. GitHub continues to prove candidate-head Rust behavior, policy, security, packaging, and review independently.
 
 No workflow should install Changie merely to repeat this gate. The lasting evidence is the reviewed fragment and the release documents produced from the fragment ledger, not a green hosted hook simulation.
 
-## Historical migration boundary
+## Retained pre-Changie history
 
-The tracked changelog through **0.5.0** predates Changie. This intake contract begins collecting forward-looking fragments, but it does not itself rewrite existing release history.
+The tracked changelog through **0.5.0** predates Changie. The complete 0.5.0-through-0.1.0 body is retained verbatim in `.changes/0.5.0.md`; `.changes/header.tpl.md` owns the title and `[Unreleased]` boundary.
 
-Until a focused baseline-migration PR imports the existing 0.5.0-and-earlier text and proves a lossless round trip, do not run `changie merge` and do not batch 0.5.0 again. The migration must demonstrate that a clean merge reproduces the tracked `CHANGELOG.md` exactly and must retain a regression check against accidental history truncation.
+This is an opaque historical baseline. Do not split it into reconstructed fragments, rewrite old prose during ordinary release work, or run `changie batch 0.5.0`.
+
+Prove the retained files still reproduce the tracked changelog before and after any edit to `.changie.yaml`, `.changes/*.md`, the header template, or `CHANGELOG.md`:
+
+```bash
+cargo changelog-roundtrip
+```
+
+The command requires exactly Changie v1.25.1, runs `changie merge --dry-run`, permits only a zero-versus-one final-newline difference, and reports the first material mismatch. Pure xtask fixture tests independently protect the historical-section boundary without installing Changie in CI.
+
+A synthetic configuration proof that does not select a real release version is:
+
+```bash
+changie batch 9999.0.0-baseline-proof \
+  --dry-run \
+  --allow-no-changes=true
+```
 
 ## Prepare a later release
 
-After the baseline migration exists, release preparation is:
+For releases after 0.5.0:
 
 ```bash
-changie batch <next-version>
-# Curate and review .changes/<next-version>.md.
+VERSION=<next-version>
+cargo changelog-roundtrip
+changie batch "$VERSION"
+# Deliberately curate .changes/$VERSION.md.
 changie merge
+cargo changelog-roundtrip
 ```
 
-The batch output is an editorial starting point. Release notes, migration notes, support-tier claims, and readiness evidence still receive focused review. Changie does not select the release version.
+Review every fragment before batching. Treat the generated version file as an editorial starting point, not as automatically approved release notes. Confirm that remaining unreleased fragments are intentional next-release work and that no retained historical release section was dropped or rewritten.
+
+Changie does not select the version, authorize a tag, publish crates, or replace release readiness review. Continue with the [release operator runbook](../release-runbook.md) and a copied [release preparation checklist](../release/release-preparation-checklist.md), which record the exact swarm candidate, history-preserving promotion, release-authority rehearsal, tag identity, publish train, and post-release backfill.
