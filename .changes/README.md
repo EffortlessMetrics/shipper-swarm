@@ -1,6 +1,6 @@
 # Shipper change fragments
 
-Shipper uses [Changie](https://changie.dev/) to capture release-note material while the implementation context is still fresh. Fragments are authoring inputs; `CHANGELOG.md`, the 0.5.0 release notes, migration notes, and readiness record remain deliberately edited and reviewed release artifacts.
+Shipper uses [Changie](https://changie.dev/) to capture release-note material while the implementation context is still fresh. Fragments are authoring inputs; `CHANGELOG.md`, release notes, migration notes, and readiness records remain deliberately edited and reviewed release artifacts.
 
 ## Local setup
 
@@ -74,21 +74,23 @@ target/hooks/pre-commit.json
 
 Use `SHIPPER_PRECOMMIT_BASE=<ref>` when the branch should be compared with something other than `origin/main`.
 
-## Release preparation
+## Historical boundary
 
-The existing hand-maintained changelog predates Changie. Do **not** run `changie merge` until the focused changelog catch-up campaign has:
+The tracked changelog through **0.5.0** predates Changie and is the migration baseline. This intake PR does not rewrite that history and must not batch 0.5.0 again.
 
-1. reconciled the historical entries;
-2. moved the cleaned pre-Changie history into the Changie baseline version file;
-3. curated the accumulated 0.5.0 fragments;
-4. reviewed the generated 0.5.0 version section.
+Do **not** run `changie merge` until the follow-up baseline migration has:
 
-The intended release commands after that migration are:
+1. imported the existing 0.5.0-and-earlier changelog text into retained Changie version files;
+2. proved that a clean `changie merge` reproduces the tracked `CHANGELOG.md` without loss or rewording;
+3. recorded the exact baseline boundary and recovery procedure;
+4. added a regression check that prevents future history truncation.
+
+After that one-time migration, release preparation is:
 
 ```bash
-changie batch 0.5.0
-# edit/review .changes/0.5.0.md
+changie batch <next-version>
+# Curate and review .changes/<next-version>.md.
 changie merge
 ```
 
-Version selection remains a deliberate release decision; Changie does not choose it.
+The batch output is an editorial starting point. Release notes, migration notes, support-tier claims, and readiness evidence still receive focused review. Version selection remains a deliberate release decision; Changie does not choose it.
