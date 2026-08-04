@@ -24,7 +24,7 @@ const DEFAULT_BASE_REF: &str = "origin/main";
 const CHANGELOG_EXEMPT_ENV: &str = "SHIPPER_PRECOMMIT_CHANGELOG_EXEMPT";
 const PRECOMMIT_HOOK_ENV: &str = "SHIPPER_PRECOMMIT_HOOK";
 const PRECOMMIT_REPO_ROOT_ENV: &str = "SHIPPER_PRECOMMIT_REPO_ROOT";
-const HOOK_MARKER: &str = "# shipper-swarm pre-commit hook v1";
+const HOOK_MARKER: &str = "# shipper-swarm pre-commit hook v2";
 const OWNED_HOOK_PREFIX: &str = "# shipper-swarm pre-commit hook v";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,20 +206,19 @@ fn run_at(root: &Path) -> Result<()> {
         ));
     }
 
-    let changie_allow_no_changes = release_note_paths.is_empty() && fragment_paths.is_empty();
+    let changie_allow_no_changes =
+        allows_empty_changie_batch(&release_note_paths, &fragment_paths);
     let mut changie_version = None;
     let mut changie_validated = false;
     if changie_required && (changelog_exemption.is_none() || changie_surface_changed) {
         match snapshot.as_ref() {
-            Some(snapshot) => {
-                match validate_changie(&snapshot.path, changie_allow_no_changes) {
-                    Ok(version) => {
-                        changie_version = Some(version);
-                        changie_validated = true;
-                    }
-                    Err(error) => failures.push(error.to_string()),
+            Some(snapshot) => match validate_changie(&snapshot.path, changie_allow_no_changes) {
+                Ok(version) => {
+                    changie_version = Some(version);
+                    changie_validated = true;
                 }
-            }
+                Err(error) => failures.push(error.to_string()),
+            },
             None => failures.push(
                 "Changie validation could not run because the staged snapshot was unavailable"
                     .to_string(),
@@ -281,6 +280,10 @@ fn parse_changelog_exemption(raw: Option<&OsStr>) -> Result<Option<String>> {
         bail!("{CHANGELOG_EXEMPT_ENV} must contain a substantive reason of at least 12 characters");
     }
     Ok(Some(reason))
+}
+
+fn allows_empty_changie_batch(release_note_paths: &[String], fragment_paths: &[String]) -> bool {
+    release_note_paths.is_empty() && fragment_paths.is_empty()
 }
 
 fn validate_changie(snapshot: &Path, allow_no_changes: bool) -> Result<String> {
@@ -377,9 +380,9 @@ fn repo_root() -> Result<PathBuf> {
     let hook_invocation = env::var_os(PRECOMMIT_HOOK_ENV).is_some();
     match (hook_invocation, env::var_os(PRECOMMIT_REPO_ROOT_ENV)) {
         (true, Some(root)) => validate_repo_root(Path::new(&root)),
-        (true, None) => bail!(
-            "{PRECOMMIT_REPO_ROOT_ENV} is required when {PRECOMMIT_HOOK_ENV} is set"
-        ),
+        (true, None) => {
+            bail!("{PRECOMMIT_REPO_ROOT_ENV} is required when {PRECOMMIT_HOOK_ENV} is set")
+        }
         (false, Some(_)) => bail!(
             "{PRECOMMIT_REPO_ROOT_ENV} is only honored for the repository-owned installed hook"
         ),
@@ -663,9 +666,7 @@ fn hook_state_from_text(text: Option<&str>) -> HookState {
     match text {
         None => HookState::Missing,
         Some(text) if text == expected.as_str() => HookState::Current,
-        Some(text) if text.lines().any(|line| line.trim() == HOOK_MARKER) => {
-            HookState::Conflicting
-        }
+        Some(text) if text.lines().any(|line| line.trim() == HOOK_MARKER) => HookState::Conflicting,
         Some(text)
             if text
                 .lines()
@@ -737,6 +738,8 @@ fn make_executable(_path: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    const LEGACY_V1_HOOK_SCRIPT: &str = "#!/bin/sh\n# shipper-swarm pre-commit hook v1\nset -eu\nrepo_root=$(git rev-parse --show-toplevel)\ncd \"$repo_root\"\nexport SHIPPER_PRECOMMIT_HOOK=1\nexec cargo precommit run\n";
+
     #[test]
     fn release_note_paths_cover_product_and_user_documentation() {
         assert!(is_release_note_relevant(
@@ -792,12 +795,12 @@ mod tests {
             HookState::Current
         );
         assert_eq!(
-            hook_state_from_text(Some("#!/bin/sh\n# shipper-swarm pre-commit hook v1\n")),
-            HookState::Conflicting
+            hook_state_from_text(Some(LEGACY_V1_HOOK_SCRIPT)),
+            HookState::Stale
         );
         assert_eq!(
-            hook_state_from_text(Some("#!/bin/sh\n# shipper-swarm pre-commit hook v0\n")),
-            HookState::Stale
+            hook_state_from_text(Some("#!/bin/sh\n# shipper-swarm pre-commit hook v2\n")),
+            HookState::Conflicting
         );
         assert_eq!(
             hook_state_from_text(Some("#!/bin/sh\nexec foreign-tool\n")),
@@ -838,16 +841,20 @@ mod tests {
     }
 
     #[test]
-    fn empty_changie_batch_is_only_allowed_without_release_note_paths() {
-        let no_release_note_paths: Vec<String> = Vec::new();
-        let no_fragments: Vec<String> = Vec::new();
-        assert!(
-            no_release_note_paths.is_empty() && no_fragments.is_empty(),
-            "release batching may empty the unreleased ledger when no product paths are staged"
-        );
+    fn empty_changie_batch_is_only_allowed_without_release_note_paths_or_fragments() {
+        let no_paths: Vec<String> = Vec::new();
+        let product_paths = ["crates/shipper-core/src/lib.rs".to_string()];
+        let fragment_paths = [
+            ".changes/unreleased/fixed-20260804-120000.000000000.yaml".to_string(),
+        ];
 
-        let release_note_paths = ["crates/shipper-core/src/lib.rs".to_string()];
-        assert!(!(release_note_paths.is_empty() && no_fragments.is_empty()));
+        assert!(allows_empty_changie_batch(&no_paths, &no_paths));
+        assert!(!allows_empty_changie_batch(&product_paths, &no_paths));
+        assert!(!allows_empty_changie_batch(&no_paths, &fragment_paths));
+        assert!(!allows_empty_changie_batch(
+            &product_paths,
+            &fragment_paths
+        ));
     }
 
     #[test]
