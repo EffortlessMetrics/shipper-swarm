@@ -30,6 +30,8 @@ cargo precommit uninstall
 
 The installed dispatcher creates an owner-only temporary checkout of the staged index and runs Cargo, `.cargo/config.toml`, and `xtask` from that checkout. Git queries target the original repository through a hook-only root handoff that must resolve to that repository's exact top level. This keeps unstaged tooling edits or an unrelated ambient environment variable from changing which staged commit passes. Cleanup preserves the Cargo process exit status even when temporary-directory removal fails.
 
+Before materializing or executing the staged checkout, both the shell dispatcher and the Rust command reject every Git index entry with symbolic-link mode `120000`. The repository-owned gate deliberately does not follow staged symlinks, because a link can escape the private checkout and expose unstaged source or configuration to Cargo or Changie. Any future contained-symlink policy must be designed and reviewed separately.
+
 ## Add a fragment
 
 For a user-visible or compatibility-relevant change:
@@ -53,6 +55,7 @@ Stage the generated `.changes/unreleased/*.yaml` file with the implementation.
 `cargo precommit` performs only local, inexpensive checks over the staged Git index:
 
 - staged whitespace and conflict-marker hygiene;
+- symbolic-link rejection before Cargo or Changie can follow staged paths;
 - whether release-note-relevant staged paths have a fragment already staged or committed on the branch;
 - Changie v1.25.1 availability when Changie validation is required;
 - a dry-run batch over the staged configuration and fragments.
