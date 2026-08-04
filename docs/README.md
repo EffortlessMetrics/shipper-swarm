@@ -30,6 +30,7 @@ Task-oriented recipes. Each solves one focused problem.
 - [Run the Recover rehearsal](how-to/run-recover-rehearsal.md) — once-per-RC proof that interrupted releases resume cleanly
 - [Rehearse against an alternate registry](how-to/rehearse-against-an-alt-registry.md) — Prove tier 2 walkthrough with kellnr example (#97)
 - [Remediate a compromised release](how-to/remediate-a-compromised-release.md) — yank + fix-forward walkthrough (#98)
+- [Manage Changie fragments locally](how-to/manage-changelog-fragments.md) — staged-index pre-commit authoring, fragment dispositions, and release batching
 - [Migrate `shipper` to `shipper-swarm` (runbook)](how-to/shipper-swarm-migration-runbook.md) — CI lane routing, proof sequence, and cutover checklist
 
 Operator runbook (promotion to how-to pending): [release-runbook.md](release-runbook.md)
@@ -78,5 +79,4 @@ The following live at the repo root because they carry repo-wide authority:
 Internal inventories and upkeep docs for contributor and assistant context.
 
 - [Status docs](status/README.md) - support tiers and swarm operation policy
-
 - [Crate local-doc coverage](reference/crate-coverage.md) — maintenance matrix for crate `README.md`, `CLAUDE.md`, and `AGENTS.md` files
