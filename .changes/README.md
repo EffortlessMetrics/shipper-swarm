@@ -44,7 +44,7 @@ Use the editorial fields deliberately:
 
 The pre-commit gate requires a branch-local fragment when staged changes touch product Rust, public manifests and READMEs, user-facing guides, release workflow behavior, templates, or the toolchain floor. Test-only, snapshot-only, policy, ordinary CI, agent-control, and internal status-document changes are exempt by path.
 
-For an unusual behavior-preserving change that matches a release-note path but genuinely needs no fragment, keep the rest of the gate active and provide a substantive local reason:
+For an unusual behavior-preserving change that matches a release-note path but genuinely needs no fragment, keep the rest of the gate active and provide a substantive reason of at least 12 characters:
 
 ```bash
 SHIPPER_PRECOMMIT_CHANGELOG_EXEMPT="test-only inline module" git commit
