@@ -1,9 +1,11 @@
 # Cargo alias config for the shipper workspace.
 
 [alias]
-# `cargo xtask <cmd>` -> `cargo run --package xtask -- <cmd>`
+# `cargo xtask <cmd>` -> `cargo run --package xtask --bin xtask -- <cmd>`
 # See xtask/src/main.rs and docs/policy/NON_RUST_ROLLOUT.md.
-xtask = "run --package xtask --"
+# Pin the binary explicitly because the xtask package also contains the
+# maintainer-local `changie-roundtrip` binary.
+xtask = "run --package xtask --bin xtask --"
 
 # `cargo precommit [run|install|status|uninstall]` delegates to the same xtask
 # implementation used by the repository-owned Git hook. Keep the local gate on
