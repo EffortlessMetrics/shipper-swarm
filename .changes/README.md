@@ -45,7 +45,21 @@ Use the editorial fields deliberately:
 
 The pre-commit gate requires a branch-local fragment when staged changes touch product Rust, public manifests and READMEs, user-facing guides, release workflow behavior, templates, or the toolchain floor. Test-only, snapshot-only, policy, ordinary CI, agent-control, and internal status-document changes are exempt by path.
 
-For an unusual behavior-preserving change that matches a release-note path but genuinely needs no fragment, `git commit --no-verify` is the explicit local escape hatch. Record the reason in the PR. The hook is intentionally not duplicated in CI.
+For an unusual behavior-preserving change that matches a release-note path but genuinely needs no fragment, keep the rest of the gate active and provide a substantive local reason:
+
+```bash
+SHIPPER_PRECOMMIT_CHANGELOG_EXEMPT="test-only inline module" git commit
+```
+
+PowerShell:
+
+```powershell
+$env:SHIPPER_PRECOMMIT_CHANGELOG_EXEMPT = "test-only inline module"
+git commit
+Remove-Item Env:SHIPPER_PRECOMMIT_CHANGELOG_EXEMPT
+```
+
+The reason is retained in `target/hooks/pre-commit.json` and should also be stated in the PR. `git commit --no-verify` remains Git's emergency bypass, but it skips the entire local gate rather than only the fragment requirement.
 
 ## Validate manually
 
@@ -58,6 +72,8 @@ When Changie surfaces are relevant, the command requires v1.25.1 and runs a dry-
 ```text
 target/hooks/pre-commit.json
 ```
+
+Use `SHIPPER_PRECOMMIT_BASE=<ref>` when the branch should be compared with something other than `origin/main`.
 
 ## Release preparation
 
