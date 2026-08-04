@@ -206,8 +206,7 @@ fn run_at(root: &Path) -> Result<()> {
         ));
     }
 
-    let changie_allow_no_changes =
-        allows_empty_changie_batch(&release_note_paths, &fragment_paths);
+    let changie_allow_no_changes = allows_empty_changie_batch(&release_note_paths, &fragment_paths);
     let mut changie_version = None;
     let mut changie_validated = false;
     if changie_required && (changelog_exemption.is_none() || changie_surface_changed) {
@@ -844,17 +843,13 @@ mod tests {
     fn empty_changie_batch_is_only_allowed_without_release_note_paths_or_fragments() {
         let no_paths: Vec<String> = Vec::new();
         let product_paths = ["crates/shipper-core/src/lib.rs".to_string()];
-        let fragment_paths = [
-            ".changes/unreleased/fixed-20260804-120000.000000000.yaml".to_string(),
-        ];
+        let fragment_paths =
+            [".changes/unreleased/fixed-20260804-120000.000000000.yaml".to_string()];
 
         assert!(allows_empty_changie_batch(&no_paths, &no_paths));
         assert!(!allows_empty_changie_batch(&product_paths, &no_paths));
         assert!(!allows_empty_changie_batch(&no_paths, &fragment_paths));
-        assert!(!allows_empty_changie_batch(
-            &product_paths,
-            &fragment_paths
-        ));
+        assert!(!allows_empty_changie_batch(&product_paths, &fragment_paths));
     }
 
     #[test]
