@@ -610,7 +610,8 @@ fn analyze_workflow_authority(
         ));
     }
 
-    let permission_scopes = workflow_permission_scopes(yaml_text);
+    let job_blocks = workflow_job_blocks(yaml_text);
+    let permission_scopes = workflow_permission_scopes(yaml_text, &job_blocks);
     for scope in &permission_scopes {
         for (capability, value) in &scope.values {
             if value != "write" && value != "*" {
@@ -621,12 +622,13 @@ fn analyze_workflow_authority(
                 "contents" | "id-token" | "actions" | "workflows"
             );
             let workflow_level = scope.job == "<workflow>";
-            let job_guarded = required_repository.is_some_and(|repository| {
-                workflow_job_blocks(yaml_text)
-                    .iter()
-                    .find(|(job, _)| job == &scope.job)
-                    .is_some_and(|(_, block)| block_has_repository_guard(block, repository))
-            });
+            let job_guarded = !workflow_level
+                && required_repository.is_some_and(|repository| {
+                    job_blocks
+                        .iter()
+                        .find(|(job, _)| job == &scope.job)
+                        .is_some_and(|(_, block)| block_has_repository_guard(block, repository))
+                });
             if workflow_level
                 || capability == "*"
                 || (high_risk && (kind != "release" || !job_guarded))
@@ -644,13 +646,13 @@ fn analyze_workflow_authority(
         }
     }
 
-    for (job, block) in workflow_job_blocks(yaml_text) {
+    for (job, block) in &job_blocks {
         let guarded =
-            required_repository.is_some_and(|repo| block_has_repository_guard(&block, repo));
-        let scopes = workflow_permission_scopes_for_job(&block, &job);
-        let steps = workflow_step_blocks(&block);
+            required_repository.is_some_and(|repo| block_has_repository_guard(block, repo));
+        let scopes = workflow_permission_scopes_for_job(block, job);
+        let steps = workflow_step_blocks(block);
         let release_sensitive = kind == "release"
-            && (contains_release_authority(&block)
+            && (contains_release_authority(block)
                 || scopes
                     .iter()
                     .any(|scope| scope.values.get("id-token").is_some_and(|v| v == "write")));
@@ -659,7 +661,7 @@ fn analyze_workflow_authority(
             for capability in self_mutation_capabilities(&step.content) {
                 findings.push(authority_finding(
                     workflow,
-                    &job,
+                    job,
                     &step.name,
                     capability,
                     &trigger,
@@ -672,7 +674,7 @@ fn analyze_workflow_authority(
         if release_sensitive && !guarded {
             findings.push(authority_finding(
                 workflow,
-                &job,
+                job,
                 "<job>",
                 "release-authority-without-repository-guard",
                 &trigger,
@@ -682,12 +684,12 @@ fn analyze_workflow_authority(
         }
 
         if triggers.contains("pull_request_target")
-            && block_has_untrusted_checkout(&block)
+            && block_has_untrusted_checkout(block)
             && (block.contains("secrets.") || scope_has_write_permission(&scopes))
         {
             findings.push(authority_finding(
                 workflow,
-                &job,
+                job,
                 "<checkout>",
                 "pull-request-target-untrusted-execution",
                 &trigger,
@@ -895,7 +897,10 @@ fn temporary_branch_filters(yaml_text: &str) -> Vec<String> {
     found.into_iter().collect()
 }
 
-fn workflow_permission_scopes(yaml_text: &str) -> Vec<PermissionScope> {
+fn workflow_permission_scopes(
+    yaml_text: &str,
+    job_blocks: &[(String, String)],
+) -> Vec<PermissionScope> {
     let mut scopes = Vec::new();
     let lines: Vec<&str> = yaml_text.lines().collect();
     let mut index = 0;
@@ -912,19 +917,23 @@ fn workflow_permission_scopes(yaml_text: &str) -> Vec<PermissionScope> {
         }
         index += 1;
     }
-    for (job, block) in workflow_job_blocks(yaml_text) {
-        scopes.extend(workflow_permission_scopes_for_job(&block, &job));
+    for (job, block) in job_blocks {
+        scopes.extend(workflow_permission_scopes_for_job(block, job));
     }
     scopes
 }
 
 fn workflow_permission_scopes_for_job(block: &str, job: &str) -> Vec<PermissionScope> {
     let lines: Vec<&str> = block.lines().collect();
+    let Some(first) = lines.first() else {
+        return Vec::new();
+    };
+    let job_indent = first.len() - first.trim_start().len();
     for (index, line) in lines.iter().enumerate() {
         let without_comment = strip_yaml_inline_comment(line);
         let trimmed = without_comment.trim();
         let indent = without_comment.len() - without_comment.trim_start().len();
-        if indent > 0 && trimmed.starts_with("permissions:") {
+        if indent == job_indent + 2 && trimmed.starts_with("permissions:") {
             return vec![PermissionScope {
                 job: job.to_string(),
                 values: parse_permission_mapping(&lines, index, indent),
@@ -1019,8 +1028,10 @@ fn contains_release_authority(text: &str) -> bool {
 fn has_dispatch_ref_input(yaml_text: &str) -> bool {
     let lines: Vec<&str> = yaml_text.lines().collect();
     let mut in_on = false;
+    let mut trigger_indent = None;
     let mut in_dispatch = false;
     let mut inputs_indent = None;
+    let mut input_indent = None;
     for line in lines {
         let without_comment = strip_yaml_inline_comment(line);
         let trimmed = without_comment.trim();
@@ -1035,24 +1046,42 @@ fn has_dispatch_ref_input(yaml_text: &str) -> bool {
         if indent == 0 {
             break;
         }
-        if indent == 2 {
+        if trigger_indent.is_none() {
+            if trimmed.is_empty() {
+                continue;
+            }
+            trigger_indent = Some(indent);
+        }
+        if Some(indent) == trigger_indent {
             in_dispatch = trimmed.starts_with("workflow_dispatch:");
             inputs_indent = None;
+            input_indent = None;
             continue;
         }
         if !in_dispatch {
             continue;
         }
-        if indent == 4 && trimmed.starts_with("inputs:") {
-            inputs_indent = Some(indent);
+        if inputs_indent.is_none() && indent > trigger_indent.unwrap_or(indent) {
+            if trimmed.starts_with("inputs:") {
+                inputs_indent = Some(indent);
+                input_indent = None;
+            }
             continue;
         }
         if let Some(parent_indent) = inputs_indent {
             if indent <= parent_indent {
                 inputs_indent = None;
+                input_indent = None;
                 continue;
             }
-            if indent == parent_indent + 2 && trimmed.starts_with("ref:") {
+            if input_indent.is_none() {
+                input_indent = Some(indent);
+                if trimmed.starts_with("ref:") {
+                    return true;
+                }
+                continue;
+            }
+            if Some(indent) == input_indent && trimmed.starts_with("ref:") {
                 return true;
             }
         }
@@ -1135,21 +1164,23 @@ fn self_mutation_capabilities(content: &str) -> Vec<&'static str> {
         ("git tag", "git-tag-mutation"),
         ("gh api", "github-api-mutation"),
     ] {
-        let mut matches = segments
-            .iter()
-            .filter(|segment| shell_contains_command(segment, command));
-        let mut detected = matches.next().is_some();
-        if command == "gh api" {
-            detected = segments
-                .iter()
-                .filter(|segment| shell_contains_command(segment, command))
-                .any(|segment| gh_api_mutates(segment));
-        }
+        let detected = segments.iter().any(|segment| {
+            if !shell_contains_command(segment, command) {
+                return false;
+            }
+            if command == "gh api" {
+                return gh_api_mutates(segment);
+            }
+            if command == "git tag" {
+                return git_tag_mutates(segment);
+            }
+            true
+        });
         if detected {
             capabilities.push(capability);
         }
     }
-    let deletes_workflow = shell_segments(&lower).iter().any(|segment| {
+    let deletes_workflow = segments.iter().any(|segment| {
         let delete_command = shell_starts_with_command(segment, "rm")
             || shell_starts_with_command(segment, "git rm")
             || shell_starts_with_command(segment, "remove-item")
@@ -1170,9 +1201,7 @@ fn shell_segments(text: &str) -> Vec<&str> {
 }
 
 fn shell_contains_command(text: &str, command: &str) -> bool {
-    shell_segments(text)
-        .iter()
-        .any(|segment| shell_starts_with_command(segment, command))
+    shell_starts_with_command(text, command)
 }
 
 fn shell_starts_with_command(segment: &str, command: &str) -> bool {
@@ -1224,6 +1253,17 @@ fn gh_api_mutates(lowercase_content: &str) -> bool {
     ]
     .iter()
     .any(|method| invocation.contains(method))
+}
+
+fn git_tag_mutates(lowercase_content: &str) -> bool {
+    let Some(tag_index) = lowercase_content.find("git tag") else {
+        return false;
+    };
+    let arguments = lowercase_content[tag_index + "git tag".len()..].split_whitespace();
+    let Some(first_argument) = arguments.clone().next() else {
+        return false;
+    };
+    !matches!(first_argument, "-l" | "--list" | "-n")
 }
 
 fn block_has_untrusted_checkout(block: &str) -> bool {
@@ -2210,6 +2250,8 @@ jobs:
     steps:
       - run: cargo publish
   inspect:
+    permissions:
+      id-token: write
     steps:
       - run: echo report
 "#;
@@ -2226,6 +2268,15 @@ jobs:
                 finding.job == "publish" && finding.capability == "id-token:write"
             })
         );
+        assert!(
+            findings.iter().any(|finding| {
+                finding.job == "inspect" && finding.capability == "id-token:write"
+            })
+        );
+        assert!(findings.iter().any(|finding| {
+            finding.job == "inspect"
+                && finding.capability == "release-authority-without-repository-guard"
+        }));
     }
 
     #[test]
@@ -2480,6 +2531,8 @@ jobs:
         run: |
           gh api repos/EffortlessMetrics/shipper/git/ref/heads/main --method get
           gh api repos/EffortlessMetrics/shipper/git/ref/heads/main --method POST
+          gh api repos/EffortlessMetrics/shipper/git/ref/heads/main --method get
+          curl -X POST https://example.invalid/release
 "#;
 
         let findings =
@@ -2490,6 +2543,22 @@ jobs:
                 .iter()
                 .any(|finding| finding.capability == "github-api-mutation")
         );
+        assert_eq!(
+            findings
+                .iter()
+                .filter(|finding| finding.capability == "github-api-mutation")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn authority_detector_only_flags_mutating_git_tag_forms() {
+        assert!(self_mutation_capabilities("git tag release").contains(&"git-tag-mutation"));
+        assert!(!self_mutation_capabilities("git tag").contains(&"git-tag-mutation"));
+        assert!(!self_mutation_capabilities("git tag -l").contains(&"git-tag-mutation"));
+        assert!(!self_mutation_capabilities("git tag --list").contains(&"git-tag-mutation"));
+        assert!(!self_mutation_capabilities("git tag -n").contains(&"git-tag-mutation"));
     }
 
     #[test]
