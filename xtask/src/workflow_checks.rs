@@ -771,6 +771,7 @@ fn workflow_name(yaml_text: &str) -> Option<String> {
 fn workflow_trigger_names(yaml_text: &str) -> BTreeSet<String> {
     let mut triggers = BTreeSet::new();
     let mut in_on = false;
+    let mut types_indent = None;
     for line in yaml_text.lines() {
         let without_comment = strip_yaml_inline_comment(line);
         let trimmed = without_comment.trim();
@@ -794,8 +795,27 @@ fn workflow_trigger_names(yaml_text: &str) -> BTreeSet<String> {
         if !in_on || trimmed.starts_with('#') {
             continue;
         }
-        if trimmed.to_ascii_lowercase().contains("labeled") {
-            triggers.insert("labeled".to_string());
+        if let Some(parent_indent) = types_indent {
+            if indent <= parent_indent {
+                types_indent = None;
+            } else if trimmed
+                .strip_prefix('-')
+                .is_some_and(|value| value.trim().trim_matches(['\'', '"']) == "labeled")
+            {
+                triggers.insert("labeled".to_string());
+            }
+        }
+        if let Some(value) = trimmed.strip_prefix("types:") {
+            types_indent = Some(indent);
+            let inline = value.trim().trim_matches(['[', ']']);
+            if inline
+                .split(',')
+                .map(str::trim)
+                .map(|value| value.trim_matches(['\'', '"']))
+                .any(|value| value == "labeled")
+            {
+                triggers.insert("labeled".to_string());
+            }
         }
         if indent != 2 {
             continue;
@@ -1090,11 +1110,14 @@ fn has_dispatch_ref_input(yaml_text: &str) -> bool {
 }
 
 fn has_exact_release_identity_language(yaml_text: &str) -> bool {
-    let lower = uncommented_workflow_text(yaml_text).to_ascii_lowercase();
-    lower.contains("release-identity")
-        || lower.contains("approved_sha")
-        || lower.contains("exact approved sha")
-        || lower.contains("exact-source")
+    workflow_job_blocks(yaml_text).iter().any(|(_, block)| {
+        workflow_step_blocks(block).iter().any(|step| {
+            let lower = step.content.to_ascii_lowercase();
+            shell_segments(&lower)
+                .iter()
+                .any(|segment| shell_starts_with_command(segment, "cargo xtask release-identity"))
+        })
+    })
 }
 
 fn workflow_step_blocks(job_block: &str) -> Vec<WorkflowStepBlock> {
@@ -2447,6 +2470,14 @@ jobs:
                 .iter()
                 .any(|finding| { finding.capability == "label-triggered-cancellation" })
         );
+        let unlabeled = labeled.replace("labeled", "unlabeled");
+        let unlabeled_findings =
+            analyze_workflow_authority(".github/workflows/unlabeled.yml", "ci", None, &unlabeled);
+        assert!(
+            !unlabeled_findings
+                .iter()
+                .any(|finding| finding.capability == "label-triggered-cancellation")
+        );
 
         let release = r#"
 name: Release
@@ -2559,6 +2590,34 @@ jobs:
         assert!(!self_mutation_capabilities("git tag -l").contains(&"git-tag-mutation"));
         assert!(!self_mutation_capabilities("git tag --list").contains(&"git-tag-mutation"));
         assert!(!self_mutation_capabilities("git tag -n").contains(&"git-tag-mutation"));
+    }
+
+    #[test]
+    fn release_identity_language_requires_an_executable_command() {
+        let prose_only = r#"
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Use the release-identity gate and approved_sha."
+
+jobs:
+  publish:
+    steps:
+      - name: Release identity gate
+        run: echo "exact approved SHA"
+      - name: Publish
+        run: cargo publish
+"#;
+        assert!(!has_exact_release_identity_language(prose_only));
+
+        let executable = prose_only.replace(
+            "run: echo \"exact approved SHA\"",
+            "run: cargo xtask release-identity --approved-sha \"$SHA\"",
+        );
+        assert!(has_exact_release_identity_language(&executable));
     }
 
     #[test]
