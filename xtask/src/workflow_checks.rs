@@ -1015,6 +1015,9 @@ fn parse_permission_mapping(
 
     let mut values = BTreeMap::new();
     let normalized = value.trim_matches(['{', '}', '\'', '"']).trim();
+    if normalized.is_empty() {
+        return values;
+    }
     if normalized.eq_ignore_ascii_case("write-all") {
         values.insert("*".to_string(), "write".to_string());
     } else if normalized.eq_ignore_ascii_case("read-all") {
@@ -2742,6 +2745,16 @@ jobs:
             unknown_findings
                 .iter()
                 .any(|finding| { finding.capability == "unknown-permission-scalar:writte-all" })
+        );
+
+        let empty = write_all.replace("permissions: write-all", "permissions: {}");
+        let empty_findings =
+            analyze_workflow_authority(".github/workflows/empty.yml", "ci", None, &empty);
+        assert!(
+            !empty_findings
+                .iter()
+                .any(|finding| finding.capability.starts_with("unknown-permission-scalar:")),
+            "valid empty permissions mapping was rejected: {empty_findings:?}"
         );
     }
 
