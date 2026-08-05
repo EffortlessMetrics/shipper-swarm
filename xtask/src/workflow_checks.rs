@@ -614,9 +614,14 @@ fn analyze_workflow_authority(
     let permission_scopes = workflow_permission_scopes(yaml_text, &job_blocks);
     for scope in &permission_scopes {
         for (capability, value) in &scope.values {
-            if value != "write" && value != "*" {
+            let unknown_scalar = value.strip_prefix("unknown:");
+            if value != "write" && value != "*" && unknown_scalar.is_none() {
                 continue;
             }
+            let reported_capability = unknown_scalar.map_or_else(
+                || format!("{capability}:{value}"),
+                |scalar| format!("unknown-permission-scalar:{scalar}"),
+            );
             let high_risk = matches!(
                 capability.as_str(),
                 "contents" | "id-token" | "actions" | "workflows"
@@ -629,7 +634,8 @@ fn analyze_workflow_authority(
                         .find(|(job, _)| job == &scope.job)
                         .is_some_and(|(_, block)| block_has_repository_guard(block, repository))
                 });
-            if workflow_level
+            if unknown_scalar.is_some()
+                || workflow_level
                 || capability == "*"
                 || (high_risk && (kind != "release" || !job_guarded))
             {
@@ -637,7 +643,7 @@ fn analyze_workflow_authority(
                     workflow,
                     &scope.job,
                     "<permissions>",
-                    &format!("{capability}:{value}"),
+                    &reported_capability,
                     &trigger,
                     required_repository.unwrap_or("not declared"),
                     "move the grant to the narrow job that needs it and prove the repository boundary",
@@ -650,6 +656,12 @@ fn analyze_workflow_authority(
         let guarded =
             required_repository.is_some_and(|repo| block_has_repository_guard(block, repo));
         let scopes = workflow_permission_scopes_for_job(block, job);
+        let all_scopes = permission_scopes
+            .iter()
+            .filter(|scope| scope.job == "<workflow>")
+            .cloned()
+            .chain(scopes.iter().cloned())
+            .collect::<Vec<_>>();
         let steps = workflow_step_blocks(block);
         let release_sensitive = kind == "release"
             && (contains_release_authority(block)
@@ -685,7 +697,7 @@ fn analyze_workflow_authority(
 
         if triggers.contains("pull_request_target")
             && block_has_untrusted_checkout(block)
-            && (block.contains("secrets.") || scope_has_write_permission(&scopes))
+            && (block.contains("secrets.") || scope_has_write_permission(&all_scopes))
         {
             findings.push(authority_finding(
                 workflow,
@@ -718,7 +730,7 @@ fn analyze_workflow_authority(
     if kind == "release"
         && triggers.contains("push")
         && workflow_has_tag_trigger(yaml_text)
-        && contains_release_authority(yaml_text)
+        && workflow_contains_release_authority(yaml_text)
         && !has_exact_release_identity_language(yaml_text)
     {
         findings.push(authority_finding(
@@ -863,7 +875,7 @@ fn temporary_workflow_identity(path: &str, name: &str) -> bool {
     let path_marker = (stem == "_temp" || stem.starts_with("_temp-") || stem.starts_with("_temp_"))
         || path_words
             .first()
-            .is_some_and(|word| matches!(*word, "temp" | "temporary" | "repair"))
+            .is_some_and(|word| matches!(*word, "temp" | "temporary"))
         || path_words.starts_with(&["one", "off"])
         || path_words.starts_with(&["proof", "pulse"]);
     let words: Vec<String> = name
@@ -874,7 +886,7 @@ fn temporary_workflow_identity(path: &str, name: &str) -> bool {
         .collect();
     let named_marker = words
         .first()
-        .is_some_and(|word| matches!(word.as_str(), "temp" | "temporary" | "repair"))
+        .is_some_and(|word| matches!(word.as_str(), "temp" | "temporary"))
         || words.starts_with(&["one".to_string(), "off".to_string()])
         || words.starts_with(&["proof".to_string(), "pulse".to_string()]);
     path_marker || named_marker
@@ -1002,7 +1014,7 @@ fn parse_permission_mapping(
     }
 
     let mut values = BTreeMap::new();
-    let normalized = value.trim_matches(['{', '}']).trim();
+    let normalized = value.trim_matches(['{', '}', '\'', '"']).trim();
     if normalized.eq_ignore_ascii_case("write-all") {
         values.insert("*".to_string(), "write".to_string());
     } else if normalized.eq_ignore_ascii_case("read-all") {
@@ -1020,7 +1032,10 @@ fn parse_permission_mapping(
             }
         }
         if values.is_empty() {
-            values.insert("*".to_string(), normalized.to_ascii_lowercase());
+            values.insert(
+                "*".to_string(),
+                format!("unknown:{}", normalized.to_ascii_lowercase()),
+            );
         }
     }
     values
@@ -1036,13 +1051,31 @@ fn scope_has_write_permission(scopes: &[PermissionScope]) -> bool {
 }
 
 fn contains_release_authority(text: &str) -> bool {
-    let lower = uncommented_workflow_text(text).to_ascii_lowercase();
-    lower.contains("cargo publish")
-        || lower.contains("gh release")
-        || lower.contains("git tag")
-        || lower.contains("cosign")
-        || lower.contains("cargo_registry_token")
-        || lower.contains("id-token: write")
+    workflow_step_blocks(text)
+        .iter()
+        .any(|step| step_contains_release_authority(&step.content))
+}
+
+fn workflow_contains_release_authority(yaml_text: &str) -> bool {
+    let job_blocks = workflow_job_blocks(yaml_text);
+    contains_release_authority(yaml_text)
+        || job_blocks
+            .iter()
+            .any(|(_, block)| contains_release_authority(block))
+        || workflow_permission_scopes(yaml_text, &job_blocks)
+            .iter()
+            .any(|scope| scope.values.get("id-token").is_some_and(|v| v == "write"))
+}
+
+fn step_contains_release_authority(content: &str) -> bool {
+    let lower = uncommented_workflow_text(content).to_ascii_lowercase();
+    shell_segments(&lower).iter().any(|segment| {
+        shell_starts_with_command(segment, "cargo publish")
+            || shell_starts_with_command(segment, "gh release")
+            || (shell_contains_command(segment, "git tag") && git_tag_mutates(segment))
+            || shell_starts_with_command(segment, "cosign")
+            || segment.contains("$cargo_registry_token")
+    })
 }
 
 fn has_dispatch_ref_input(yaml_text: &str) -> bool {
@@ -1260,11 +1293,7 @@ fn shell_starts_with_command(segment: &str, command: &str) -> bool {
 }
 
 fn gh_api_mutates(lowercase_content: &str) -> bool {
-    let Some(api_index) = lowercase_content.find("gh api") else {
-        return false;
-    };
-    let invocation = &lowercase_content[api_index..];
-    [
+    const METHODS: [&str; 8] = [
         "--method post",
         "--method put",
         "--method patch",
@@ -1273,9 +1302,16 @@ fn gh_api_mutates(lowercase_content: &str) -> bool {
         "-x put",
         "-x patch",
         "-x delete",
-    ]
-    .iter()
-    .any(|method| invocation.contains(method))
+    ];
+    lowercase_content.match_indices("gh api").any(|(index, _)| {
+        let invocation = &lowercase_content[index..];
+        let end = invocation
+            .find([';', '|', '&', '\n'])
+            .unwrap_or(invocation.len());
+        METHODS
+            .iter()
+            .any(|method| invocation[..end].contains(method))
+    })
 }
 
 fn git_tag_mutates(lowercase_content: &str) -> bool {
@@ -2255,6 +2291,17 @@ jobs:
         );
 
         assert!(findings.is_empty(), "unexpected findings: {findings:?}");
+
+        let durable_path = analyze_workflow_authority(
+            ".github/workflows/repair-rotation.yml",
+            "Repair Rotation",
+            None,
+            yaml,
+        );
+        assert!(
+            durable_path.is_empty(),
+            "durable repair workflow was misclassified: {durable_path:?}"
+        );
     }
 
     #[test]
@@ -2440,6 +2487,33 @@ jobs:
 
         assert!(
             findings
+                .iter()
+                .any(|finding| { finding.capability == "pull-request-target-untrusted-execution" })
+        );
+
+        let workflow_level = r#"
+name: Unsafe target workflow
+
+on:
+  pull_request_target:
+    types: [opened]
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Run PR code
+        run: cargo test
+"#;
+        let workflow_level_findings =
+            analyze_workflow_authority(".github/workflows/unsafe.yml", "ci", None, workflow_level);
+        assert!(
+            workflow_level_findings
                 .iter()
                 .any(|finding| { finding.capability == "pull-request-target-untrusted-execution" })
         );
@@ -2651,6 +2725,24 @@ jobs:
                 .iter()
                 .any(|finding| finding.capability == "*:read")
         );
+
+        let quoted = write_all.replace("permissions: write-all", "permissions: \"write-all\"");
+        let quoted_findings =
+            analyze_workflow_authority(".github/workflows/quoted.yml", "ci", None, &quoted);
+        assert!(
+            quoted_findings
+                .iter()
+                .any(|finding| finding.capability == "*:write")
+        );
+
+        let unknown = write_all.replace("permissions: write-all", "permissions: writte-all");
+        let unknown_findings =
+            analyze_workflow_authority(".github/workflows/unknown.yml", "ci", None, &unknown);
+        assert!(
+            unknown_findings
+                .iter()
+                .any(|finding| { finding.capability == "unknown-permission-scalar:writte-all" })
+        );
     }
 
     #[test]
@@ -2674,6 +2766,22 @@ jobs:
         let findings = analyze_workflow_authority(".github/workflows/report.yml", "ci", None, yaml);
 
         assert!(findings.is_empty(), "unexpected findings: {findings:?}");
+
+        let actual_command = yaml.replace(
+            "run: echo \"repair guidance\"",
+            "run: cargo publish --dry-run",
+        );
+        let command_findings = analyze_workflow_authority(
+            ".github/workflows/report.yml",
+            "release",
+            None,
+            &actual_command,
+        );
+        assert!(
+            command_findings.iter().any(|finding| {
+                finding.capability == "release-authority-without-repository-guard"
+            })
+        );
     }
 
     #[test]
