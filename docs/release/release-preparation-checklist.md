@@ -26,6 +26,11 @@ Command blocks use a POSIX shell for compactness. On Windows, run the equivalent
 | Promotion merge tree | `TBD` |
 | Release-authority approved SHA | `TBD` |
 | Release-authority approved tree | `TBD` |
+| Approval record reference | `TBD` |
+| Approval record identifier | `TBD` |
+| Approved registry posture | `crates-io` |
+| Approved auth posture | `TBD` |
+| Reviewed release notes | `RELEASE_NOTES_v<version>.md` |
 | Release rehearsal run | `TBD` |
 | Release workflow ref | `TBD` |
 | Release workflow definition SHA | `TBD` |
@@ -291,9 +296,41 @@ record. If the GitHub CLI accepts the approved commit as a workflow ref, use
 `RELEASE_SHA`; otherwise use a protected release-preparation tag and record its
 definition SHA before dispatching.
 
+The protected `release` environment in `EffortlessMetrics/shipper` must carry
+the approved identity handoff as `SHIPPER_APPROVED_RELEASE_VERSION`,
+`SHIPPER_APPROVED_RELEASE_SHA`, `SHIPPER_APPROVED_RELEASE_TREE`,
+`SHIPPER_APPROVAL_RECORD_REF`, `SHIPPER_APPROVAL_RECORD_SHA`,
+`SHIPPER_APPROVED_REGISTRY`, and `SHIPPER_APPROVED_AUTH_POSTURE`. These are
+release metadata, not credentials. The workflow identity gate rejects missing
+values and validates tag, version, source SHA, source tree, current main,
+13-package graph, changelog date, and reviewed release notes.
+
+Accept the identity-gate result only when the workflow definition and `xtask`
+validator came from the recorded immutable `WORKFLOW_REF`/`WORKFLOW_SHA` pair;
+the approved release SHA/tree and dispatch values are candidate data until
+that trusted validator checks them.
+
 Dispatch non-publishing proof on the exact SHA:
 
 ```bash
+set -euo pipefail
+VERSION=<recorded-approved-version>
+RELEASE_SHA=<recorded-approved-sha>
+RELEASE_TREE=<recorded-approved-tree>
+APPROVAL_RECORD_REF=<recorded-approval-record-ref>
+APPROVAL_RECORD_SHA=<recorded-approval-record-sha>
+APPROVED_AUTH_POSTURE=<recorded-approved-auth-posture>
+: "${VERSION:?}"
+: "${RELEASE_SHA:?}"
+: "${RELEASE_TREE:?}"
+: "${APPROVAL_RECORD_REF:?}"
+: "${APPROVAL_RECORD_SHA:?}"
+: "${APPROVED_AUTH_POSTURE:?}"
+case "$APPROVED_AUTH_POSTURE" in
+  trusted_publishing|fallback_secret) ;;
+  *) echo "unsupported approved auth posture" >&2; exit 1 ;;
+esac
+
 WORKFLOW_REF=<recorded-immutable-release-workflow-ref>
 WORKFLOW_SHA=<recorded-release-workflow-definition-sha>
 test "$(git rev-parse "$WORKFLOW_REF^{commit}")" = "$WORKFLOW_SHA"
@@ -302,20 +339,38 @@ gh workflow run release.yml \
   --repo EffortlessMetrics/shipper \
   --ref "$WORKFLOW_REF" \
   -f mode=rehearse \
-  -f ref="$RELEASE_SHA"
+  -f ref="$RELEASE_SHA" \
+  -f approved_sha="$RELEASE_SHA" \
+  -f approved_tree="$RELEASE_TREE" \
+  -f approved_version="$VERSION" \
+  -f approval_record_ref="$APPROVAL_RECORD_REF" \
+  -f approval_record_sha="$APPROVAL_RECORD_SHA" \
+  -f approved_registry=crates-io \
+  -f approved_auth_posture="$APPROVED_AUTH_POSTURE"
 
 gh workflow run release.yml \
   --repo EffortlessMetrics/shipper \
   --ref "$WORKFLOW_REF" \
   -f mode=binaries \
-  -f ref="$RELEASE_SHA"
+  -f ref="$RELEASE_SHA" \
+  -f approved_sha="$RELEASE_SHA" \
+  -f approved_tree="$RELEASE_TREE" \
+  -f approved_version="$VERSION" \
+  -f approval_record_ref="$APPROVAL_RECORD_REF" \
+  -f approval_record_sha="$APPROVAL_RECORD_SHA" \
+  -f approved_registry=crates-io \
+  -f approved_auth_posture="$APPROVED_AUTH_POSTURE"
 ```
 
+- [ ] The identity gate passes on the exact approved source and retains its sanitized record.
+- [ ] The reversible release proof gate passes on the same source SHA/tree.
 - [ ] Rehearsal passes on `RELEASE_SHA` and its artifacts are retained.
 - [ ] Four-target binary matrix passes on `RELEASE_SHA` using matching operating-system runners.
+- [ ] `verify-binaries` validates every uploaded archive's source SHA/tree, target, retention metadata, and checksum.
 - [ ] Binary checksums and artifacts are retained and unexpired through publication.
 - [ ] Interruption/upload and download/resume evidence is current for the approved SHA or an explicitly unchanged execution tree.
 - [ ] Auth evidence identifies Trusted Publishing, fallback configuration/use, and selected source without exposing token material.
+- [ ] Rehearsal and binary-only runs cannot publish crates or create a GitHub Release.
 
 ## G. Tag authorization
 
@@ -342,6 +397,9 @@ git push origin "v$VERSION"
 - [ ] Tag does not already exist.
 - [ ] Tag points exactly to `RELEASE_SHA`.
 - [ ] The tag push occurs only in `EffortlessMetrics/shipper`.
+- [ ] Tag-time publication is gated by the approved identity, reversible proof, and all four successful binaries.
+- [ ] The GitHub Release is bound to `RELEASE_NOTES_v<version>.md`; generated notes are not its authority.
+- [ ] Each exact `name@<version>` is verified before publication; the public install smoke is recorded in Section I after publication.
 - [ ] Publish workflow run ID is recorded above.
 
 ## H. Publication train monitoring
@@ -368,7 +426,7 @@ Stop the train when any of these occurs:
 - an unexpected repository, branch, or workflow identity;
 - a new commit after approval that has not completed the checklist.
 
-Do not blind-retry an ambiguous publish. Reconcile registry truth first. If the workflow is interrupted, use the retained `.shipper` artifact and the release workflow's `mode=resume` path; record both the source artifact run and the resume run.
+Do not blind-retry an ambiguous publish. Reconcile registry truth first. If the workflow is interrupted, use the retained `.shipper` artifact and the release workflow's `mode=resume` path. Resume requires `state.json`, the event/receipt evidence, and the matching `.shipper/release-identity.json`; it rejects a different source/version/tree/registry/auth posture. Record both the source artifact run and the resume run.
 
 ## I. Post-release verification and backfill
 

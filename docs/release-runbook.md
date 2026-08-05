@@ -285,11 +285,81 @@ definition SHA before dispatching.
 
 Run the section 3 commands again in the release-authority checkout, including `cargo changelog-roundtrip`.
 
+The release workflow consumes the approved identity through the protected
+`release` environment. Before any tag or dispatch, populate these non-secret
+environment variables from the reviewed GO record:
+
+```text
+SHIPPER_APPROVED_RELEASE_VERSION
+SHIPPER_APPROVED_RELEASE_SHA
+SHIPPER_APPROVED_RELEASE_TREE
+SHIPPER_APPROVAL_RECORD_REF
+SHIPPER_APPROVAL_RECORD_SHA
+SHIPPER_APPROVED_REGISTRY=crates-io
+SHIPPER_APPROVED_AUTH_POSTURE=trusted_publishing|fallback_secret
+```
+
+The tag-time identity job rejects missing values, a changed `shipper/main`, a
+tag/version/SHA/tree mismatch, a changed 13-crate package graph, a missing or
+wrong-date `CHANGELOG.md` section, or missing
+`RELEASE_NOTES_v<version>.md`. Dispatch inputs may override the environment
+values for rehearsal, binary-only, and resume proof, but they must still match
+the approved source identity. `target/policy/release-identity.json` is the
+sanitized handoff artifact; it contains no credential material.
+
+The release-authority workflow definition and its `xtask` validator are trusted
+only when sourced from the recorded immutable `WORKFLOW_REF`/`WORKFLOW_SHA`
+pair. The approved release SHA, tree, version, tag, and artifact values are
+candidate data until that validator checks them; never run the validator from a
+mutable branch or accept release proof whose workflow-definition identity was
+not independently recorded and matched.
+
+The release-authority coordination issues consume this contract as follows:
+
+- `EffortlessMetrics/shipper#476` records the approved version, SHA, tree,
+  approval-record identifier, registry posture, auth posture, workflow
+  definition identity, reviewed release notes, and binary dependency before
+  marking rehearsal/GO readiness.
+- `EffortlessMetrics/shipper#477` refuses tag/publication/resume unless those
+  fields are present and the tag-time identity gate, reversible release gate,
+  exact four-platform binary matrix, reviewed-note binding, and exact public
+  verification all pass on the same approved source.
+
+Those release-authority issues remain separate from swarm implementation; no
+release credential or publication capability belongs in this repository.
+
+The tag-time dependency graph is fail-closed:
+
+```text
+release-identity-gate ──> build-binaries ──> verify-binaries ──┐
+                         release-proof-gate ───────────────────┼─> publish-crates-io ──> exact public verification ──> create-release
+                         msrv-gate + policy-gate ──────────────┘
+```
+
+The reversible proof gate runs the full Rust, package, and policy ladder on the
+approved source. The binary verification gate downloads each retained artifact
+and checks its source SHA/tree, target, retention metadata, and checksum before
+publication. Publication cannot begin if the proof, MSRV/policy checks, any
+binary matrix child, or binary verification is failed, skipped, unavailable,
+expired, or tied to a different SHA/tree.
+
 ### Non-publishing rehearsal
 
 Dispatch against the exact approved SHA:
 
 ```bash
+set -euo pipefail
+: "${VERSION:?set VERSION from the approved release record}"
+: "${RELEASE_SHA:?set RELEASE_SHA from the approved release record}"
+: "${RELEASE_TREE:?set RELEASE_TREE from the approved release record}"
+: "${APPROVAL_RECORD_REF:?set APPROVAL_RECORD_REF from the approved release record}"
+: "${APPROVAL_RECORD_SHA:?set APPROVAL_RECORD_SHA from the approved release record}"
+: "${APPROVED_AUTH_POSTURE:?set APPROVED_AUTH_POSTURE from the approved release record}"
+case "$APPROVED_AUTH_POSTURE" in
+  trusted_publishing|fallback_secret) ;;
+  *) echo "unsupported approved auth posture" >&2; exit 1 ;;
+esac
+
 WORKFLOW_REF=<recorded-immutable-release-workflow-ref>
 WORKFLOW_SHA=<recorded-release-workflow-definition-sha>
 test "$(git rev-parse "$WORKFLOW_REF^{commit}")" = "$WORKFLOW_SHA"
@@ -298,7 +368,14 @@ gh workflow run release.yml \
   --repo EffortlessMetrics/shipper \
   --ref "$WORKFLOW_REF" \
   -f mode=rehearse \
-  -f ref="$RELEASE_SHA"
+  -f ref="$RELEASE_SHA" \
+  -f approved_sha="$RELEASE_SHA" \
+  -f approved_tree="$RELEASE_TREE" \
+  -f approved_version="$VERSION" \
+  -f approval_record_ref="$APPROVAL_RECORD_REF" \
+  -f approval_record_sha="$APPROVAL_RECORD_SHA" \
+  -f approved_registry=crates-io \
+  -f approved_auth_posture="$APPROVED_AUTH_POSTURE"
 ```
 
 The rehearsal must produce and retain plan, preflight, state, event, receipt, auth, and policy evidence without publishing to crates.io.
@@ -310,7 +387,14 @@ gh workflow run release.yml \
   --repo EffortlessMetrics/shipper \
   --ref "$WORKFLOW_REF" \
   -f mode=binaries \
-  -f ref="$RELEASE_SHA"
+  -f ref="$RELEASE_SHA" \
+  -f approved_sha="$RELEASE_SHA" \
+  -f approved_tree="$RELEASE_TREE" \
+  -f approved_version="$VERSION" \
+  -f approval_record_ref="$APPROVAL_RECORD_REF" \
+  -f approval_record_sha="$APPROVAL_RECORD_SHA" \
+  -f approved_registry=crates-io \
+  -f approved_auth_posture="$APPROVED_AUTH_POSTURE"
 ```
 
 Require four matching-platform artifacts:
@@ -320,7 +404,13 @@ Require four matching-platform artifacts:
 - macOS arm64;
 - Windows x86_64.
 
-Record the workflow runs, artifact names, checksums, and expiry window. Do not tag if artifacts will expire before publication or if a target used the wrong operating-system runner.
+Record the workflow runs, artifact names, checksums, source SHA/tree, and expiry
+window. The workflow's `verify-binaries` job independently validates all four
+uploaded artifacts before publication; publication remains blocked until every
+exact-source build and verification succeeds.
+Rehearsal and binary-only modes cannot publish crates or create a GitHub
+Release. Do not tag if artifacts will expire before publication or if a target
+used the wrong operating-system runner.
 
 ### Authentication posture
 
@@ -333,6 +423,7 @@ Tag only when every blocking checklist item passes and the approved release-auth
 ```bash
 VERSION=<version>
 RELEASE_SHA=<approved-shipper-main-sha>
+RELEASE_TREE=<approved-shipper-main-tree>
 
 WORKSPACE_VERSION=$(cargo metadata --no-deps --format-version 1 \
   | jq -r '.packages[] | select(.name == "shipper") | .version')
@@ -401,12 +492,14 @@ Use the release record's approved version and SHA. Identify the run that uploade
 ```bash
 VERSION=<recorded-release-version>
 RELEASE_SHA=<recorded-approved-release-sha>
+RELEASE_TREE=<recorded-approved-release-tree>
 WORKFLOW_REF=<recorded-immutable-release-workflow-ref>
 WORKFLOW_SHA=<recorded-release-workflow-definition-sha>
 
 git fetch origin --prune --tags
 test "$(git rev-parse origin/main)" = "$RELEASE_SHA"
 test "$(git rev-list -n 1 "v$VERSION")" = "$RELEASE_SHA"
+test -n "$RELEASE_TREE"
 test "$(git rev-parse "$WORKFLOW_REF^{commit}")" = "$WORKFLOW_SHA"
 
 gh workflow run release.yml \
@@ -414,10 +507,22 @@ gh workflow run release.yml \
   --ref "$WORKFLOW_REF" \
   -f mode=resume \
   -f ref="$RELEASE_SHA" \
-  -f artifact_run_id=<source-run-id>
+  -f artifact_run_id=<source-run-id> \
+  -f approved_sha="$RELEASE_SHA" \
+  -f approved_tree="$RELEASE_TREE" \
+  -f approved_version="$VERSION" \
+  -f approval_record_ref="$APPROVAL_RECORD_REF" \
+  -f approval_record_sha="$APPROVAL_RECORD_SHA" \
+  -f approved_registry=crates-io \
+  -f approved_auth_posture="$APPROVED_AUTH_POSTURE"
 ```
 
-Record both the source artifact run and the resume run. Before resuming, inspect events and state; after resuming, verify already-published packages were skipped and no duplicate upload occurred.
+The source artifact must contain `state.json`, the event/receipt evidence, and
+the matching `.shipper/release-identity.json`. The resume job validates source
+SHA/tree, version, tag, registry, approval record, and approved auth posture
+before minting a fresh token or doing work. Record both the source artifact run
+and the resume run. Before resuming, inspect events and state; after resuming,
+verify already-published packages were skipped and no duplicate upload occurred.
 
 Do not create a new tag or start a fresh publish workflow to recover an interrupted train.
 
