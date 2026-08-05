@@ -831,23 +831,27 @@ fn temporary_workflow_identity(path: &str, name: &str) -> bool {
         .next()
         .unwrap_or(&path_lower)
         .trim_end_matches(".yml");
+    let path_words: Vec<&str> = stem
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect();
     let path_marker = stem.starts_with("_temp")
-        || stem.starts_with("temp-")
-        || stem.starts_with("temporary")
-        || stem.contains("one-off")
-        || stem.contains("proof-pulse")
-        || stem.contains("repair");
+        || path_words
+            .first()
+            .is_some_and(|word| matches!(*word, "temp" | "temporary" | "repair"))
+        || path_words.starts_with(&["one", "off"])
+        || path_words.starts_with(&["proof", "pulse"]);
     let words: Vec<String> = name
         .to_ascii_lowercase()
         .split(|c: char| !c.is_ascii_alphanumeric())
         .filter(|word| !word.is_empty())
         .map(str::to_string)
         .collect();
-    let named_marker = words.iter().any(|word| {
-        matches!(word.as_str(), "temp" | "temporary" | "repair" | "proof-pulse")
-    }) || words.windows(2).any(|pair| {
-        matches!(pair, [first, second] if (first == "one" && second == "off") || (first == "proof" && second == "pulse"))
-    });
+    let named_marker = words
+        .first()
+        .is_some_and(|word| matches!(word.as_str(), "temp" | "temporary" | "repair"))
+        || words.starts_with(&["one".to_string(), "off".to_string()])
+        || words.starts_with(&["proof".to_string(), "pulse".to_string()]);
     path_marker || named_marker
 }
 
@@ -1164,7 +1168,7 @@ fn self_mutation_capabilities(content: &str) -> Vec<&'static str> {
 }
 
 fn shell_segments(text: &str) -> Vec<&str> {
-    text.split(['\n', ';', '|', '&'])
+    text.split(['\n', ';', '|', '&', '(', ')', '`'])
         .map(str::trim)
         .filter(|segment| !segment.is_empty())
         .collect()
@@ -2131,6 +2135,68 @@ jobs:
                 .iter()
                 .any(|finding| finding.capability == "workflow-self-deletion")
         );
+    }
+
+    #[test]
+    fn authority_detector_catches_nested_shell_mutations() {
+        let yaml = r#"
+name: Temporary shell repair
+
+on:
+  workflow_dispatch:
+
+jobs:
+  repair:
+    steps:
+      - name: Nested mutation
+        run: |
+          echo $(git push origin main)
+          echo `git commit -m repair`
+          case "$MODE" in ready) git add .github/workflows/release.yml;; esac
+"#;
+
+        let findings =
+            analyze_workflow_authority(".github/workflows/repair.yml", "maintenance", None, yaml);
+
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.capability == "git-push")
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.capability == "git-commit")
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.capability == "git-add")
+        );
+    }
+
+    #[test]
+    fn authority_detector_does_not_flag_durable_repair_wording() {
+        let yaml = r#"
+name: Dependency Repair Guide
+
+on:
+  workflow_dispatch:
+
+jobs:
+  guide:
+    steps:
+      - run: echo "documented repair guidance"
+"#;
+
+        let findings = analyze_workflow_authority(
+            ".github/workflows/dependency-repair-guide.yml",
+            "maintenance",
+            None,
+            yaml,
+        );
+
+        assert!(findings.is_empty(), "unexpected findings: {findings:?}");
     }
 
     #[test]
