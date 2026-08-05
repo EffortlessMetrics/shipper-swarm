@@ -621,12 +621,15 @@ fn analyze_workflow_authority(
                 "contents" | "id-token" | "actions" | "workflows"
             );
             let workflow_level = scope.job == "<workflow>";
+            let job_guarded = required_repository.is_some_and(|repository| {
+                workflow_job_blocks(yaml_text)
+                    .iter()
+                    .find(|(job, _)| job == &scope.job)
+                    .is_some_and(|(_, block)| block_has_repository_guard(block, repository))
+            });
             if workflow_level
                 || capability == "*"
-                || (high_risk
-                    && (kind != "release"
-                        || required_repository
-                            .is_none_or(|repo| !workflow_has_repository_guard(yaml_text, repo))))
+                || (high_risk && (kind != "release" || !job_guarded))
             {
                 findings.push(authority_finding(
                     workflow,
@@ -835,7 +838,7 @@ fn temporary_workflow_identity(path: &str, name: &str) -> bool {
         .split(|c: char| !c.is_ascii_alphanumeric())
         .filter(|word| !word.is_empty())
         .collect();
-    let path_marker = stem.starts_with("_temp")
+    let path_marker = (stem == "_temp" || stem.starts_with("_temp-") || stem.starts_with("_temp_"))
         || path_words
             .first()
             .is_some_and(|word| matches!(*word, "temp" | "temporary" | "repair"))
@@ -1001,14 +1004,6 @@ fn scope_has_write_permission(scopes: &[PermissionScope]) -> bool {
             .values()
             .any(|value| value == "write" || value == "*")
     })
-}
-
-fn workflow_has_repository_guard(yaml_text: &str, repository: &str) -> bool {
-    let jobs = workflow_job_blocks(yaml_text);
-    !jobs.is_empty()
-        && jobs
-            .iter()
-            .all(|(_, block)| block_has_repository_guard(block, repository))
 }
 
 fn contains_release_authority(text: &str) -> bool {
@@ -2200,6 +2195,73 @@ jobs:
     }
 
     #[test]
+    fn authority_detector_scopes_release_permissions_to_each_job() {
+        let yaml = r#"
+name: Release
+
+on:
+  workflow_dispatch:
+
+jobs:
+  publish:
+    if: github.repository == 'EffortlessMetrics/shipper'
+    permissions:
+      id-token: write
+    steps:
+      - run: cargo publish
+  inspect:
+    steps:
+      - run: echo report
+"#;
+
+        let findings = analyze_workflow_authority(
+            ".github/workflows/release.yml",
+            "release",
+            Some("EffortlessMetrics/shipper"),
+            yaml,
+        );
+
+        assert!(
+            !findings.iter().any(|finding| {
+                finding.job == "publish" && finding.capability == "id-token:write"
+            })
+        );
+    }
+
+    #[test]
+    fn authority_detector_does_not_treat_nested_echo_as_mutation() {
+        let yaml = r#"
+name: Shell report
+
+on:
+  workflow_dispatch:
+
+jobs:
+  report:
+    steps:
+      - run: echo $(echo git add .)
+"#;
+
+        let findings = analyze_workflow_authority(
+            ".github/workflows/_template.yml",
+            "maintenance",
+            None,
+            yaml,
+        );
+
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.capability == "git-add")
+        );
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.capability == "temporary-workflow-identity")
+        );
+    }
+
+    #[test]
     fn authority_detector_rejects_workflow_level_write_permissions() {
         let yaml = r#"
 name: Mixed CI
@@ -2461,14 +2523,6 @@ jobs:
                 .iter()
                 .any(|finding| finding.capability == "*:read")
         );
-    }
-
-    #[test]
-    fn repository_guard_check_rejects_empty_workflow() {
-        assert!(!workflow_has_repository_guard(
-            "name: Empty\n\npermissions: read-all\n",
-            "EffortlessMetrics/shipper"
-        ));
     }
 
     #[test]
