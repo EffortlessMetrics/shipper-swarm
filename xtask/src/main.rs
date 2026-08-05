@@ -21,6 +21,7 @@ mod package_surface;
 mod policy_report;
 mod precommit;
 mod propose;
+mod release_identity;
 mod ripr;
 mod workflow_checks;
 
@@ -81,6 +82,10 @@ enum Command {
     /// Run every advisory check and emit a unified policy report.
     #[command(name = "policy-report")]
     PolicyReport,
+
+    /// Validate the approved release source, package graph, and release notes.
+    #[command(name = "release-identity")]
+    ReleaseIdentity(Box<release_identity::ReleaseIdentityArgs>),
 
     /// Validate Clippy lint policy: MSRV alignment + workspace.lints coverage.
     #[command(name = "check-lint-policy")]
@@ -234,6 +239,7 @@ fn main() -> Result<()> {
         Command::CheckProcessPolicy(args) => workflow_checks::check_process_policy(args.mode)?,
         Command::CheckNetworkPolicy(args) => workflow_checks::check_network_policy(args.mode)?,
         Command::PolicyReport => policy_report::policy_report()?,
+        Command::ReleaseIdentity(args) => release_identity::validate(*args)?,
         Command::CheckLintPolicy => clippy_checks::check_lint_policy()?,
         Command::CheckClippyExceptions => clippy_checks::check_clippy_exceptions()?,
         Command::CheckDocContracts(args) => doc_contracts::check(args.mode)?,
