@@ -622,6 +622,7 @@ fn analyze_workflow_authority(
             );
             let workflow_level = scope.job == "<workflow>";
             if workflow_level
+                || capability == "*"
                 || (high_risk
                     && (kind != "release"
                         || required_repository
@@ -652,7 +653,7 @@ fn analyze_workflow_authority(
                     .any(|scope| scope.values.get("id-token").is_some_and(|v| v == "write")));
 
         for step in &steps {
-            for capability in self_mutation_capabilities(&step.content, workflow) {
+            for capability in self_mutation_capabilities(&step.content) {
                 findings.push(authority_finding(
                     workflow,
                     &job,
@@ -874,10 +875,10 @@ fn workflow_permission_scopes(yaml_text: &str) -> Vec<PermissionScope> {
         let without_comment = strip_yaml_inline_comment(lines[index]);
         let trimmed = without_comment.trim();
         let indent = without_comment.len() - without_comment.trim_start().len();
-        if indent == 0 && trimmed == "permissions:" {
+        if indent == 0 && trimmed.starts_with("permissions:") {
             scopes.push(PermissionScope {
                 job: "<workflow>".to_string(),
-                values: parse_nested_mapping(&lines, index, indent),
+                values: parse_permission_mapping(&lines, index, indent),
             });
             break;
         }
@@ -895,10 +896,10 @@ fn workflow_permission_scopes_for_job(block: &str, job: &str) -> Vec<PermissionS
         let without_comment = strip_yaml_inline_comment(line);
         let trimmed = without_comment.trim();
         let indent = without_comment.len() - without_comment.trim_start().len();
-        if indent > 0 && trimmed == "permissions:" {
+        if indent > 0 && trimmed.starts_with("permissions:") {
             return vec![PermissionScope {
                 job: job.to_string(),
-                values: parse_nested_mapping(&lines, index, indent),
+                values: parse_permission_mapping(&lines, index, indent),
             }];
         }
     }
@@ -923,6 +924,46 @@ fn parse_nested_mapping(
         }
         if let Some((key, value)) = trimmed.split_once(':') {
             values.insert(key.trim().to_string(), value.trim().to_ascii_lowercase());
+        }
+    }
+    values
+}
+
+fn parse_permission_mapping(
+    lines: &[&str],
+    start: usize,
+    parent_indent: usize,
+) -> BTreeMap<String, String> {
+    let declaration = strip_yaml_inline_comment(lines[start]);
+    let value = declaration
+        .trim()
+        .strip_prefix("permissions:")
+        .map(str::trim)
+        .unwrap_or_default();
+    if value.is_empty() {
+        return parse_nested_mapping(lines, start, parent_indent);
+    }
+
+    let mut values = BTreeMap::new();
+    let normalized = value.trim_matches(['{', '}']).trim();
+    if normalized.eq_ignore_ascii_case("write-all") {
+        values.insert("*".to_string(), "write-all".to_string());
+    } else if normalized.eq_ignore_ascii_case("read-all") {
+        values.insert("*".to_string(), "read-all".to_string());
+    } else {
+        for pair in normalized.split(',') {
+            if let Some((key, permission)) = pair.split_once(':') {
+                values.insert(
+                    key.trim().trim_matches(['\'', '"']).to_string(),
+                    permission
+                        .trim()
+                        .trim_matches(['\'', '"'])
+                        .to_ascii_lowercase(),
+                );
+            }
+        }
+        if values.is_empty() {
+            values.insert("*".to_string(), normalized.to_ascii_lowercase());
         }
     }
     values
@@ -1017,7 +1058,7 @@ fn workflow_step_blocks(job_block: &str) -> Vec<WorkflowStepBlock> {
     steps
 }
 
-fn self_mutation_capabilities(content: &str, workflow: &str) -> Vec<&'static str> {
+fn self_mutation_capabilities(content: &str) -> Vec<&'static str> {
     let code: String = content
         .lines()
         .map(strip_yaml_inline_comment)
@@ -1034,19 +1075,68 @@ fn self_mutation_capabilities(content: &str, workflow: &str) -> Vec<&'static str
         ("git tag", "git-tag-mutation"),
         ("gh api", "github-api-mutation"),
     ] {
-        if lower.contains(command) && (command != "gh api" || gh_api_mutates(&lower)) {
+        if shell_contains_command(&lower, command)
+            && (command != "gh api" || gh_api_mutates(&lower))
+        {
             capabilities.push(capability);
         }
     }
-    let deletes_workflow = lower.contains(".github/workflows/")
-        && (lower.contains("rm ")
-            || lower.contains("git rm")
-            || lower.contains("remove-item")
-            || lower.contains("del "));
-    if deletes_workflow || lower.contains(&workflow.to_ascii_lowercase()) && lower.contains("rm ") {
+    let deletes_workflow = shell_segments(&lower).iter().any(|segment| {
+        let delete_command = shell_starts_with_command(segment, "rm")
+            || shell_starts_with_command(segment, "git rm")
+            || shell_starts_with_command(segment, "remove-item")
+            || shell_starts_with_command(segment, "del");
+        delete_command && segment.contains(".github/workflows/")
+    });
+    if deletes_workflow {
         capabilities.push("workflow-self-deletion");
     }
     capabilities
+}
+
+fn shell_segments(text: &str) -> Vec<&str> {
+    text.split(['\n', ';', '|', '&'])
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .collect()
+}
+
+fn shell_contains_command(text: &str, command: &str) -> bool {
+    shell_segments(text)
+        .iter()
+        .any(|segment| shell_starts_with_command(segment, command))
+}
+
+fn shell_starts_with_command(segment: &str, command: &str) -> bool {
+    let mut candidate = segment.trim();
+    loop {
+        let next = candidate
+            .strip_prefix("if ")
+            .or_else(|| candidate.strip_prefix("then "))
+            .or_else(|| candidate.strip_prefix("do "))
+            .or_else(|| candidate.strip_prefix("sudo "))
+            .or_else(|| candidate.strip_prefix("run:"))
+            .or_else(|| candidate.strip_prefix("!"))
+            .or_else(|| candidate.strip_prefix("("))
+            .or_else(|| candidate.strip_prefix("{"));
+        let Some(next) = next else {
+            break;
+        };
+        candidate = next.trim_start();
+    }
+    while let Some(first) = candidate.split_whitespace().next() {
+        if !first.contains('=') || first.starts_with('=') {
+            break;
+        }
+        let Some(offset) = candidate.find(first) else {
+            break;
+        };
+        candidate = candidate[offset + first.len()..].trim_start();
+    }
+    candidate == command
+        || candidate
+            .strip_prefix(command)
+            .is_some_and(|rest| rest.starts_with(char::is_whitespace))
 }
 
 fn gh_api_mutates(lowercase_content: &str) -> bool {
@@ -2184,6 +2274,8 @@ jobs:
     steps:
       - name: Read ref
         run: gh api repos/EffortlessMetrics/shipper/git/ref/heads/main
+      - name: Explain the command
+        run: echo "git push origin main"
 "#;
 
         let findings = analyze_workflow_authority(
@@ -2197,6 +2289,11 @@ jobs:
             !findings
                 .iter()
                 .any(|finding| finding.capability == "github-api-mutation")
+        );
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.capability == "git-push")
         );
     }
 }
