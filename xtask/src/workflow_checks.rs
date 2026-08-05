@@ -852,19 +852,40 @@ fn temporary_workflow_identity(path: &str, name: &str) -> bool {
 }
 
 fn temporary_branch_filters(yaml_text: &str) -> Vec<String> {
-    yaml_text
-        .lines()
-        .filter_map(|line| {
-            let lower = strip_yaml_inline_comment(line).to_ascii_lowercase();
-            if !lower.contains("branches:") {
-                return None;
+    let markers = ["temp", "temporary", "repair", "proof-pulse", "one-off"];
+    let mut found = BTreeSet::new();
+    let lines: Vec<&str> = yaml_text.lines().collect();
+    for (index, line) in lines.iter().enumerate() {
+        let without_comment = strip_yaml_inline_comment(line);
+        let trimmed = without_comment.trim();
+        if !trimmed.starts_with("branches:") {
+            continue;
+        }
+        let indent = without_comment.len() - without_comment.trim_start().len();
+        let inline = trimmed.strip_prefix("branches:").unwrap_or_default();
+        if let Some(marker) = markers.iter().find(|marker| inline.contains(**marker)) {
+            found.insert((*marker).to_string());
+        }
+        for branch_line in lines.iter().skip(index + 1) {
+            let branch_without_comment = strip_yaml_inline_comment(branch_line);
+            let branch_trimmed = branch_without_comment.trim();
+            if branch_trimmed.is_empty() {
+                continue;
             }
-            let marker = ["temp", "temporary", "repair", "proof-pulse", "one-off"]
+            let branch_indent =
+                branch_without_comment.len() - branch_without_comment.trim_start().len();
+            if branch_indent <= indent {
+                break;
+            }
+            if let Some(marker) = markers
                 .iter()
-                .find(|marker| lower.contains(**marker))?;
-            Some(marker.to_string())
-        })
-        .collect()
+                .find(|marker| branch_trimmed.contains(**marker))
+            {
+                found.insert((*marker).to_string());
+            }
+        }
+    }
+    found.into_iter().collect()
 }
 
 fn workflow_permission_scopes(yaml_text: &str) -> Vec<PermissionScope> {
@@ -947,9 +968,9 @@ fn parse_permission_mapping(
     let mut values = BTreeMap::new();
     let normalized = value.trim_matches(['{', '}']).trim();
     if normalized.eq_ignore_ascii_case("write-all") {
-        values.insert("*".to_string(), "write-all".to_string());
+        values.insert("*".to_string(), "write".to_string());
     } else if normalized.eq_ignore_ascii_case("read-all") {
-        values.insert("*".to_string(), "read-all".to_string());
+        values.insert("*".to_string(), "read".to_string());
     } else {
         for pair in normalized.split(',') {
             if let Some((key, permission)) = pair.split_once(':') {
@@ -979,9 +1000,11 @@ fn scope_has_write_permission(scopes: &[PermissionScope]) -> bool {
 }
 
 fn workflow_has_repository_guard(yaml_text: &str, repository: &str) -> bool {
-    workflow_job_blocks(yaml_text)
-        .iter()
-        .all(|(_, block)| block_has_repository_guard(block, repository))
+    let jobs = workflow_job_blocks(yaml_text);
+    !jobs.is_empty()
+        && jobs
+            .iter()
+            .all(|(_, block)| block_has_repository_guard(block, repository))
 }
 
 fn contains_release_authority(text: &str) -> bool {
@@ -995,10 +1018,47 @@ fn contains_release_authority(text: &str) -> bool {
 }
 
 fn has_dispatch_ref_input(yaml_text: &str) -> bool {
-    yaml_text.lines().any(|line| {
-        let trimmed = strip_yaml_inline_comment(line).trim();
-        trimmed == "ref:" || trimmed.starts_with("ref:")
-    })
+    let lines: Vec<&str> = yaml_text.lines().collect();
+    let mut in_on = false;
+    let mut in_dispatch = false;
+    let mut inputs_indent = None;
+    for line in lines {
+        let without_comment = strip_yaml_inline_comment(line);
+        let trimmed = without_comment.trim();
+        let indent = without_comment.len() - without_comment.trim_start().len();
+        if indent == 0 && trimmed.starts_with("on:") {
+            in_on = true;
+            continue;
+        }
+        if !in_on {
+            continue;
+        }
+        if indent == 0 {
+            break;
+        }
+        if indent == 2 {
+            in_dispatch = trimmed.starts_with("workflow_dispatch:");
+            inputs_indent = None;
+            continue;
+        }
+        if !in_dispatch {
+            continue;
+        }
+        if indent == 4 && trimmed.starts_with("inputs:") {
+            inputs_indent = Some(indent);
+            continue;
+        }
+        if let Some(parent_indent) = inputs_indent {
+            if indent <= parent_indent {
+                inputs_indent = None;
+                continue;
+            }
+            if indent == parent_indent + 2 && trimmed.starts_with("ref:") {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn has_exact_release_identity_language(yaml_text: &str) -> bool {
@@ -1066,6 +1126,7 @@ fn self_mutation_capabilities(content: &str) -> Vec<&'static str> {
         .collect::<Vec<_>>()
         .join("\n");
     let lower = code.to_ascii_lowercase();
+    let segments = shell_segments(&lower);
     let mut capabilities = Vec::new();
     for (command, capability) in [
         ("git add", "git-add"),
@@ -1075,9 +1136,17 @@ fn self_mutation_capabilities(content: &str) -> Vec<&'static str> {
         ("git tag", "git-tag-mutation"),
         ("gh api", "github-api-mutation"),
     ] {
-        if shell_contains_command(&lower, command)
-            && (command != "gh api" || gh_api_mutates(&lower))
-        {
+        let mut matches = segments
+            .iter()
+            .filter(|segment| shell_contains_command(segment, command));
+        let mut detected = matches.next().is_some();
+        if command == "gh api" {
+            detected = segments
+                .iter()
+                .filter(|segment| shell_contains_command(segment, command))
+                .any(|segment| gh_api_mutates(segment));
+        }
+        if detected {
             capabilities.push(capability);
         }
     }
@@ -2235,6 +2304,105 @@ jobs:
                 finding.capability == "tag-release-without-approved-source-gate"
             })
         );
+    }
+
+    #[test]
+    fn authority_detector_handles_block_branch_filters_and_dispatch_scope() {
+        let yaml = r#"
+name: Repair gate
+
+on:
+  push:
+    branches:
+      - repair/one-off
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "A ref-like target, not the release ref input"
+      ref:
+        description: Exact approved SHA.
+"#;
+
+        let findings =
+            analyze_workflow_authority(".github/workflows/repair.yml", "maintenance", None, yaml);
+
+        assert!(
+            findings
+                .iter()
+                .any(|finding| { finding.capability == "temporary-branch-filter:repair" })
+        );
+        assert!(has_dispatch_ref_input(yaml));
+        assert!(!has_dispatch_ref_input(
+            "on:\n  workflow_dispatch:\n    inputs:\n      target:\n        default: main\nenv:\n  ref: unrelated\n"
+        ));
+    }
+
+    #[test]
+    fn authority_detector_bounds_each_gh_api_invocation() {
+        let yaml = r#"
+name: Release inspection
+
+on:
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    steps:
+      - name: Read and mutate separate refs
+        run: |
+          gh api repos/EffortlessMetrics/shipper/git/ref/heads/main --method get
+          gh api repos/EffortlessMetrics/shipper/git/ref/heads/main --method POST
+"#;
+
+        let findings =
+            analyze_workflow_authority(".github/workflows/inspect.yml", "ci", None, yaml);
+
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.capability == "github-api-mutation")
+        );
+    }
+
+    #[test]
+    fn authority_detector_models_scalar_permissions() {
+        let write_all = r#"
+name: Broad permissions
+
+on: workflow_dispatch
+
+permissions: write-all
+
+jobs:
+  check:
+    steps:
+      - run: cargo test
+"#;
+        let read_all = write_all.replace("write-all", "read-all");
+
+        let write_findings =
+            analyze_workflow_authority(".github/workflows/broad.yml", "ci", None, write_all);
+        assert!(
+            write_findings
+                .iter()
+                .any(|finding| { finding.job == "<workflow>" && finding.capability == "*:write" })
+        );
+
+        let read_findings =
+            analyze_workflow_authority(".github/workflows/read.yml", "ci", None, &read_all);
+        assert!(
+            !read_findings
+                .iter()
+                .any(|finding| finding.capability == "*:read")
+        );
+    }
+
+    #[test]
+    fn repository_guard_check_rejects_empty_workflow() {
+        assert!(!workflow_has_repository_guard(
+            "name: Empty\n\npermissions: read-all\n",
+            "EffortlessMetrics/shipper"
+        ));
     }
 
     #[test]
