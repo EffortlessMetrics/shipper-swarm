@@ -93,8 +93,7 @@ fn date_from_unix_days(unix_days: i64) -> Option<NaiveDate> {
     let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
     let day_of_era = days - era * 146_097;
     let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096)
-            / 365;
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
     let year = year_of_era + era * 400;
     let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
     let month_prime = (5 * day_of_year + 2) / 153;
@@ -328,10 +327,7 @@ mod tests {
 
     #[test]
     fn unix_epoch_converts_to_the_expected_civil_date() {
-        assert_eq!(
-            date_from_unix_days(0),
-            NaiveDate::from_ymd_opt(1970, 1, 1)
-        );
+        assert_eq!(date_from_unix_days(0), NaiveDate::from_ymd_opt(1970, 1, 1));
     }
 
     #[test]
