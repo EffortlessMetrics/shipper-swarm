@@ -10,8 +10,11 @@ on:
       - "fuzz/**"
       - ".github/workflows/coverage.yml"
       - "codecov.yml"
+  # Label changes intentionally do not launch or cancel coverage. Add the
+  # `coverage`/`full-ci` label, then use workflow_dispatch for an immediate
+  # operator refresh or let the next code-changing PR event evaluate it.
   pull_request:
-    types: [opened, synchronize, reopened, labeled]
+    types: [opened, synchronize, reopened]
     branches: [main]
     paths:
       - "Cargo.toml"
