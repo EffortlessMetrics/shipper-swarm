@@ -157,8 +157,16 @@ impl DoctorSummary {
     }
 
     pub(super) fn print_human(&self) {
+        self.print_human_with_label("Doctor");
+    }
+
+    pub(super) fn print_registry_human(&self) {
+        self.print_human_with_label("Registry doctor");
+    }
+
+    fn print_human_with_label(&self, label: &str) {
         println!();
-        println!("Doctor: {}", self.readiness.as_str());
+        println!("{label}: {}", self.readiness.as_str());
         println!(
             "Checks: {} evaluated, {} passed, {} warnings, {} blockers, {} unknown",
             self.checks_evaluated,
