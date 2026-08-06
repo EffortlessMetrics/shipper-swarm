@@ -281,8 +281,17 @@ pub(crate) fn run(
 
     let report_summary =
         summarize_report(&auth, &state_dir, &tools, &connectivity, &git, &encryption);
-    let run_summary = summary::DoctorSummary::combine(workspace.check_status(), [report_summary]);
-    run_summary.print_human();
+    if opts.registries.len() > 1 {
+        // Multi-registry text output is one block per registry. Keep these
+        // totals registry-scoped and do not count the run-scoped workspace
+        // condition once per registry. The workspace finding remains visible
+        // exactly once in the first block; JSON retains one true run total.
+        report_summary.print_registry_human();
+    } else {
+        let run_summary =
+            summary::DoctorSummary::combine(workspace.check_status(), [report_summary]);
+        run_summary.print_human();
+    }
 
     println!();
     println!("Diagnostics complete.");
