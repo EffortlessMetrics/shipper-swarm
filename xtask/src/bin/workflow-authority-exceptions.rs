@@ -7,6 +7,7 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use chrono::NaiveDate;
@@ -15,6 +16,7 @@ use serde::Deserialize;
 const LEDGER: &str = "policy/workflow-authority-exceptions.toml";
 const EXPECTED_SCHEMA: &str = "1.0";
 const EXPECTED_POLICY: &str = "workflow-authority-exceptions";
+const SECONDS_PER_DAY: u64 = 86_400;
 
 #[derive(Debug, Deserialize)]
 struct AuthorityExceptionDoc {
@@ -63,13 +65,48 @@ fn main() -> Result<()> {
         .with_context(|| format!("reading workflow authority ledger {}", path.display()))?;
     let doc: AuthorityExceptionDoc = toml::from_str(&text)
         .with_context(|| format!("parsing workflow authority ledger {}", path.display()))?;
-    let today = chrono::Utc::now().date_naive();
+    let today = current_utc_date()?;
     let count = validate_doc(&doc, today, |workflow| root.join(workflow).is_file())?;
     println!(
         "workflow authority exceptions: schema={} entries={} invalid=0 expired=0 duplicates=0",
         doc.schema_version, count
     );
     Ok(())
+}
+
+fn current_utc_date() -> Result<NaiveDate> {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before the Unix epoch")?;
+    let unix_days = i64::try_from(elapsed.as_secs() / SECONDS_PER_DAY)
+        .context("current Unix day does not fit in i64")?;
+    date_from_unix_days(unix_days).context("current UTC date is outside Chrono's supported range")
+}
+
+/// Convert whole UTC days since 1970-01-01 to a civil date.
+///
+/// This is Howard Hinnant's public-domain civil-from-days algorithm. Keeping
+/// the conversion here avoids requiring Chrono's wall-clock feature merely to
+/// expire a private repository policy record.
+fn date_from_unix_days(unix_days: i64) -> Option<NaiveDate> {
+    let days = unix_days.checked_add(719_468)?;
+    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
+    let day_of_era = days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096)
+            / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    let year = year + i64::from(month <= 2);
+
+    NaiveDate::from_ymd_opt(
+        i32::try_from(year).ok()?,
+        u32::try_from(month).ok()?,
+        u32::try_from(day).ok()?,
+    )
 }
 
 fn workspace_root() -> Result<PathBuf> {
@@ -287,6 +324,14 @@ mod tests {
 
     fn today() -> NaiveDate {
         NaiveDate::parse_from_str(TODAY, "%Y-%m-%d").expect("valid date")
+    }
+
+    #[test]
+    fn unix_epoch_converts_to_the_expected_civil_date() {
+        assert_eq!(
+            date_from_unix_days(0),
+            NaiveDate::from_ymd_opt(1970, 1, 1)
+        );
     }
 
     #[test]
