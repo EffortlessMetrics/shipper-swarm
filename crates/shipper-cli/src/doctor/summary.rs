@@ -160,7 +160,8 @@ impl DoctorSummary {
         println!();
         println!("Doctor: {}", self.readiness.as_str());
         println!(
-            "Checks: {} passed, {} warnings, {} blockers, {} unknown",
+            "Checks: {} evaluated, {} passed, {} warnings, {} blockers, {} unknown",
+            self.checks_evaluated,
             self.checks_passed,
             self.warning_count,
             self.blocker_count,
@@ -195,6 +196,7 @@ mod tests {
         let summary =
             DoctorSummary::from_statuses([DoctorCheckStatus::Passed, DoctorCheckStatus::Passed]);
         assert_eq!(summary.readiness, DoctorReadiness::Ready);
+        assert_eq!(summary.checks_evaluated, 2);
         assert_eq!(summary.checks_passed, 2);
         assert_eq!(summary.next_action.kind, DoctorActionKind::Plan);
     }
