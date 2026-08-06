@@ -1,0 +1,7 @@
+kind: changed
+body: Make `shipper doctor` report explicit readiness, check counts, and the first safe next action in human and JSON output.
+time: 2026-08-06T04:35:00Z
+custom:
+  Audience: CLI users and CI operators
+  Importance: Detailed
+  PR: 278
