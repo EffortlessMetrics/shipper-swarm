@@ -141,7 +141,7 @@ fn doctor_ready_summary_is_consistent_in_human_and_json_output() {
         .success()
         .stdout(contains("Doctor: ready"))
         .stdout(contains(
-            "Checks: 8 passed, 0 warnings, 0 blockers, 0 unknown",
+            "Checks: 8 evaluated, 8 passed, 0 warnings, 0 blockers, 0 unknown",
         ))
         .stdout(contains("Next: shipper plan"))
         .stdout(predicates::str::contains("doctor-summary-secret").not());
