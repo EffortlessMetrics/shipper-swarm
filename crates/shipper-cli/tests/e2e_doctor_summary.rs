@@ -7,6 +7,7 @@ use std::thread;
 use std::time::Duration;
 
 use assert_cmd::Command;
+use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 use tempfile::tempdir;
 use tiny_http::{Header, Response, Server, StatusCode};
