@@ -1,0 +1,18 @@
+schema_version = "1.0"
+policy = "workflow-authority-exceptions"
+owner = "release/ci"
+status = "active"
+
+[[authority_exception]]
+workflow = ".github/workflows/droid-security-scan.yml"
+job = "droid-security-scan"
+step = "<permissions>"
+capability = "contents:write"
+trigger = "schedule,workflow_dispatch"
+repository = "EffortlessMetrics/shipper-swarm"
+finding_repository_boundary = "not declared"
+owner = "release/ci"
+reason = "The durable scheduled/manual security scan may create a reviewable security-report branch and pull request; removing repository write authority would make that maintained output path incorrect."
+covered_by = "Trusted self-hosted runner labels, fixed action SHA, scheduled/manual triggers only, generated security-report branch exclusion from automatic review, pull-request review before merge, and no OIDC authority."
+created = "2026-08-06"
+review_after = "2026-11-06"
