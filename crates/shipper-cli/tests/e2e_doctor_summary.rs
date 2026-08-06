@@ -40,25 +40,27 @@ edition = "2021"
     write_file(&root.join("demo/src/lib.rs"), "pub fn demo() {}\n");
 }
 
-fn run_git(root: &Path, args: &[&str]) {
-    let output = StdCommand::new("git")
+fn run_command(root: &Path, program: &str, args: &[&str]) {
+    let output = StdCommand::new(program)
         .args(args)
         .current_dir(root)
         .output()
-        .expect("run git");
+        .unwrap_or_else(|error| panic!("run {program}: {error}"));
     assert!(
         output.status.success(),
-        "git {:?} failed: {}",
+        "{program} {:?} failed: {}",
         args,
         String::from_utf8_lossy(&output.stderr)
     );
 }
 
 fn initialize_clean_git_workspace(root: &Path) {
-    run_git(root, &["init"]);
-    run_git(root, &["add", "."]);
-    run_git(
+    run_command(root, "cargo", &["generate-lockfile"]);
+    run_command(root, "git", &["init"]);
+    run_command(root, "git", &["add", "."]);
+    run_command(
         root,
+        "git",
         &[
             "-c",
             "user.name=Shipper Test",
