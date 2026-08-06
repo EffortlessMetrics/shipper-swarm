@@ -147,9 +147,7 @@ where
         require_text(label, value, minimum)?;
     }
 
-    if !entry.workflow.starts_with(".github/workflows/")
-        || !entry.workflow.ends_with(".yml")
-    {
+    if !entry.workflow.starts_with(".github/workflows/") || !entry.workflow.ends_with(".yml") {
         bail!(
             "authority exception workflow must name one exact .github/workflows/*.yml path: {}",
             entry.workflow
@@ -275,10 +273,12 @@ mod tests {
                 repository: "EffortlessMetrics/shipper-swarm".to_string(),
                 finding_repository_boundary: "not declared".to_string(),
                 owner: "release/ci".to_string(),
-                reason: "A durable security-report branch requires exact repository write authority."
-                    .to_string(),
-                covered_by: "Scheduled/manual triggers, fixed action SHA, trusted runner, and review."
-                    .to_string(),
+                reason:
+                    "A durable security-report branch requires exact repository write authority."
+                        .to_string(),
+                covered_by:
+                    "Scheduled/manual triggers, fixed action SHA, trusted runner, and review."
+                        .to_string(),
                 created: "2026-08-06".to_string(),
                 review_after: "2026-11-06".to_string(),
             }],
@@ -291,13 +291,17 @@ mod tests {
 
     #[test]
     fn accepts_one_exact_current_exception() {
-        assert_eq!(validate_doc(&valid_doc(), today(), |_| true).expect("valid"), 1);
+        assert_eq!(
+            validate_doc(&valid_doc(), today(), |_| true).expect("valid"),
+            1
+        );
     }
 
     #[test]
     fn rejects_duplicate_exception_identity() {
         let mut doc = valid_doc();
-        doc.authority_exception.push(doc.authority_exception[0].clone());
+        doc.authority_exception
+            .push(doc.authority_exception[0].clone());
         let error = validate_doc(&doc, today(), |_| true).expect_err("duplicate must fail");
         assert!(error.to_string().contains("duplicate"), "{error:#}");
     }
