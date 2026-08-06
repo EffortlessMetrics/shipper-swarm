@@ -177,14 +177,7 @@ pub(crate) fn collect_report(
     findings.extend(git.findings.clone());
     findings.extend(encryption.findings.clone());
 
-    let summary = summarize_report(
-        &auth,
-        &state_dir,
-        &tools,
-        &connectivity,
-        &git,
-        &encryption,
-    );
+    let summary = summarize_report(&auth, &state_dir, &tools, &connectivity, &git, &encryption);
 
     Ok(DoctorReport {
         workspace_root: ws.workspace_root.display().to_string(),
@@ -286,16 +279,9 @@ pub(crate) fn run(
 
     findings::print_findings(&all);
 
-    let report_summary = summarize_report(
-        &auth,
-        &state_dir,
-        &tools,
-        &connectivity,
-        &git,
-        &encryption,
-    );
-    let run_summary =
-        summary::DoctorSummary::combine(workspace.check_status(), [report_summary]);
+    let report_summary =
+        summarize_report(&auth, &state_dir, &tools, &connectivity, &git, &encryption);
+    let run_summary = summary::DoctorSummary::combine(workspace.check_status(), [report_summary]);
     run_summary.print_human();
 
     println!();
