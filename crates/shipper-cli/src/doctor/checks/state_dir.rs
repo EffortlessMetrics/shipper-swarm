@@ -14,7 +14,10 @@ pub(in crate::doctor) struct StateDirCheck {
     pub findings: Vec<Finding>,
 }
 
-pub(in crate::doctor) fn check(ws: &plan::PlannedWorkspace, opts: &RuntimeOptions) -> Vec<Finding> {
+pub(in crate::doctor) fn check(
+    ws: &plan::PlannedWorkspace,
+    opts: &RuntimeOptions,
+) -> StateDirCheck {
     let check = inspect(ws, opts);
     println!("state_dir: {}", check.path);
     if check.exists {
@@ -24,7 +27,7 @@ pub(in crate::doctor) fn check(ws: &plan::PlannedWorkspace, opts: &RuntimeOption
     } else {
         println!("state_dir_exists: false (will be created)");
     }
-    check.findings
+    check
 }
 
 pub(in crate::doctor) fn inspect(
