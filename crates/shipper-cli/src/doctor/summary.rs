@@ -59,9 +59,7 @@ pub(super) struct DoctorSummary {
 }
 
 impl DoctorSummary {
-    pub(super) fn from_statuses(
-        statuses: impl IntoIterator<Item = DoctorCheckStatus>,
-    ) -> Self {
+    pub(super) fn from_statuses(statuses: impl IntoIterator<Item = DoctorCheckStatus>) -> Self {
         let mut checks_evaluated = 0;
         let mut checks_passed = 0;
         let mut warning_count = 0;
@@ -194,10 +192,8 @@ mod tests {
 
     #[test]
     fn readiness_is_ready_when_every_check_passes() {
-        let summary = DoctorSummary::from_statuses([
-            DoctorCheckStatus::Passed,
-            DoctorCheckStatus::Passed,
-        ]);
+        let summary =
+            DoctorSummary::from_statuses([DoctorCheckStatus::Passed, DoctorCheckStatus::Passed]);
         assert_eq!(summary.readiness, DoctorReadiness::Ready);
         assert_eq!(summary.checks_passed, 2);
         assert_eq!(summary.next_action.kind, DoctorActionKind::Plan);
@@ -218,10 +214,8 @@ mod tests {
 
     #[test]
     fn unknown_required_checks_make_the_result_incomplete() {
-        let summary = DoctorSummary::from_statuses([
-            DoctorCheckStatus::Passed,
-            DoctorCheckStatus::Unknown,
-        ]);
+        let summary =
+            DoctorSummary::from_statuses([DoctorCheckStatus::Passed, DoctorCheckStatus::Unknown]);
         assert_eq!(summary.readiness, DoctorReadiness::Incomplete);
         assert_eq!(
             summary.next_action.kind,
@@ -231,10 +225,8 @@ mod tests {
 
     #[test]
     fn warnings_without_blockers_remain_actionable() {
-        let summary = DoctorSummary::from_statuses([
-            DoctorCheckStatus::Passed,
-            DoctorCheckStatus::Warning,
-        ]);
+        let summary =
+            DoctorSummary::from_statuses([DoctorCheckStatus::Passed, DoctorCheckStatus::Warning]);
         assert_eq!(summary.readiness, DoctorReadiness::ReadyWithWarnings);
         assert_eq!(summary.next_action.command, vec!["shipper", "plan"]);
     }
