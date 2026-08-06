@@ -1,5 +1,5 @@
 kind: changed
-body: Establish one typed CLI vocabulary for operator status, safe-rerun posture, next actions, evidence, and release identity.
+body: Establish one typed CLI vocabulary for concrete operator next actions and confirmation posture.
 time: 2026-08-06T05:50:00Z
 custom:
   Audience: CLI users and CI operators
