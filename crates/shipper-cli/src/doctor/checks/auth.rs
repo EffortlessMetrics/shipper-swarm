@@ -14,10 +14,10 @@ pub(in crate::doctor) struct AuthCheck {
     pub findings: Vec<Finding>,
 }
 
-pub(in crate::doctor) fn check(ws: &plan::PlannedWorkspace) -> Result<Vec<Finding>> {
+pub(in crate::doctor) fn check(ws: &plan::PlannedWorkspace) -> Result<AuthCheck> {
     let check = inspect(ws)?;
     println!("auth_type: {}", check.auth_type);
-    Ok(check.findings)
+    Ok(check)
 }
 
 pub(in crate::doctor) fn inspect(ws: &plan::PlannedWorkspace) -> Result<AuthCheck> {
