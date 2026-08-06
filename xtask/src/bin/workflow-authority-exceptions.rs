@@ -6,7 +6,7 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use chrono::NaiveDate;
@@ -155,7 +155,11 @@ where
             entry.workflow
         );
     }
-    if entry.workflow.contains(['*', '?', '[', ']']) {
+    if entry
+        .workflow
+        .chars()
+        .any(|character| matches!(character, '*' | '?' | '[' | ']'))
+    {
         bail!(
             "authority exception workflow may not contain a glob: {}",
             entry.workflow
