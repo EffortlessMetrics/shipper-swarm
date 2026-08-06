@@ -103,17 +103,15 @@ fn spawn_registry(expected_requests: usize) -> TestRegistry {
                     Header::from_bytes("Content-Type", "application/json")
                         .expect("content-type header"),
                 );
-            request.respond(response).expect("respond to registry request");
+            request
+                .respond(response)
+                .expect("respond to registry request");
         }
     });
     TestRegistry { base_url, handle }
 }
 
-fn configured_doctor_command(
-    workspace: &Path,
-    cargo_home: &Path,
-    registry: &str,
-) -> Command {
+fn configured_doctor_command(workspace: &Path, cargo_home: &Path, registry: &str) -> Command {
     let mut command = shipper_cmd();
     command
         .arg("--allow-loopback")
