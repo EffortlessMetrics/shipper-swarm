@@ -7,7 +7,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const SKILLS: [&str; 5] = [
+const SKILLS: [&str; 6] = [
+    "deliver-goal",
     "finish-pr",
     "final-challenge",
     "review-pr",
@@ -51,6 +52,12 @@ fn assert_in_order(text: &str, markers: &[&str], subject: &str) {
     }
 }
 
+fn before_section<'a>(text: &'a str, heading: &str, subject: &str) -> &'a str {
+    text.split_once(heading)
+        .map(|(common, _)| common.trim_end())
+        .unwrap_or_else(|| panic!("{subject} must contain provider mechanics heading `{heading}`"))
+}
+
 #[test]
 fn both_providers_have_complete_native_skill_routes() {
     let root = repository_root();
@@ -72,11 +79,54 @@ fn both_providers_have_complete_native_skill_routes() {
 }
 
 #[test]
+fn provider_routes_keep_shared_semantics_in_lockstep() {
+    let root = repository_root();
+
+    for skill in [
+        "deliver-goal",
+        "finish-pr",
+        "final-challenge",
+        "verify-live-ci",
+        "merge-reconcile",
+    ] {
+        let codex_path = format!(".agents/skills/{skill}/SKILL.md");
+        let claude_path = format!(".claude/skills/{skill}/SKILL.md");
+        assert_eq!(
+            read(&root, &codex_path),
+            read(&root, &claude_path),
+            "{skill} semantics drifted between Codex and Claude"
+        );
+    }
+
+    let codex_path = ".agents/skills/review-pr/SKILL.md";
+    let claude_path = ".claude/skills/review-pr/SKILL.md";
+    let codex = read(&root, codex_path);
+    let claude = read(&root, claude_path);
+    assert_eq!(
+        before_section(&codex, "## Codex execution mechanics", codex_path),
+        before_section(
+            &claude,
+            "## Claude Code execution mechanics",
+            claude_path
+        ),
+        "review-pr shared semantics drifted before the provider-specific mechanics section"
+    );
+}
+
+#[test]
 fn entry_points_route_review_before_live_ci_and_merge() {
     let root = repository_root();
     let agents = read(&root, "AGENTS.md");
     let claude = read(&root, "CLAUDE.md");
 
+    assert!(
+        agents.contains(".agents/skills/deliver-goal"),
+        "AGENTS.md must route multi-PR goals through Codex deliver-goal"
+    );
+    assert!(
+        claude.contains(".claude/skills/deliver-goal"),
+        "CLAUDE.md must route multi-PR goals through Claude deliver-goal"
+    );
     assert_in_order(
         &agents,
         &[
@@ -99,6 +149,26 @@ fn entry_points_route_review_before_live_ci_and_merge() {
         ],
         "CLAUDE.md",
     );
+}
+
+#[test]
+fn campaign_skills_require_individual_child_convergence() {
+    let root = repository_root();
+    let required = [
+        "Every related candidate",
+        "provider-native finish-pr",
+        "cannot substitute for child review",
+        "If a merged child moves the base",
+        "Every PR in a stack receives its own candidate result",
+    ];
+
+    for provider in [".agents", ".claude"] {
+        let path = format!("{provider}/skills/deliver-goal/SKILL.md");
+        let content = read(&root, &path);
+        for marker in required {
+            assert!(content.contains(marker), "{path} must contain `{marker}`");
+        }
+    }
 }
 
 #[test]

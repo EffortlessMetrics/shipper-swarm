@@ -121,6 +121,10 @@ Cargo 1.90 stabilized multi-package workspace publishing. Shipper's value is wha
 - `config init` uses `-o`/`--output`; `config validate` uses `-p`/`--path`.
 - `prefer_index` and `index_path` (readiness) are config-file-only settings with no CLI flags.
 
+## Claude Code durable-goal delivery
+
+When the user asks to work issue by issue, PR by PR, finish an umbrella issue, or deliver a durable multi-PR outcome, invoke `.claude/skills/deliver-goal`. It must route every related candidate through `.claude/skills/finish-pr` and its complete challenge, substantive review, live-integration, and merge-reconciliation lifecycle before producing campaign-level synthesis.
+
 ## Claude Code pull-request convergence
 
 When a candidate implementation is assembled, or the user asks to finish, land, carry through, prepare, or merge a PR, invoke the Claude-native route in this order:

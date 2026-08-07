@@ -144,6 +144,10 @@ Factory Droid runs automated review and security review on same-repo PRs and on 
 
 When changing `.github/workflows/droid*.yml`, `.factory/`, or `docs/agent-context/`, follow the smoke-test procedure and update `review-invariants.md` if any invariant changes.
 
+## Codex durable-goal delivery
+
+When the user asks to work issue by issue, PR by PR, finish an umbrella issue, or deliver a durable multi-PR outcome, invoke `.agents/skills/deliver-goal`. It must route every related candidate through `.agents/skills/finish-pr` and its complete challenge, substantive review, live-integration, and merge-reconciliation lifecycle before producing campaign-level synthesis.
+
 ## Codex pull-request convergence
 
 When a candidate implementation is assembled, or the user asks to finish, land, carry through, prepare, or merge a PR, invoke the Codex-native route in this order:
