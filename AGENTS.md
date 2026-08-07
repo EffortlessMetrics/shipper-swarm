@@ -143,3 +143,19 @@ Factory Droid runs automated review and security review on same-repo PRs and on 
 - [`docs/agent-context/droid-smoke-tests.md`](docs/agent-context/droid-smoke-tests.md) — how to verify the Droid workflows after a change.
 
 When changing `.github/workflows/droid*.yml`, `.factory/`, or `docs/agent-context/`, follow the smoke-test procedure and update `review-invariants.md` if any invariant changes.
+
+## Codex pull-request convergence
+
+When a candidate implementation is assembled, or the user asks to finish, land, carry through, prepare, or merge a PR, invoke the Codex-native route in this order:
+
+```text
+.agents/skills/finish-pr
+→ .agents/skills/final-challenge
+→ .agents/skills/review-pr
+→ .agents/skills/verify-live-ci
+→ .agents/skills/merge-reconcile
+```
+
+A direct request to review, check, or assess merge readiness invokes `.agents/skills/review-pr` even when CI is already green. Green CI, mergeability, an approval, a bot summary, or zero unresolved threads cannot substitute for the substantive candidate judgment. Repairs require affected challenge, proof, and re-review before live integration is evaluated again.
+
+The provider-native skill is the executable authority. [`docs/agent-context/review-currentness.md`](docs/agent-context/review-currentness.md) defines shared semantics only and must not replace the complete procedure in `.agents/skills/review-pr/SKILL.md`. Factory Droid remains an additional review lane, not a bypass or substitute for Codex convergence.

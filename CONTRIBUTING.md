@@ -240,6 +240,11 @@ cargo test --package shipper
 - **Link issues**: Reference any related issues.
 - **Small PRs**: Keep changes focused and reviewable.
 - **Changelog disposition**: identify the fragment or the reason no fragment is needed.
+- **Review identity**: record the intended base, exact head, base SHA,
+  merge-base SHA, and any synthetic merge/check commit used for final proof.
+- **Review map**: name semantic owners, callers/consumers, highest-risk
+  invariants, required adversarial/platform proof, and schema/docs/package/
+  support/release impact.
 - **Required gate**: `shipper-swarm/main` requires `Shipper Rust Small Result`;
   do not require route-specific implementation jobs directly because only one
   route runs per attempt.
@@ -249,11 +254,57 @@ cargo test --package shipper
 
 ### Review Process
 
-1. All PRs require at least one approval.
-2. CI must pass (tests, clippy, fmt).
-3. Address review feedback promptly.
-4. Squash-merge normal development PRs into `shipper-swarm/main`; merge
-   source-backfill PRs with a merge commit.
+A PR needs both a substantive **candidate judgment** and a separate live
+**integration posture**. An approval or green check list alone is not enough.
+
+1. Reconstruct the cumulative claim, non-goals, controlling authority, exact
+   head/base/merge-base identities, changed semantic surfaces, proof, prior
+   findings, and limitations.
+2. Apply proportionate correctness, architecture, integration, test-oracle,
+   security/release/claim-boundary, and simplification passes. Inspect relevant
+   callers, consumers, schemas, fixtures, packages, docs, and workflows beyond
+   the changed lines.
+3. Post precise inline findings where GitHub permits. Avoid duplicate threads.
+   A clean review records inspected surfaces, challenge passes, residual risk,
+   evidence provenance, and what remains unproved; a generic `LGTM` is not
+   review evidence.
+4. Return one substantive result:
+
+   ```text
+   REVIEW_CURRENT
+   CHANGES_REQUIRED
+   NOT_PROVEN
+   BLOCKED_BY_PREREQUISITE
+   SUPERSEDED_OR_CLOSE
+   ```
+
+5. After a repair, rerun affected proof and re-review affected findings,
+   semantic dimensions, and repair-created edge cases. A fixing commit or
+   evidence-backed rejection must be replied to the relevant thread before it
+   is resolved; blanket automated resolution is forbidden.
+6. Only a current `REVIEW_CURRENT` result proceeds to live integration
+   evaluation. Classify checks and merge state separately as:
+
+   ```text
+   INTEGRATION_READY
+   PR_IN_FLIGHT
+   MERGE_BLOCKED
+   NOT_PROVEN
+   ```
+
+7. Merge only when the reviewed effective subject remains current, required
+   checks are terminal and successful or explicitly not applicable,
+   substantive threads are resolved with evidence, and the PR is actually
+   mergeable. Squash-merge normal development PRs; use the separate
+   history-preserving contract for source-backfill PRs.
+8. Verify merged `main`, reconcile the controlling issue and dependent PRs,
+   and retain the review/proof record after merge.
+
+Claude Code and Codex execute this lifecycle through their own complete native
+skills under `.claude/skills/` and `.agents/skills/`. Shared semantics are in
+[docs/agent-context/review-currentness.md](docs/agent-context/review-currentness.md),
+but that document is not an executable review authority. Every PR in a stack
+must receive its own review before a campaign-level synthesis.
 
 ---
 
