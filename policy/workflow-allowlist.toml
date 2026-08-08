@@ -115,38 +115,6 @@ required_repository_guard = "EffortlessMetrics/shipper"
 created = "2026-05-11"
 review_after = "2026-08-11"
 
-# ─── Droid workflows (BYOK MiniMax, external Factory CLI fetch) ─────────────
-
-[[workflow]]
-path = ".github/workflows/droid-review.yml"
-kind = "droid_auto_review"
-owner = "release/ci"
-reason = "Automatic Factory Droid review on human-authored same-repo PRs. BYOK MiniMax M3. Bot-authored PRs skip secret-bearing automatic review; trusted maintainers can use the manual @droid workflow when needed. Generated security-report branches remain excluded."
-process_policy = "droid"
-network_policy = "droid"
-created = "2026-05-11"
-review_after = "2026-08-11"
-
-[[workflow]]
-path = ".github/workflows/droid.yml"
-kind = "droid_manual"
-owner = "release/ci"
-reason = "Manual @droid command handling. Trusted-actor guard (OWNER/MEMBER/COLLABORATOR) on every event branch. BYOK MiniMax M3."
-process_policy = "droid"
-network_policy = "droid"
-created = "2026-05-11"
-review_after = "2026-08-11"
-
-[[workflow]]
-path = ".github/workflows/droid-security-scan.yml"
-kind = "droid_scheduled_security"
-owner = "release/ci"
-reason = "Scheduled (Mon 08:00 UTC) and workflow_dispatch Factory Droid security scan. 7-day window, medium threshold, critical blocking."
-process_policy = "droid"
-network_policy = "droid"
-created = "2026-05-11"
-review_after = "2026-08-11"
-
 # ─── Dependabot configuration (not a workflow, but governs the bot itself) ──
 
 [[workflow]]

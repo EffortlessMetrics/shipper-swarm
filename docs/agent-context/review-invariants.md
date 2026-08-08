@@ -33,9 +33,11 @@ This file captures durable invariants for human, Factory Droid, Claude Code, and
 - Valid inline findings receive a reply naming the fixing commit and focused proof, or an evidence-backed rejection, before resolution. Blanket automated thread resolution is forbidden.
 - Shared semantics live in `docs/agent-context/review-currentness.md`, but executable authority remains in `.agents/skills/`, `.claude/skills/`, and `.factory/` respectively.
 
-## Droid workflow invariants
+## Droid workflow invariants (retired)
 
-These constrain how Factory Droid review is configured for shipper. A reviewer should reject any change that violates them without an explicit, scoped justification PR.
+The Droid workflows were removed, so none of the invariants below is currently enforced by anything that runs. They are retained as the configuration record for anyone restoring the lane.
+
+One of them is load-bearing and was learned the hard way: the `droid-action-safe` action exchanges a **GitHub OIDC token** for a Factory app token, so any Droid job requires `id-token: write`. Removing that grant as "unused OIDC authority" silently broke every Droid run.
 
 - Droid review uses MiniMax M3 via Factory Droid BYOK.
 - Model is `custom:MiniMax-M3-0` for both `review_model` and `security_model`.
