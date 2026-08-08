@@ -71,13 +71,34 @@ This record is not a broad approval for Droid workflows, all security workflows,
 
 ## Blocking integration
 
-This PR establishes the exact schema, current record, expiry validation, and negative fixture matrix. The final #267 integration must additionally:
+```bash
+cargo xtask check-workflow-surfaces --mode blocking-allowlist
+```
 
-- reconcile each detector finding against exactly one record;
-- reject unexcepted findings;
-- reject unused records;
-- reject workflow/job/step/capability/trigger/repository drift;
-- expose `authorized_exception`, `expired_exception`, `unused_exception`, and drift states in JSON and Markdown reports;
-- make every unexcepted or invalid state fail `blocking-allowlist` mode.
+reconciles every detector authority finding against the ledger and fails closed on anything that is not an exact, live authorization. The ledger model is parsed once, in `xtask/src/authority_exceptions.rs`, and shared by both the validator binary and the detector — there is deliberately no second parser to drift.
 
-Unknown or unparsed authority shapes may not be hidden behind an ordinary accepted-capability record.
+Matching is on the exact six-field identity:
+
+```text
+workflow | job | step | capability | trigger | finding_repository_boundary
+```
+
+Every finding and every record lands in exactly one of five states:
+
+| State | Meaning | Blocking |
+| --- | --- | --- |
+| `authorized_exceptions` | The finding matched exactly one valid, unexpired record. | No — accepted |
+| `unexcepted_authority` | The finding matched no record. | Yes |
+| `expired_exceptions` | The finding matched a record whose `review_after` is before today, or whose review date does not parse. | Yes |
+| `drifted_exceptions` | A record matches on workflow/job/step/capability but its `trigger` or `finding_repository_boundary` differs. The finding names each drifted field with both the recorded and the detected value. | Yes |
+| `unused_exceptions` | A record authorized no finding. | Yes |
+
+A ledger that will not parse or will not validate is reported as `invalid_authority_ledger` rather than aborting the run, so the rest of the report still renders — and it blocks.
+
+A drifted record authorizes nothing. The capability in the tree is not the capability that was reviewed, so the record is consumed by the drift finding and never counts as an authorization.
+
+Unknown or unparsed authority shapes may not be hidden behind an ordinary accepted-capability record. The detector reports these as `unknown-permission-scalar:<value>`; a record naming that capability is rejected before matching begins, so it becomes an unused record while its intended finding stays unexcepted. Both states block. The remedy is to write permissions the detector can read, never to except the ambiguity.
+
+Counts appear on the command's stdout summary line, in `target/policy/workflow-policy-report.json`, and in `target/policy/workflow-policy-report.md`. The raw `authority_violations` total is retained and partitioned by these buckets, so an accepted capability stays visible instead of disappearing the moment a record is written for it.
+
+Advisory mode reports every state and blocks on none.
