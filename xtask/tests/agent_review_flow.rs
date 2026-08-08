@@ -104,11 +104,7 @@ fn provider_routes_keep_shared_semantics_in_lockstep() {
     let claude = read(&root, claude_path);
     assert_eq!(
         before_section(&codex, "## Codex execution mechanics", codex_path),
-        before_section(
-            &claude,
-            "## Claude Code execution mechanics",
-            claude_path
-        ),
+        before_section(&claude, "## Claude Code execution mechanics", claude_path),
         "review-pr shared semantics drifted before the provider-specific mechanics section"
     );
 }
@@ -218,10 +214,16 @@ fn candidate_and_integration_vocabularies_remain_separate() {
         let verify = read(&root, &verify_path);
 
         for result in CANDIDATE_RESULTS {
-            assert!(review.contains(result), "{review_path} must contain `{result}`");
+            assert!(
+                review.contains(result),
+                "{review_path} must contain `{result}`"
+            );
         }
         for result in INTEGRATION_RESULTS {
-            assert!(verify.contains(result), "{verify_path} must contain `{result}`");
+            assert!(
+                verify.contains(result),
+                "{verify_path} must contain `{result}`"
+            );
         }
         assert!(
             verify.contains("This skill evaluates **integration posture**, not candidate quality."),

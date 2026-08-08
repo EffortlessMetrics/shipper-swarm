@@ -26,7 +26,7 @@ candidate assembled
 → merge-reconcile when authorized and ready
 ```
 
-A parent issue, release train, or campaign summary cannot substitute for child review. Green CI or a clean summary on the umbrella does not approve any child.
+A parent issue, release train, or campaign summary cannot substitute for child review. Green CI or a clean summary on the umbrella does not approve any child. Every PR in a stack receives its own candidate result: a stacked child is not covered by the review of the PR beneath it, and a result recorded against a base that has since moved is stale, not inherited.
 
 When several PRs are active, maintain a current table:
 
