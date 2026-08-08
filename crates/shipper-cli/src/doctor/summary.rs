@@ -54,25 +54,32 @@ pub(super) struct DoctorSummary {
     pub warning_count: usize,
     pub blocker_count: usize,
     pub skipped_or_unknown_count: usize,
+    /// Names of the checks that could not be evaluated. A bare count leaves the
+    /// operator with no way to act on it, and `--format json` carried the same
+    /// count without the names, so the "investigate unknowns" action pointed at
+    /// output that could not answer the question either.
+    pub unknown_checks: Vec<&'static str>,
     pub readiness: DoctorReadiness,
     pub next_action: DoctorNextAction,
 }
 
 impl DoctorSummary {
-    pub(super) fn from_statuses(statuses: impl IntoIterator<Item = DoctorCheckStatus>) -> Self {
+    pub(super) fn from_checks(
+        checks: impl IntoIterator<Item = (&'static str, DoctorCheckStatus)>,
+    ) -> Self {
         let mut checks_evaluated = 0;
         let mut checks_passed = 0;
         let mut warning_count = 0;
         let mut blocker_count = 0;
-        let mut skipped_or_unknown_count = 0;
+        let mut unknown_checks = Vec::new();
 
-        for status in statuses {
+        for (name, status) in checks {
             checks_evaluated += 1;
             match status {
                 DoctorCheckStatus::Passed => checks_passed += 1,
                 DoctorCheckStatus::Warning => warning_count += 1,
                 DoctorCheckStatus::Blocked => blocker_count += 1,
-                DoctorCheckStatus::Unknown => skipped_or_unknown_count += 1,
+                DoctorCheckStatus::Unknown => unknown_checks.push(name),
             }
         }
 
@@ -81,7 +88,7 @@ impl DoctorSummary {
             checks_passed,
             warning_count,
             blocker_count,
-            skipped_or_unknown_count,
+            unknown_checks,
         )
     }
 
@@ -89,20 +96,20 @@ impl DoctorSummary {
         workspace: DoctorCheckStatus,
         reports: impl IntoIterator<Item = DoctorSummary>,
     ) -> Self {
-        let mut combined = Self::from_statuses([workspace]);
+        let mut combined = Self::from_checks([("workspace", workspace)]);
         for report in reports {
             combined.checks_evaluated += report.checks_evaluated;
             combined.checks_passed += report.checks_passed;
             combined.warning_count += report.warning_count;
             combined.blocker_count += report.blocker_count;
-            combined.skipped_or_unknown_count += report.skipped_or_unknown_count;
+            combined.unknown_checks.extend(report.unknown_checks);
         }
         Self::from_counts(
             combined.checks_evaluated,
             combined.checks_passed,
             combined.warning_count,
             combined.blocker_count,
-            combined.skipped_or_unknown_count,
+            combined.unknown_checks,
         )
     }
 
@@ -111,8 +118,9 @@ impl DoctorSummary {
         checks_passed: usize,
         warning_count: usize,
         blocker_count: usize,
-        skipped_or_unknown_count: usize,
+        unknown_checks: Vec<&'static str>,
     ) -> Self {
+        let skipped_or_unknown_count = unknown_checks.len();
         let readiness = if blocker_count > 0 {
             DoctorReadiness::Blocked
         } else if skipped_or_unknown_count > 0 {
@@ -141,7 +149,7 @@ impl DoctorSummary {
             DoctorReadiness::Incomplete => DoctorNextAction {
                 kind: DoctorActionKind::InvestigateUnknowns,
                 command: vec!["shipper", "doctor", "--format", "json"],
-                reason: "one or more required checks could not be evaluated",
+                reason: "the checks named under Unknown could not be evaluated; resolve them, then rerun diagnostics",
             },
         };
 
@@ -151,6 +159,7 @@ impl DoctorSummary {
             warning_count,
             blocker_count,
             skipped_or_unknown_count,
+            unknown_checks,
             readiness,
             next_action,
         }
@@ -168,14 +177,32 @@ impl DoctorSummary {
         println!();
         println!("{label}: {}", self.readiness.as_str());
         println!(
-            "Checks: {} evaluated, {} passed, {} warnings, {} blockers, {} unknown",
+            "Checks: {} evaluated, {} passed, {}, {}, {} unknown",
             self.checks_evaluated,
             self.checks_passed,
-            self.warning_count,
-            self.blocker_count,
+            plural(self.warning_count, "warning"),
+            plural(self.blocker_count, "blocker"),
             self.skipped_or_unknown_count
         );
-        println!("Next: {}", self.next_action.command.join(" "));
+        if !self.unknown_checks.is_empty() {
+            println!("Unknown: {}", self.unknown_checks.join(", "));
+        }
+        // The command alone is often circular ("Next: shipper doctor" after a
+        // `shipper doctor` run). The reason is what makes the line actionable,
+        // and it was already being emitted to JSON but withheld from humans.
+        println!(
+            "Next: {} — {}",
+            self.next_action.command.join(" "),
+            self.next_action.reason
+        );
+    }
+}
+
+fn plural(count: usize, noun: &str) -> String {
+    if count == 1 {
+        format!("{count} {noun}")
+    } else {
+        format!("{count} {noun}s")
     }
 }
 
@@ -201,8 +228,10 @@ mod tests {
 
     #[test]
     fn readiness_is_ready_when_every_check_passes() {
-        let summary =
-            DoctorSummary::from_statuses([DoctorCheckStatus::Passed, DoctorCheckStatus::Passed]);
+        let summary = DoctorSummary::from_checks([
+            ("registry auth", DoctorCheckStatus::Passed),
+            ("git context", DoctorCheckStatus::Passed),
+        ]);
         assert_eq!(summary.readiness, DoctorReadiness::Ready);
         assert_eq!(summary.checks_evaluated, 2);
         assert_eq!(summary.checks_passed, 2);
@@ -211,10 +240,10 @@ mod tests {
 
     #[test]
     fn blockers_take_precedence_over_warnings_and_unknowns() {
-        let summary = DoctorSummary::from_statuses([
-            DoctorCheckStatus::Warning,
-            DoctorCheckStatus::Unknown,
-            DoctorCheckStatus::Blocked,
+        let summary = DoctorSummary::from_checks([
+            ("encryption", DoctorCheckStatus::Warning),
+            ("git context", DoctorCheckStatus::Unknown),
+            ("registry auth", DoctorCheckStatus::Blocked),
         ]);
         assert_eq!(summary.readiness, DoctorReadiness::Blocked);
         assert_eq!(summary.warning_count, 1);
@@ -224,19 +253,53 @@ mod tests {
 
     #[test]
     fn unknown_required_checks_make_the_result_incomplete() {
-        let summary =
-            DoctorSummary::from_statuses([DoctorCheckStatus::Passed, DoctorCheckStatus::Unknown]);
+        let summary = DoctorSummary::from_checks([
+            ("registry auth", DoctorCheckStatus::Passed),
+            ("git context", DoctorCheckStatus::Unknown),
+        ]);
         assert_eq!(summary.readiness, DoctorReadiness::Incomplete);
         assert_eq!(
             summary.next_action.kind,
             DoctorActionKind::InvestigateUnknowns
         );
+        // An unattributed count is not actionable: name what could not be
+        // evaluated so the operator has somewhere to go.
+        assert_eq!(summary.unknown_checks, vec!["git context"]);
+        assert_eq!(
+            summary.skipped_or_unknown_count,
+            summary.unknown_checks.len()
+        );
+    }
+
+    #[test]
+    fn combined_summaries_keep_every_unknown_check_name() {
+        let registry_a = DoctorSummary::from_checks([
+            ("registry auth", DoctorCheckStatus::Passed),
+            ("git context", DoctorCheckStatus::Unknown),
+        ]);
+        let registry_b = DoctorSummary::from_checks([("encryption", DoctorCheckStatus::Unknown)]);
+
+        let combined = DoctorSummary::combine(DoctorCheckStatus::Passed, [registry_a, registry_b]);
+
+        assert_eq!(combined.unknown_checks, vec!["git context", "encryption"]);
+        assert_eq!(combined.skipped_or_unknown_count, 2);
+        assert_eq!(combined.checks_evaluated, 4);
+        assert_eq!(combined.readiness, DoctorReadiness::Incomplete);
+    }
+
+    #[test]
+    fn single_counts_read_as_singular() {
+        assert_eq!(plural(1, "blocker"), "1 blocker");
+        assert_eq!(plural(0, "blocker"), "0 blockers");
+        assert_eq!(plural(2, "warning"), "2 warnings");
     }
 
     #[test]
     fn warnings_without_blockers_remain_actionable() {
-        let summary =
-            DoctorSummary::from_statuses([DoctorCheckStatus::Passed, DoctorCheckStatus::Warning]);
+        let summary = DoctorSummary::from_checks([
+            ("registry auth", DoctorCheckStatus::Passed),
+            ("encryption", DoctorCheckStatus::Warning),
+        ]);
         assert_eq!(summary.readiness, DoctorReadiness::ReadyWithWarnings);
         assert_eq!(summary.next_action.command, vec!["shipper", "plan"]);
     }

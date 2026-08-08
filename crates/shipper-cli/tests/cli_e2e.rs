@@ -281,6 +281,11 @@ fn doctor_command_snapshot() {
           - rerun `shipper doctor` and `shipper preflight`
         docs: docs/how-to/run-in-github-actions.md
 
+    Doctor: blocked
+    Checks: 8 evaluated, 6 passed, 0 warnings, 1 blocker, 1 unknown
+    Unknown: git context
+    Next: shipper doctor — apply the blocking finding remediation, then rerun diagnostics
+
     Diagnostics complete.
     "
     );
@@ -346,6 +351,11 @@ fn doctor_command_detects_trusted_publishing_auth() {
           - rerun `shipper doctor` and `shipper preflight`
         docs: docs/how-to/run-in-github-actions.md
 
+    Doctor: blocked
+    Checks: 8 evaluated, 6 passed, 0 warnings, 1 blocker, 1 unknown
+    Unknown: git context
+    Next: shipper doctor — apply the blocking finding remediation, then rerun diagnostics
+
     Diagnostics complete.
     "
     );
@@ -410,6 +420,11 @@ fn doctor_command_reports_partial_trusted_publishing_env() {
           - run Shipper after the GitHub OIDC request URL and token are both available
           - or configure an explicit Cargo token fallback before rerunning preflight
         docs: docs/how-to/run-in-github-actions.md
+
+    Doctor: blocked
+    Checks: 8 evaluated, 6 passed, 0 warnings, 1 blocker, 1 unknown
+    Unknown: git context
+    Next: shipper doctor — apply the blocking finding remediation, then rerun diagnostics
 
     Diagnostics complete.
     "

@@ -122,41 +122,59 @@ fn summarize_report(
     git: &checks::git::GitCheck,
     encryption: &checks::encryption::EncryptionCheck,
 ) -> summary::DoctorSummary {
-    let mut statuses = vec![summary::status_from_findings(&auth.findings)];
+    let mut statuses = vec![(
+        "registry auth",
+        summary::status_from_findings(&auth.findings),
+    )];
 
-    statuses.push(if state_dir.exists && state_dir.writable.is_none() {
-        summary::DoctorCheckStatus::Unknown
-    } else {
-        summary::status_from_findings(&state_dir.findings)
-    });
+    statuses.push((
+        "state directory",
+        if state_dir.exists && state_dir.writable.is_none() {
+            summary::DoctorCheckStatus::Unknown
+        } else {
+            summary::status_from_findings(&state_dir.findings)
+        },
+    ));
 
     statuses.extend(tools.iter().map(|tool| {
-        if tool.version.is_some() {
-            summary::DoctorCheckStatus::Passed
-        } else {
-            summary::DoctorCheckStatus::Unknown
-        }
+        (
+            tool.command,
+            if tool.version.is_some() {
+                summary::DoctorCheckStatus::Passed
+            } else {
+                summary::DoctorCheckStatus::Unknown
+            },
+        )
     }));
 
-    statuses.push(if connectivity.registry_reachable {
-        summary::status_from_findings(&connectivity.findings)
-    } else {
-        summary::DoctorCheckStatus::Blocked
-    });
+    statuses.push((
+        "registry connectivity",
+        if connectivity.registry_reachable {
+            summary::status_from_findings(&connectivity.findings)
+        } else {
+            summary::DoctorCheckStatus::Blocked
+        },
+    ));
 
-    statuses.push(if git.is_repository {
-        summary::status_from_findings(&git.findings)
-    } else {
-        summary::DoctorCheckStatus::Unknown
-    });
+    statuses.push((
+        "git context",
+        if git.is_repository {
+            summary::status_from_findings(&git.findings)
+        } else {
+            summary::DoctorCheckStatus::Unknown
+        },
+    ));
 
-    statuses.push(if encryption.enabled && encryption.key_source.is_none() {
-        summary::DoctorCheckStatus::Unknown
-    } else {
-        summary::status_from_findings(&encryption.findings)
-    });
+    statuses.push((
+        "encryption",
+        if encryption.enabled && encryption.key_source.is_none() {
+            summary::DoctorCheckStatus::Unknown
+        } else {
+            summary::status_from_findings(&encryption.findings)
+        },
+    ));
 
-    summary::DoctorSummary::from_statuses(statuses)
+    summary::DoctorSummary::from_checks(statuses)
 }
 
 pub(crate) fn collect_report(
