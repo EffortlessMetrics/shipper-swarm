@@ -18,11 +18,13 @@ jobs:
     env:
       MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
 
+    # `contents: write` is retained as the exact #267 exception candidate:
+    # the durable scan may create a reviewed security-report branch/PR. It is
+    # job-local, scheduled/manual only, and does not need OIDC authority.
     permissions:
       contents: write
       pull-requests: write
       issues: write
-      id-token: write
       actions: read
 
     steps:
