@@ -16,6 +16,7 @@ use shipper_core::types::RuntimeOptions;
 mod checks;
 mod findings;
 mod redaction;
+mod summary;
 
 #[cfg(test)]
 pub(crate) use checks::tools::print_cmd_version;
@@ -24,6 +25,7 @@ pub(crate) use redaction::redact_diagnostic_value;
 #[derive(Debug, Serialize)]
 pub(crate) struct DoctorOutput {
     schema_version: &'static str,
+    summary: summary::DoctorSummary,
     /// Reason no publish plan could be built, when that is the case.
     ///
     /// Envelope-level, not per-report: "this directory has no workspace"
@@ -63,6 +65,13 @@ impl WorkspaceStatus {
         }
     }
 
+    fn check_status(&self) -> summary::DoctorCheckStatus {
+        match self {
+            WorkspaceStatus::Planned => summary::DoctorCheckStatus::Passed,
+            WorkspaceStatus::Unavailable(_) => summary::DoctorCheckStatus::Blocked,
+        }
+    }
+
     fn finding(&self) -> Option<findings::Finding> {
         let reason = self.reason()?;
         Some(findings::Finding {
@@ -93,6 +102,7 @@ pub(crate) struct DoctorReport {
     connectivity: checks::connectivity::ConnectivityCheck,
     git: checks::git::GitCheck,
     encryption: checks::encryption::EncryptionCheck,
+    summary: summary::DoctorSummary,
     findings: Vec<findings::Finding>,
 }
 
@@ -102,6 +112,69 @@ struct DoctorRegistryReport {
     api_base: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     index_base: Option<String>,
+}
+
+fn summarize_report(
+    auth: &checks::auth::AuthCheck,
+    state_dir: &checks::state_dir::StateDirCheck,
+    tools: &[checks::tools::ToolCheck],
+    connectivity: &checks::connectivity::ConnectivityCheck,
+    git: &checks::git::GitCheck,
+    encryption: &checks::encryption::EncryptionCheck,
+) -> summary::DoctorSummary {
+    let mut statuses = vec![(
+        "registry auth",
+        summary::status_from_findings(&auth.findings),
+    )];
+
+    statuses.push((
+        "state directory",
+        if state_dir.exists && state_dir.writable.is_none() {
+            summary::DoctorCheckStatus::Unknown
+        } else {
+            summary::status_from_findings(&state_dir.findings)
+        },
+    ));
+
+    statuses.extend(tools.iter().map(|tool| {
+        (
+            tool.command,
+            if tool.version.is_some() {
+                summary::DoctorCheckStatus::Passed
+            } else {
+                summary::DoctorCheckStatus::Unknown
+            },
+        )
+    }));
+
+    statuses.push((
+        "registry connectivity",
+        if connectivity.registry_reachable {
+            summary::status_from_findings(&connectivity.findings)
+        } else {
+            summary::DoctorCheckStatus::Blocked
+        },
+    ));
+
+    statuses.push((
+        "git context",
+        if git.is_repository {
+            summary::status_from_findings(&git.findings)
+        } else {
+            summary::DoctorCheckStatus::Unknown
+        },
+    ));
+
+    statuses.push((
+        "encryption",
+        if encryption.enabled && encryption.key_source.is_none() {
+            summary::DoctorCheckStatus::Unknown
+        } else {
+            summary::status_from_findings(&encryption.findings)
+        },
+    ));
+
+    summary::DoctorSummary::from_checks(statuses)
 }
 
 pub(crate) fn collect_report(
@@ -122,6 +195,8 @@ pub(crate) fn collect_report(
     findings.extend(git.findings.clone());
     findings.extend(encryption.findings.clone());
 
+    let summary = summarize_report(&auth, &state_dir, &tools, &connectivity, &git, &encryption);
+
     Ok(DoctorReport {
         workspace_root: ws.workspace_root.display().to_string(),
         registry: DoctorRegistryReport {
@@ -140,13 +215,19 @@ pub(crate) fn collect_report(
         connectivity,
         git,
         encryption,
+        summary,
         findings,
     })
 }
 
 pub(crate) fn print_json(reports: Vec<DoctorReport>, workspace: &WorkspaceStatus) -> Result<()> {
+    let summary = summary::DoctorSummary::combine(
+        workspace.check_status(),
+        reports.iter().map(|report| report.summary.clone()),
+    );
     let output = DoctorOutput {
         schema_version: "shipper.doctor.v1",
+        summary,
         workspace_unavailable: workspace.reason().map(str::to_string),
         workspace_findings: workspace.finding().into_iter().collect(),
         reports,
@@ -193,21 +274,42 @@ pub(crate) fn run(
     if emit_workspace_finding {
         all.extend(workspace.finding());
     }
-    all.extend(checks::auth::check(ws)?);
-    all.extend(checks::state_dir::check(ws, opts));
+
+    let auth = checks::auth::check(ws)?;
+    all.extend(auth.findings.clone());
+
+    let state_dir = checks::state_dir::check(ws, opts);
+    all.extend(state_dir.findings.clone());
 
     println!();
-    checks::tools::check(reporter);
+    let tools = checks::tools::check(reporter);
 
     println!();
-    all.extend(checks::connectivity::check(ws, opts, reporter)?);
+    let connectivity = checks::connectivity::check(ws, opts, reporter)?;
+    all.extend(connectivity.findings.clone());
 
     println!();
-    all.extend(checks::git::check(ws));
+    let git = checks::git::check(ws);
+    all.extend(git.findings.clone());
 
-    all.extend(checks::encryption::check(opts));
+    let encryption = checks::encryption::check(opts);
+    all.extend(encryption.findings.clone());
 
     findings::print_findings(&all);
+
+    let report_summary =
+        summarize_report(&auth, &state_dir, &tools, &connectivity, &git, &encryption);
+    if opts.registries.len() > 1 {
+        // Multi-registry text output is one block per registry. Keep these
+        // totals registry-scoped and do not count the run-scoped workspace
+        // condition once per registry. The workspace finding remains visible
+        // exactly once in the first block; JSON retains one true run total.
+        report_summary.print_registry_human();
+    } else {
+        let run_summary =
+            summary::DoctorSummary::combine(workspace.check_status(), [report_summary]);
+        run_summary.print_human();
+    }
 
     println!();
     println!("Diagnostics complete.");
