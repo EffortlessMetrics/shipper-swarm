@@ -244,10 +244,7 @@ mod tests {
             ("git context", DoctorCheckStatus::Unknown),
         ]);
         assert_eq!(summary.readiness, DoctorReadiness::Incomplete);
-        assert_eq!(
-            summary.next_action.kind,
-            ActionKind::InvestigateUnknowns
-        );
+        assert_eq!(summary.next_action.kind, ActionKind::InvestigateUnknowns);
         // An unattributed count is not actionable: name what could not be
         // evaluated so the operator has somewhere to go.
         assert_eq!(summary.unknown_checks, vec!["git context"]);
