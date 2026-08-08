@@ -2,6 +2,8 @@
 
 use serde::Serialize;
 
+use crate::output::outcome::{ActionKind, OperatorAction};
+
 use super::findings::{Finding, FindingLevel};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -32,21 +34,6 @@ pub(super) enum DoctorCheckStatus {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum DoctorActionKind {
-    Plan,
-    ResolveBlockers,
-    InvestigateUnknowns,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(super) struct DoctorNextAction {
-    pub kind: DoctorActionKind,
-    pub command: Vec<&'static str>,
-    pub reason: &'static str,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(super) struct DoctorSummary {
     pub checks_evaluated: usize,
@@ -60,7 +47,7 @@ pub(super) struct DoctorSummary {
     /// output that could not answer the question either.
     pub unknown_checks: Vec<&'static str>,
     pub readiness: DoctorReadiness,
-    pub next_action: DoctorNextAction,
+    pub next_action: OperatorAction,
 }
 
 impl DoctorSummary {
@@ -131,26 +118,26 @@ impl DoctorSummary {
             DoctorReadiness::Ready
         };
         let next_action = match readiness {
-            DoctorReadiness::Ready => DoctorNextAction {
-                kind: DoctorActionKind::Plan,
-                command: vec!["shipper", "plan"],
-                reason: "the required environment checks passed",
-            },
-            DoctorReadiness::ReadyWithWarnings => DoctorNextAction {
-                kind: DoctorActionKind::Plan,
-                command: vec!["shipper", "plan"],
-                reason: "no blocker remains; review warnings before preflight",
-            },
-            DoctorReadiness::Blocked => DoctorNextAction {
-                kind: DoctorActionKind::ResolveBlockers,
-                command: vec!["shipper", "doctor"],
-                reason: "apply the blocking finding remediation, then rerun diagnostics",
-            },
-            DoctorReadiness::Incomplete => DoctorNextAction {
-                kind: DoctorActionKind::InvestigateUnknowns,
-                command: vec!["shipper", "doctor", "--format", "json"],
-                reason: "the checks named under Unknown could not be evaluated; resolve them, then rerun diagnostics",
-            },
+            DoctorReadiness::Ready => OperatorAction::command(
+                ActionKind::Plan,
+                ["shipper", "plan"],
+                "the required environment checks passed",
+            ),
+            DoctorReadiness::ReadyWithWarnings => OperatorAction::command(
+                ActionKind::Plan,
+                ["shipper", "plan"],
+                "no blocker remains; review warnings before preflight",
+            ),
+            DoctorReadiness::Blocked => OperatorAction::command(
+                ActionKind::ResolveBlockers,
+                ["shipper", "doctor"],
+                "apply the blocking finding remediation, then rerun diagnostics",
+            ),
+            DoctorReadiness::Incomplete => OperatorAction::command(
+                ActionKind::InvestigateUnknowns,
+                ["shipper", "doctor", "--format", "json"],
+                "the checks named under Unknown could not be evaluated; resolve them, then rerun diagnostics",
+            ),
         };
 
         Self {
@@ -190,11 +177,10 @@ impl DoctorSummary {
         // The command alone is often circular ("Next: shipper doctor" after a
         // `shipper doctor` run). The reason is what makes the line actionable,
         // and it was already being emitted to JSON but withheld from humans.
-        println!(
-            "Next: {} — {}",
-            self.next_action.command.join(" "),
-            self.next_action.reason
-        );
+        match self.next_action.command_line() {
+            Some(command) => println!("Next: {command} — {}", self.next_action.reason),
+            None => println!("Next: {}", self.next_action.reason),
+        }
     }
 }
 
@@ -235,7 +221,7 @@ mod tests {
         assert_eq!(summary.readiness, DoctorReadiness::Ready);
         assert_eq!(summary.checks_evaluated, 2);
         assert_eq!(summary.checks_passed, 2);
-        assert_eq!(summary.next_action.kind, DoctorActionKind::Plan);
+        assert_eq!(summary.next_action.kind, ActionKind::Plan);
     }
 
     #[test]
@@ -258,10 +244,7 @@ mod tests {
             ("git context", DoctorCheckStatus::Unknown),
         ]);
         assert_eq!(summary.readiness, DoctorReadiness::Incomplete);
-        assert_eq!(
-            summary.next_action.kind,
-            DoctorActionKind::InvestigateUnknowns
-        );
+        assert_eq!(summary.next_action.kind, ActionKind::InvestigateUnknowns);
         // An unattributed count is not actionable: name what could not be
         // evaluated so the operator has somewhere to go.
         assert_eq!(summary.unknown_checks, vec!["git context"]);
@@ -301,6 +284,9 @@ mod tests {
             ("encryption", DoctorCheckStatus::Warning),
         ]);
         assert_eq!(summary.readiness, DoctorReadiness::ReadyWithWarnings);
-        assert_eq!(summary.next_action.command, vec!["shipper", "plan"]);
+        assert_eq!(
+            summary.next_action.command,
+            vec!["shipper".to_string(), "plan".to_string()]
+        );
     }
 }
