@@ -1252,11 +1252,38 @@ fn self_mutation_capabilities(content: &str) -> Vec<&'static str> {
     capabilities
 }
 
-fn shell_segments(text: &str) -> Vec<&str> {
-    text.split(['\n', ';', '|', '&', '(', ')', '`'])
+fn shell_segments(text: &str) -> Vec<String> {
+    splice_line_continuations(text)
+        .split(['\n', ';', '|', '&', '(', ')', '`'])
         .map(str::trim)
         .filter(|segment| !segment.is_empty())
+        .map(str::to_string)
         .collect()
+}
+
+/// Join shell line continuations so a command written across several lines stays
+/// one segment. Without this, `gh api repos/x \` + `--method post` splits into two
+/// segments and the mutation flag is never attributed to the invocation.
+fn splice_line_continuations(text: &str) -> String {
+    let mut spliced = String::with_capacity(text.len());
+    let mut lines = text.lines().peekable();
+    let mut continued = false;
+    while let Some(line) = lines.next() {
+        // A continued line's indentation is layout, not a shell argument separator.
+        let line = if continued { line.trim_start() } else { line };
+        if let Some(head) = line.trim_end().strip_suffix('\\') {
+            spliced.push_str(head.trim_end());
+            spliced.push(' ');
+            continued = true;
+            continue;
+        }
+        continued = false;
+        spliced.push_str(line);
+        if lines.peek().is_some() {
+            spliced.push('\n');
+        }
+    }
+    spliced
 }
 
 fn shell_contains_command(text: &str, command: &str) -> bool {
@@ -1321,11 +1348,71 @@ fn git_tag_mutates(lowercase_content: &str) -> bool {
     let Some(tag_index) = lowercase_content.find("git tag") else {
         return false;
     };
-    let arguments = lowercase_content[tag_index + "git tag".len()..].split_whitespace();
-    let Some(first_argument) = arguments.clone().next() else {
+    let arguments: Vec<&str> = lowercase_content[tag_index + "git tag".len()..]
+        .split_whitespace()
+        .collect();
+    let Some(first_argument) = arguments.first() else {
+        // Bare `git tag` lists refs.
         return false;
     };
-    !matches!(first_argument, "-l" | "--list" | "-n")
+    if arguments
+        .iter()
+        .any(|argument| git_tag_argument_kind(argument) == GitTagArgument::Mutating)
+    {
+        return true;
+    }
+    git_tag_argument_kind(first_argument) != GitTagArgument::ReadOnly
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GitTagArgument {
+    Mutating,
+    ReadOnly,
+    Unknown,
+}
+
+/// Classify a `git tag` argument. Listing forms only read refs; create/delete
+/// forms mutate them. Anything unrecognised stays `Unknown` so the caller keeps
+/// failing closed and reports mutation.
+fn git_tag_argument_kind(argument: &str) -> GitTagArgument {
+    const MUTATING: [&str; 12] = [
+        "-a",
+        "-s",
+        "-d",
+        "-f",
+        "-m",
+        "-u",
+        "--annotate",
+        "--sign",
+        "--delete",
+        "--force",
+        "--message",
+        "--file",
+    ];
+    const READ_ONLY: [&str; 11] = [
+        "-l",
+        "-i",
+        "--list",
+        "--sort",
+        "--contains",
+        "--no-contains",
+        "--points-at",
+        "--merged",
+        "--no-merged",
+        "--format",
+        "--column",
+    ];
+    let name = argument.split_once('=').map_or(argument, |(name, _)| name);
+    if MUTATING.contains(&name) {
+        return GitTagArgument::Mutating;
+    }
+    // `-n` and `-n5` print annotation lines while listing.
+    if READ_ONLY.contains(&name)
+        || (name.starts_with("-n") && name[2..].chars().all(|c| c.is_ascii_digit()))
+    {
+        return GitTagArgument::ReadOnly;
+    }
+    GitTagArgument::Unknown
 }
 
 fn block_has_untrusted_checkout(block: &str) -> bool {
@@ -2667,6 +2754,86 @@ jobs:
         assert!(!self_mutation_capabilities("git tag -l").contains(&"git-tag-mutation"));
         assert!(!self_mutation_capabilities("git tag --list").contains(&"git-tag-mutation"));
         assert!(!self_mutation_capabilities("git tag -n").contains(&"git-tag-mutation"));
+    }
+
+    #[test]
+    fn read_only_git_tag_listing_options_are_not_mutations() {
+        for read_only in [
+            "git tag -n5",
+            "git tag --sort=-v:refname",
+            "git tag --contains HEAD",
+            "git tag --points-at HEAD",
+            "git tag --merged",
+            "git tag --no-merged main",
+            "git tag --format='%(refname:short)'",
+            "git tag -l --sort=creatordate",
+            "git tag -i --list 'v*'",
+        ] {
+            assert!(
+                !self_mutation_capabilities(read_only).contains(&"git-tag-mutation"),
+                "{read_only} reads refs and must not be reported as mutation"
+            );
+        }
+
+        for mutating in [
+            "git tag -a v1.0.0 -m release",
+            "git tag -d v1.0.0",
+            "git tag --delete v1.0.0",
+            "git tag -f v1.0.0",
+            "git tag -s v1.0.0",
+            "git tag v1.0.0",
+            // A listing option first must not launder a delete later in the same command.
+            "git tag --sort=creatordate -d v1.0.0",
+            // An unrecognised option keeps the detector failing closed.
+            "git tag --future-option v1.0.0",
+        ] {
+            assert!(
+                self_mutation_capabilities(mutating).contains(&"git-tag-mutation"),
+                "{mutating} mutates refs and must be reported"
+            );
+        }
+    }
+
+    #[test]
+    fn backslash_continuations_do_not_hide_mutating_invocations() {
+        let yaml = r#"
+name: Continuation
+
+on:
+  workflow_dispatch:
+
+jobs:
+  mutate:
+    steps:
+      - name: Mutate across lines
+        run: |
+          gh api repos/EffortlessMetrics/shipper/git/refs \
+            --method POST \
+            --field ref=refs/heads/temp
+"#;
+
+        let findings = analyze_workflow_authority(".github/workflows/cont.yml", "ci", None, yaml);
+
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.capability == "github-api-mutation"),
+            "a backslash-continued gh api mutation must still be reported: {findings:?}"
+        );
+
+        assert!(
+            self_mutation_capabilities("git \\\n  push origin main").contains(&"git-push"),
+            "a backslash-continued git push must still be reported"
+        );
+
+        // Splicing must not glue independent commands together.
+        assert!(
+            !self_mutation_capabilities(
+                "gh api repos/EffortlessMetrics/shipper/git/refs\ncurl -X POST https://example.invalid"
+            )
+            .contains(&"github-api-mutation"),
+            "separate lines stay separate invocations"
+        );
     }
 
     #[test]
