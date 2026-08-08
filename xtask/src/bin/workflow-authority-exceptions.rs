@@ -358,9 +358,27 @@ mod tests {
     #[test]
     fn rejects_expired_exception() {
         let mut doc = valid_doc();
+        // `created` must move back too. The fixture is created on TODAY, so a
+        // past `review_after` would trip the ordering rule first and never
+        // reach the expiry check this test is about.
+        doc.authority_exception[0].created = "2026-01-01".to_string();
         doc.authority_exception[0].review_after = "2026-08-05".to_string();
         let error = validate_doc(&doc, today(), |_| true).expect_err("expiry must fail");
         assert!(error.to_string().contains("expired"), "{error:#}");
+    }
+
+    #[test]
+    fn rejects_review_after_on_or_before_created() {
+        for review_after in ["2026-08-06", "2026-08-05"] {
+            let mut doc = valid_doc();
+            doc.authority_exception[0].created = "2026-08-06".to_string();
+            doc.authority_exception[0].review_after = review_after.to_string();
+            let error = validate_doc(&doc, today(), |_| true).expect_err("ordering must fail");
+            assert!(
+                error.to_string().contains("must be after created"),
+                "{error:#}"
+            );
+        }
     }
 
     #[test]
