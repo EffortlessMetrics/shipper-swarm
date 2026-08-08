@@ -1076,14 +1076,13 @@ struct AuthorityReconciliation {
 }
 
 fn authority_finding_identity(finding: &WorkflowAuthorityFinding) -> String {
-    format!(
-        "{}|{}|{}|{}|{}|{}",
-        finding.workflow,
-        finding.job,
-        finding.step,
-        finding.capability,
-        finding.trigger,
-        finding.repository_boundary
+    authority_exceptions::identity_of(
+        &finding.workflow,
+        &finding.job,
+        &finding.step,
+        &finding.capability,
+        &finding.trigger,
+        &finding.repository_boundary,
     )
 }
 
@@ -1251,9 +1250,18 @@ fn load_authority_records(
                 workspace_root.join(workflow).is_file()
             }) {
                 invalid.push(format!("{error:#}"));
+                // A record that failed validation may not authorize anything.
+                // Returning it anyway let the report print ACCEPTED for a
+                // rejected record — and in advisory mode the report is the only
+                // output, so it would endorse exactly what the validator
+                // refused. Drop the ledger so every finding reports unexcepted.
+                return (Vec::new(), invalid);
             }
         }
-        None => invalid.push("could not resolve today's date to validate the ledger".to_string()),
+        None => {
+            invalid.push("could not resolve today's date to validate the ledger".to_string());
+            return (Vec::new(), invalid);
+        }
     }
     (doc.authority_exception, invalid)
 }
@@ -3819,8 +3827,12 @@ jobs:
 
     #[test]
     fn an_invalid_ledger_is_reported_rather_than_panicking() {
-        let temp =
-            std::env::temp_dir().join(format!("shipper-authority-ledger-{}", std::process::id()));
+        // `xtask` declares no dev-dependencies and its manifest is covered by the
+        // dependency-surface policy, so `serial_test`/`tempfile` are not
+        // available here. Give each temp directory a process- and
+        // invocation-unique name instead, which removes the collision this
+        // isolation would have prevented.
+        let temp = unique_temp_dir("shipper-authority-ledger");
         let _ = fs::remove_dir_all(&temp);
         fs::create_dir_all(temp.join("policy")).expect("temp policy dir");
         fs::write(
@@ -3836,5 +3848,82 @@ jobs:
         assert!(invalid[0].contains("schema"), "{invalid:#?}");
 
         let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_record_that_fails_validation_never_reports_as_authorized() {
+        // The record below matches the live finding on all six identity fields
+        // but names a repository outside the organization, so the validator
+        // rejects it. Before this was fixed the reconciler still matched it and
+        // the report printed ACCEPTED for a record the validator had refused —
+        // and in advisory mode that report is the only output.
+        let temp = unique_temp_dir("shipper-authority-invalid-authorizes");
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(temp.join(".github/workflows")).expect("temp workflow dir");
+        fs::write(temp.join(".github/workflows/scan.yml"), "name: Scan\n").expect("write workflow");
+        fs::create_dir_all(temp.join("policy")).expect("temp policy dir");
+        fs::write(
+            temp.join(authority_exceptions::LEDGER),
+            r#"schema_version = "1.0"
+policy = "workflow-authority-exceptions"
+owner = "release/ci"
+status = "active"
+
+[[authority_exception]]
+workflow = ".github/workflows/scan.yml"
+job = "scan"
+step = "<permissions>"
+capability = "contents:write"
+trigger = "schedule"
+repository = "Attacker/evil"
+finding_repository_boundary = "not declared"
+owner = "release/ci"
+reason = "A durable security-report branch requires exact repository write authority."
+covered_by = "Scheduled triggers, fixed action SHA, trusted runner, and review."
+created = "2026-01-01"
+review_after = "2026-11-06"
+"#,
+        )
+        .expect("write ledger");
+
+        let (records, invalid) = load_authority_records(&temp, NaiveDate::from_ymd_opt(2026, 8, 8));
+
+        assert!(
+            records.is_empty(),
+            "an invalid ledger must yield no authorization candidates: {records:#?}"
+        );
+        assert_eq!(invalid.len(), 1, "{invalid:#?}");
+        assert!(invalid[0].contains("EffortlessMetrics"), "{invalid:#?}");
+
+        // And the finding it aimed at reports unexcepted, not authorized.
+        let finding = WorkflowAuthorityFinding {
+            workflow: ".github/workflows/scan.yml".to_string(),
+            job: "scan".to_string(),
+            step: "<permissions>".to_string(),
+            capability: "contents:write".to_string(),
+            trigger: "schedule".to_string(),
+            repository_boundary: "not declared".to_string(),
+            remediation: "remove the grant".to_string(),
+        };
+        let reconciled = reconcile_authority_exceptions(
+            std::slice::from_ref(&finding),
+            &records,
+            NaiveDate::from_ymd_opt(2026, 8, 8).expect("date"),
+        );
+        assert!(reconciled.authorized.is_empty(), "{reconciled:#?}");
+        assert_eq!(reconciled.unexcepted.len(), 1, "{reconciled:#?}");
+
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    /// A temp directory unique to this process and this call.
+    fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        std::env::temp_dir().join(format!(
+            "{prefix}-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ))
     }
 }

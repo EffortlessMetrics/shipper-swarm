@@ -64,16 +64,32 @@ pub(crate) struct AuthorityException {
     pub(crate) review_after: String,
 }
 
+/// The exact six-field authority identity, shared by the ledger and the detector.
+///
+/// Both sides must format this identically: reconciliation compares the two
+/// strings for equality, so a divergence would not fail to compile — it would
+/// silently stop every record matching its finding and report the whole ledger
+/// as unused. One function keeps that impossible.
+pub(crate) fn identity_of(
+    workflow: &str,
+    job: &str,
+    step: &str,
+    capability: &str,
+    trigger: &str,
+    finding_repository_boundary: &str,
+) -> String {
+    format!("{workflow}|{job}|{step}|{capability}|{trigger}|{finding_repository_boundary}")
+}
+
 impl AuthorityException {
     pub(crate) fn identity(&self) -> String {
-        format!(
-            "{}|{}|{}|{}|{}|{}",
-            self.workflow,
-            self.job,
-            self.step,
-            self.capability,
-            self.trigger,
-            self.finding_repository_boundary
+        identity_of(
+            &self.workflow,
+            &self.job,
+            &self.step,
+            &self.capability,
+            &self.trigger,
+            &self.finding_repository_boundary,
         )
     }
 }
@@ -112,16 +128,21 @@ fn date_from_unix_days(unix_days: i64) -> Option<NaiveDate> {
     )
 }
 
+/// Resolve the workspace root the same way every other `xtask` helper does.
+///
+/// Walking up from `current_dir()` would resolve to whichever checkout the
+/// caller happens to stand in, which differs from the rest of `xtask` when the
+/// workspace is nested or vendored. The ledger path must resolve identically to
+/// the detector's.
 pub(crate) fn workspace_root() -> Result<PathBuf> {
-    let mut current = std::env::current_dir().context("reading current directory")?;
-    loop {
-        if current.join("Cargo.toml").is_file() && current.join("xtask").is_dir() {
-            return Ok(current);
-        }
-        if !current.pop() {
-            bail!("could not locate the shipper workspace root");
-        }
-    }
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+        .context("CARGO_MANIFEST_DIR not set; run via `cargo xtask`")?;
+    let xtask_dir = PathBuf::from(manifest_dir);
+    let root = xtask_dir
+        .parent()
+        .with_context(|| format!("xtask manifest dir has no parent: {}", xtask_dir.display()))?
+        .to_path_buf();
+    Ok(root)
 }
 
 pub(crate) fn validate_doc<F>(
@@ -149,13 +170,24 @@ where
         bail!("authority-exception ledger status must be active");
     }
 
+    // Validate every entry before returning. Bailing on the first fault made an
+    // operator fix one record, rerun, and discover the next one — a ledger with
+    // three bad records took three runs to diagnose.
     let mut identities = BTreeSet::new();
+    let mut errors: Vec<String> = Vec::new();
     for entry in &doc.authority_exception {
-        validate_exception(entry, today, &workflow_exists)?;
+        if let Err(error) = validate_exception(entry, today, &workflow_exists) {
+            errors.push(format!("{}: {error:#}", entry.identity()));
+        }
         let identity = entry.identity();
         if !identities.insert(identity.clone()) {
-            bail!("duplicate workflow authority exception: {identity}");
+            errors.push(format!(
+                "duplicate workflow authority exception: {identity}"
+            ));
         }
+    }
+    if !errors.is_empty() {
+        bail!("{}", errors.join("; "));
     }
     Ok(doc.authority_exception.len())
 }
@@ -225,6 +257,18 @@ where
     let trigger_parts = entry.trigger.split(',').collect::<Vec<_>>();
     if trigger_parts.iter().any(|part| part.trim().is_empty()) {
         bail!("authority exception trigger contains an empty token");
+    }
+    // Reject padding rather than trimming it. `check-workflow-surfaces` compares
+    // `trigger` byte for byte, so silently trimming here would accept a record
+    // that can never match its finding. Rejecting also keeps the sorted-token
+    // error below from firing with a misleading message: " workflow_dispatch"
+    // sorts before "schedule", so `schedule, workflow_dispatch` would otherwise
+    // be reported as unsorted when the real fault is the space.
+    if trigger_parts.iter().any(|part| part.trim() != *part) {
+        bail!(
+            "authority exception trigger tokens may not be padded with whitespace: {}",
+            entry.trigger
+        );
     }
     let mut sorted_triggers = trigger_parts.clone();
     sorted_triggers.sort_unstable();
@@ -392,5 +436,79 @@ mod tests {
             "A long enough explanation that accidentally contains token=secret".to_string();
         let error = validate_doc(&doc, today(), |_| true).expect_err("secret must fail");
         assert!(error.to_string().contains("secret-like"), "{error:#}");
+    }
+
+    #[test]
+    fn rejects_a_record_naming_a_missing_workflow() {
+        let error =
+            validate_doc(&valid_doc(), today(), |_| false).expect_err("missing workflow must fail");
+        assert!(
+            error.to_string().contains("does not exist")
+                || error.to_string().contains("missing")
+                || error.to_string().contains("not a tracked workflow"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_repository_outside_the_organization() {
+        let mut doc = valid_doc();
+        doc.authority_exception[0].repository = "Attacker/evil".to_string();
+        let error = validate_doc(&doc, today(), |_| true).expect_err("foreign repo must fail");
+        assert!(error.to_string().contains("EffortlessMetrics"), "{error:#}");
+    }
+
+    #[test]
+    fn rejects_a_wildcarded_capability() {
+        let mut doc = valid_doc();
+        doc.authority_exception[0].capability = "contents:*".to_string();
+        let error = validate_doc(&doc, today(), |_| true).expect_err("glob capability must fail");
+        assert!(error.to_string().contains("wildcarded"), "{error:#}");
+    }
+
+    #[test]
+    fn rejects_unsorted_and_padded_trigger_tokens() {
+        let mut doc = valid_doc();
+        doc.authority_exception[0].trigger = "workflow_dispatch,schedule".to_string();
+        let error = validate_doc(&doc, today(), |_| true).expect_err("unsorted must fail");
+        assert!(error.to_string().contains("sorted unique"), "{error:#}");
+
+        // Padding is rejected on its own terms. `check-workflow-surfaces`
+        // compares the trigger byte for byte, so a padded token could never
+        // match its finding; the error must name the padding, not sorting.
+        let mut padded = valid_doc();
+        padded.authority_exception[0].trigger = "schedule, workflow_dispatch".to_string();
+        let error = validate_doc(&padded, today(), |_| true).expect_err("padding must fail");
+        assert!(error.to_string().contains("whitespace"), "{error:#}");
+    }
+
+    #[test]
+    fn rejects_schema_policy_and_status_mismatches() {
+        let mut schema = valid_doc();
+        schema.schema_version = "2.0".to_string();
+        assert!(validate_doc(&schema, today(), |_| true).is_err());
+
+        let mut policy = valid_doc();
+        policy.policy = "something-else".to_string();
+        assert!(validate_doc(&policy, today(), |_| true).is_err());
+
+        let mut status = valid_doc();
+        status.status = "draft".to_string();
+        assert!(validate_doc(&status, today(), |_| true).is_err());
+    }
+
+    #[test]
+    fn reports_every_invalid_entry_rather_than_only_the_first() {
+        let mut doc = valid_doc();
+        let mut second = doc.authority_exception[0].clone();
+        second.job = "another-job".to_string();
+        second.repository = "Attacker/evil".to_string();
+        doc.authority_exception[0].capability = "contents:*".to_string();
+        doc.authority_exception.push(second);
+
+        let error = validate_doc(&doc, today(), |_| true).expect_err("both entries must fail");
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("wildcarded"), "{rendered}");
+        assert!(rendered.contains("EffortlessMetrics"), "{rendered}");
     }
 }

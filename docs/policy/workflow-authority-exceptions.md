@@ -75,7 +75,7 @@ This record is not a broad approval for Droid workflows, all security workflows,
 cargo xtask check-workflow-surfaces --mode blocking-allowlist
 ```
 
-reconciles every detector authority finding against the ledger and fails closed on anything that is not an exact, live authorization. The ledger model is parsed once, in `xtask/src/authority_exceptions.rs`, and shared by both the validator binary and the detector — there is deliberately no second parser to drift.
+reconciles every detector authority finding against the ledger and fails closed on anything that is not an exact, live authorization. Both `blocking-allowlist` and `blocking-strict` fail on a reconciliation state that is not authorized; `advisory` performs the same reconciliation and reports the same states, but never fails. The ledger model is parsed once, in `xtask/src/authority_exceptions.rs`, and shared by both the validator binary and the detector — there is deliberately no second parser to drift.
 
 Matching is on the exact six-field identity:
 
