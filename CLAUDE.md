@@ -120,3 +120,23 @@ Cargo 1.90 stabilized multi-package workspace publishing. Shipper's value is wha
 - Configuration can be set via `.shipper.toml` in workspace root; CLI flags override config file values. Config sections: `[policy]`, `[verify]`, `[readiness]`, `[output]`, `[lock]`, `[retry]`, `[flags]`, `[parallel]`, `[registry]`. Ownership/git settings live in `[flags]`, not a separate `[preflight]` section.
 - `config init` uses `-o`/`--output`; `config validate` uses `-p`/`--path`.
 - `prefer_index` and `index_path` (readiness) are config-file-only settings with no CLI flags.
+
+## Claude Code durable-goal delivery
+
+When the user asks to work issue by issue, PR by PR, finish an umbrella issue, or deliver a durable multi-PR outcome, invoke `.claude/skills/deliver-goal`. It must route every related candidate through `.claude/skills/finish-pr` and its complete challenge, substantive review, live-integration, and merge-reconciliation lifecycle before producing campaign-level synthesis.
+
+## Claude Code pull-request convergence
+
+When a candidate implementation is assembled, or the user asks to finish, land, carry through, prepare, or merge a PR, invoke the Claude-native route in this order:
+
+```text
+.claude/skills/finish-pr
+→ .claude/skills/final-challenge
+→ .claude/skills/review-pr
+→ .claude/skills/verify-live-ci
+→ .claude/skills/merge-reconcile
+```
+
+A direct request to review, check, or assess merge readiness invokes `.claude/skills/review-pr` even when CI is already green. Green CI, mergeability, an approval, a bot summary, or zero unresolved threads cannot substitute for the substantive candidate judgment. Repairs require affected challenge, proof, and re-review before live integration is evaluated again.
+
+The provider-native skill is the executable authority. [`docs/agent-context/review-currentness.md`](docs/agent-context/review-currentness.md) defines shared semantics only and must not replace the complete procedure in `.claude/skills/review-pr/SKILL.md`. Factory Droid remains an additional review lane, not a bypass or substitute for Claude Code convergence.

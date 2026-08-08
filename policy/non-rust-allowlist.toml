@@ -343,10 +343,32 @@ kind = "droid_review_config"
 surface = "ci"
 classification = "config"
 owner = "release/ci"
-reason = "Factory Droid review skill + rules (review-guidelines/SKILL.md, droid-review.md). Consumed by the Droid Auto Review workflow."
-covered_by = ["docs/agent-context/droid-smoke-tests.md"]
+reason = "Factory Droid review skill + rules consumed by Droid review workflows."
+covered_by = ["docs/agent-context/droid-smoke-tests.md", "xtask/tests/agent_review_flow.rs"]
 created = "2026-05-11"
-review_after = "2026-08-11"
+review_after = "2026-11-07"
+
+[[glob]]
+pattern = ".agents/skills/**/*.md"
+kind = "codex_agent_skill"
+surface = "tooling"
+classification = "documentation"
+owner = "agent-maintainers"
+reason = "Codex-native executable PR convergence and review skills. Shared semantics do not replace these provider entry points."
+covered_by = ["xtask/tests/agent_review_flow.rs", "manual review"]
+created = "2026-08-07"
+review_after = "2026-11-07"
+
+[[glob]]
+pattern = ".claude/skills/**/*.md"
+kind = "claude_agent_skill"
+surface = "tooling"
+classification = "documentation"
+owner = "agent-maintainers"
+reason = "Claude Code-native executable PR convergence and review skills. Shared semantics do not replace these provider entry points."
+covered_by = ["xtask/tests/agent_review_flow.rs", "manual review"]
+created = "2026-08-07"
+review_after = "2026-11-07"
 
 [[file]]
 path = ".changie.yaml"
@@ -380,6 +402,17 @@ reason = "Actionlint configuration constraining approved self-hosted runner labe
 covered_by = ["runner-routing-guard.yml", "actionlint"]
 created = "2026-07-12"
 review_after = "2026-10-12"
+
+[[file]]
+path = ".github/PULL_REQUEST_TEMPLATE.md"
+kind = "pull_request_template"
+surface = "tooling"
+classification = "documentation"
+owner = "agent-maintainers"
+reason = "Captures controlling authority, exact review identity, semantic risk, proof provenance, substantive result, and live integration posture for each PR."
+covered_by = ["xtask/tests/agent_review_flow.rs", "manual review"]
+created = "2026-08-07"
+review_after = "2026-11-07"
 
 [[file]]
 path = ".shipper-meta/goals/README.md"
