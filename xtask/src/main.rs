@@ -10,6 +10,7 @@
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 
+mod authority_exceptions;
 mod check_file_policy;
 mod checks;
 mod clippy_checks;

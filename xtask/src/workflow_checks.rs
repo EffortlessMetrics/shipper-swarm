@@ -29,6 +29,8 @@ use chrono::NaiveDate;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
+use crate::authority_exceptions::{self, AuthorityException};
+
 const OUTPUT_DIR_REL: &str = "target/policy";
 
 const WORKFLOW_ALLOWLIST: &str = "policy/workflow-allowlist.toml";
@@ -102,7 +104,16 @@ struct WorkflowSummary {
     unused: usize,
     invalid_policy_refs: usize,
     repository_guard_violations: usize,
+    /// Raw detector total. The exception buckets below partition it, so an
+    /// accepted capability stays visible instead of disappearing from the
+    /// report the moment someone writes a ledger record for it.
     authority_violations: usize,
+    authorized_exceptions: usize,
+    unexcepted_authority: usize,
+    expired_exceptions: usize,
+    drifted_exceptions: usize,
+    unused_exceptions: usize,
+    invalid_authority_ledger: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -115,6 +126,12 @@ struct WorkflowFindings {
     invalid_policy_refs: Vec<InvalidPolicyRef>,
     repository_guard_violations: Vec<RepositoryGuardViolation>,
     authority_violations: Vec<WorkflowAuthorityFinding>,
+    authorized_exceptions: Vec<AuthorizedException>,
+    unexcepted_authority: Vec<WorkflowAuthorityFinding>,
+    expired_exceptions: Vec<ExpiredException>,
+    drifted_exceptions: Vec<DriftedException>,
+    unused_exceptions: Vec<UnusedException>,
+    invalid_authority_ledger: Vec<String>,
 }
 
 /// A workflow capability that needs an explicit authority decision.
@@ -292,6 +309,18 @@ pub fn check_workflow_surfaces(mode: Mode) -> Result<()> {
     let repository_guard_violations = repository_guard_violations(&workspace_root, &entries);
     let authority_violations = workflow_authority_violations(&workspace_root, &entries);
 
+    // Reconcile every authority finding against the exact exception ledger.
+    // `NaiveDate::MAX` as the fallback fails closed: with no readable date,
+    // every record reads as expired rather than as a live authorization.
+    let today_date = NaiveDate::parse_from_str(&today, "%Y-%m-%d").ok();
+    let (authority_records, invalid_authority_ledger) =
+        load_authority_records(&workspace_root, today_date);
+    let reconciliation = reconcile_authority_exceptions(
+        &authority_violations,
+        &authority_records,
+        today_date.unwrap_or(NaiveDate::MAX),
+    );
+
     let findings = WorkflowFindings {
         unreceipted,
         missing_fields,
@@ -301,6 +330,12 @@ pub fn check_workflow_surfaces(mode: Mode) -> Result<()> {
         invalid_policy_refs,
         repository_guard_violations,
         authority_violations,
+        authorized_exceptions: reconciliation.authorized,
+        unexcepted_authority: reconciliation.unexcepted,
+        expired_exceptions: reconciliation.expired,
+        drifted_exceptions: reconciliation.drifted,
+        unused_exceptions: reconciliation.unused,
+        invalid_authority_ledger,
     };
 
     let _ = dependabot_entries; // tracked-but-skipped; kept for future per-kind audits.
@@ -316,6 +351,12 @@ pub fn check_workflow_surfaces(mode: Mode) -> Result<()> {
         invalid_policy_refs: findings.invalid_policy_refs.len(),
         repository_guard_violations: findings.repository_guard_violations.len(),
         authority_violations: findings.authority_violations.len(),
+        authorized_exceptions: findings.authorized_exceptions.len(),
+        unexcepted_authority: findings.unexcepted_authority.len(),
+        expired_exceptions: findings.expired_exceptions.len(),
+        drifted_exceptions: findings.drifted_exceptions.len(),
+        unused_exceptions: findings.unused_exceptions.len(),
+        invalid_authority_ledger: findings.invalid_authority_ledger.len(),
     };
 
     let report = WorkflowReport {
@@ -328,7 +369,7 @@ pub fn check_workflow_surfaces(mode: Mode) -> Result<()> {
 
     write_workflow_report(&workspace_root, &report)?;
     println!(
-        "{} ({}): workflows={} entries={} unreceipted={} missing_fields={} expired={} stale={} unused={} invalid_refs={} repository_guard_violations={} authority_violations={}",
+        "{} ({}): workflows={} entries={} unreceipted={} missing_fields={} expired={} stale={} unused={} invalid_refs={} repository_guard_violations={} authority_violations={} authorized_exceptions={} unexcepted_authority={} expired_exceptions={} drifted_exceptions={} unused_exceptions={} invalid_authority_ledger={}",
         report.tool,
         report.mode,
         report.summary.tracked_workflow_files,
@@ -341,6 +382,12 @@ pub fn check_workflow_surfaces(mode: Mode) -> Result<()> {
         report.summary.invalid_policy_refs,
         report.summary.repository_guard_violations,
         report.summary.authority_violations,
+        report.summary.authorized_exceptions,
+        report.summary.unexcepted_authority,
+        report.summary.expired_exceptions,
+        report.summary.drifted_exceptions,
+        report.summary.unused_exceptions,
+        report.summary.invalid_authority_ledger,
     );
 
     let blocking = workflow_blocking_count(mode, &report.findings);
@@ -378,11 +425,19 @@ fn missing_workflow_fields(e: &RawWorkflowEntry) -> Vec<String> {
 }
 
 fn workflow_blocking_count(mode: Mode, f: &WorkflowFindings) -> usize {
+    // Every authority state except a live, exactly-matched exception blocks.
+    // `authorized_exceptions` is deliberately absent: it is the one accepted
+    // state, and it stays visible in the reports rather than in this count.
     let mut n = f.unreceipted.len()
         + f.missing_fields.len()
         + f.expired.len()
         + f.invalid_policy_refs.len()
-        + f.repository_guard_violations.len();
+        + f.repository_guard_violations.len()
+        + f.unexcepted_authority.len()
+        + f.expired_exceptions.len()
+        + f.drifted_exceptions.len()
+        + f.unused_exceptions.len()
+        + f.invalid_authority_ledger.len();
     if matches!(mode, Mode::BlockingStrict) {
         n += f.unused.len() + f.stale.len();
     }
@@ -431,8 +486,32 @@ fn render_workflow_md(r: &WorkflowReport) -> String {
         r.summary.repository_guard_violations
     ));
     out.push_str(&format!(
-        "- Authority violations: {}\n\n",
+        "- Authority violations: {}\n",
         r.summary.authority_violations
+    ));
+    out.push_str(&format!(
+        "- Authorized exceptions (accepted): {}\n",
+        r.summary.authorized_exceptions
+    ));
+    out.push_str(&format!(
+        "- Unexcepted authority: {}\n",
+        r.summary.unexcepted_authority
+    ));
+    out.push_str(&format!(
+        "- Expired exceptions: {}\n",
+        r.summary.expired_exceptions
+    ));
+    out.push_str(&format!(
+        "- Drifted exceptions: {}\n",
+        r.summary.drifted_exceptions
+    ));
+    out.push_str(&format!(
+        "- Unused exceptions: {}\n",
+        r.summary.unused_exceptions
+    ));
+    out.push_str(&format!(
+        "- Invalid authority ledger: {}\n\n",
+        r.summary.invalid_authority_ledger
     ));
     list_strings(&mut out, "Unreceipted workflows", &r.findings.unreceipted);
     for m in &r.findings.missing_fields {
@@ -469,7 +548,148 @@ fn render_workflow_md(r: &WorkflowReport) -> String {
             finding.remediation,
         ));
     }
+    render_authority_exception_sections(&mut out, r);
     out
+}
+
+fn render_authority_exception_sections(out: &mut String, r: &WorkflowReport) {
+    out.push_str(&format!(
+        "\n## Authorized authority exceptions ({})\n\n",
+        r.findings.authorized_exceptions.len()
+    ));
+    if r.findings.authorized_exceptions.is_empty() {
+        out.push_str("_(none)_\n\n");
+    } else {
+        for accepted in &r.findings.authorized_exceptions {
+            out.push_str(&format!(
+                "- ACCEPTED: `{}` job `{}` step `{}` capability `{}` trigger `{}` boundary `{}`; owned by `{}` in `{}`, review after {}\n",
+                accepted.workflow,
+                accepted.job,
+                accepted.step,
+                accepted.capability,
+                accepted.trigger,
+                accepted.repository_boundary,
+                accepted.owner,
+                accepted.repository,
+                accepted.review_after,
+            ));
+        }
+        out.push('\n');
+    }
+
+    out.push_str(&format!(
+        "## Unexcepted authority ({})\n\n",
+        r.findings.unexcepted_authority.len()
+    ));
+    if r.findings.unexcepted_authority.is_empty() {
+        out.push_str("_(none)_\n\n");
+    } else {
+        for finding in &r.findings.unexcepted_authority {
+            out.push_str(&format!(
+                "- UNEXCEPTED: `{}` job `{}` step `{}` capability `{}` trigger `{}` boundary `{}`; {}\n",
+                finding.workflow,
+                finding.job,
+                finding.step,
+                finding.capability,
+                finding.trigger,
+                finding.repository_boundary,
+                finding.remediation,
+            ));
+        }
+        out.push('\n');
+    }
+
+    out.push_str(&format!(
+        "## Expired authority exceptions ({})\n\n",
+        r.findings.expired_exceptions.len()
+    ));
+    if r.findings.expired_exceptions.is_empty() {
+        out.push_str("_(none)_\n\n");
+    } else {
+        for expired in &r.findings.expired_exceptions {
+            out.push_str(&format!(
+                "- EXPIRED: `{}` job `{}` step `{}` capability `{}`; owned by `{}`, review_after {} is before {}\n",
+                expired.workflow,
+                expired.job,
+                expired.step,
+                expired.capability,
+                expired.owner,
+                expired.review_after,
+                expired.today,
+            ));
+        }
+        out.push('\n');
+    }
+
+    out.push_str(&format!(
+        "## Drifted authority exceptions ({})\n\n",
+        r.findings.drifted_exceptions.len()
+    ));
+    if r.findings.drifted_exceptions.is_empty() {
+        out.push_str("_(none)_\n\n");
+    } else {
+        for drifted in &r.findings.drifted_exceptions {
+            let fields = drifted
+                .drifted
+                .iter()
+                .map(|field| {
+                    format!(
+                        "{} (recorded `{}`, detected `{}`)",
+                        field.field, field.expected, field.actual
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            out.push_str(&format!(
+                "- DRIFTED: `{}` job `{}` step `{}` capability `{}` owned by `{}` authorizes nothing — {}; {}\n",
+                drifted.workflow,
+                drifted.job,
+                drifted.step,
+                drifted.capability,
+                drifted.owner,
+                fields,
+                drifted.remediation,
+            ));
+        }
+        out.push('\n');
+    }
+
+    out.push_str(&format!(
+        "## Unused authority exceptions ({})\n\n",
+        r.findings.unused_exceptions.len()
+    ));
+    if r.findings.unused_exceptions.is_empty() {
+        out.push_str("_(none)_\n\n");
+    } else {
+        for unused in &r.findings.unused_exceptions {
+            out.push_str(&format!(
+                "- UNUSED: `{}` job `{}` step `{}` capability `{}` trigger `{}` boundary `{}` owned by `{}` (review after {}); {}\n",
+                unused.workflow,
+                unused.job,
+                unused.step,
+                unused.capability,
+                unused.trigger,
+                unused.finding_repository_boundary,
+                unused.owner,
+                unused.review_after,
+                unused.reason,
+            ));
+        }
+        out.push('\n');
+    }
+
+    out.push_str(&format!(
+        "## Invalid authority ledger ({})\n\n",
+        r.findings.invalid_authority_ledger.len()
+    ));
+    if r.findings.invalid_authority_ledger.is_empty() {
+        out.push_str("_(none)_\n\n");
+    } else {
+        for error in &r.findings.invalid_authority_ledger {
+            out.push_str(&format!("- INVALID LEDGER: {error}\n"));
+        }
+        out.push('\n');
+    }
 }
 
 fn repository_guard_violations(
@@ -765,6 +985,285 @@ fn authority_finding(
         repository_boundary: repository_boundary.to_string(),
         remediation: remediation.to_string(),
     }
+}
+
+// ─── Authority exception reconciliation ─────────────────────────────────────
+
+/// Capability prefix the detector emits when a `permissions:` scalar does not
+/// resolve into known capability pairs.
+///
+/// An unparsed authority shape is exactly the case a ledger record must never
+/// be able to silence, so records naming this prefix are rejected outright.
+const UNKNOWN_PERMISSION_PREFIX: &str = "unknown-permission-scalar:";
+
+/// A detector finding covered by exactly one valid, unexpired ledger record.
+///
+/// Accepted, not hidden: this stays in both reports so the accepted capability
+/// remains visible with its owner and review date.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct AuthorizedException {
+    workflow: String,
+    job: String,
+    step: String,
+    capability: String,
+    trigger: String,
+    repository_boundary: String,
+    repository: String,
+    owner: String,
+    review_after: String,
+}
+
+/// A detector finding whose matching record is past its review date.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct ExpiredException {
+    workflow: String,
+    job: String,
+    step: String,
+    capability: String,
+    trigger: String,
+    repository_boundary: String,
+    owner: String,
+    review_after: String,
+    today: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct DriftedField {
+    field: &'static str,
+    /// The value recorded in the ledger.
+    expected: String,
+    /// The value the detector actually observed.
+    actual: String,
+}
+
+/// A record that names the same workflow/job/step/capability as a finding but
+/// authorizes a different trigger or repository boundary.
+///
+/// A drifted record authorizes nothing: the authority it was written for is no
+/// longer the authority in the tree.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct DriftedException {
+    workflow: String,
+    job: String,
+    step: String,
+    capability: String,
+    owner: String,
+    drifted: Vec<DriftedField>,
+    remediation: String,
+}
+
+/// A ledger record that authorized no detector finding.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct UnusedException {
+    workflow: String,
+    job: String,
+    step: String,
+    capability: String,
+    trigger: String,
+    finding_repository_boundary: String,
+    owner: String,
+    review_after: String,
+    reason: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct AuthorityReconciliation {
+    authorized: Vec<AuthorizedException>,
+    unexcepted: Vec<WorkflowAuthorityFinding>,
+    expired: Vec<ExpiredException>,
+    drifted: Vec<DriftedException>,
+    unused: Vec<UnusedException>,
+}
+
+fn authority_finding_identity(finding: &WorkflowAuthorityFinding) -> String {
+    authority_exceptions::identity_of(
+        &finding.workflow,
+        &finding.job,
+        &finding.step,
+        &finding.capability,
+        &finding.trigger,
+        &finding.repository_boundary,
+    )
+}
+
+/// Reconcile detector authority findings against ledger records.
+///
+/// Pure over plain data — findings, records, and the reconciliation date — so
+/// every state is unit-testable without a filesystem fixture. Every state that
+/// is not "exactly one valid, unexpired record" is reported and blocks.
+fn reconcile_authority_exceptions(
+    findings: &[WorkflowAuthorityFinding],
+    records: &[AuthorityException],
+    today: NaiveDate,
+) -> AuthorityReconciliation {
+    let mut out = AuthorityReconciliation::default();
+    let mut consumed = vec![false; records.len()];
+    // A record naming an unparsed authority shape is rejected before matching
+    // begins, so it can neither authorize nor absorb a finding. The finding it
+    // aimed at stays unexcepted and the record itself falls out as unused.
+    let rejected: Vec<bool> = records
+        .iter()
+        .map(|record| record.capability.starts_with(UNKNOWN_PERMISSION_PREFIX))
+        .collect();
+
+    for finding in findings {
+        let identity = authority_finding_identity(finding);
+        let exact: Vec<usize> = records
+            .iter()
+            .enumerate()
+            .filter(|(index, record)| !rejected[*index] && record.identity() == identity)
+            .map(|(index, _)| index)
+            .collect();
+
+        if let Some(&first) = exact.first() {
+            for &index in &exact {
+                consumed[index] = true;
+            }
+            let record = &records[first];
+            // An unparseable review date is treated as expired: a record whose
+            // lifecycle cannot be read has no lifecycle.
+            let live = NaiveDate::parse_from_str(record.review_after.trim(), "%Y-%m-%d")
+                .is_ok_and(|review_after| review_after >= today);
+            if live {
+                out.authorized.push(AuthorizedException {
+                    workflow: finding.workflow.clone(),
+                    job: finding.job.clone(),
+                    step: finding.step.clone(),
+                    capability: finding.capability.clone(),
+                    trigger: finding.trigger.clone(),
+                    repository_boundary: finding.repository_boundary.clone(),
+                    repository: record.repository.clone(),
+                    owner: record.owner.clone(),
+                    review_after: record.review_after.clone(),
+                });
+            } else {
+                out.expired.push(ExpiredException {
+                    workflow: finding.workflow.clone(),
+                    job: finding.job.clone(),
+                    step: finding.step.clone(),
+                    capability: finding.capability.clone(),
+                    trigger: finding.trigger.clone(),
+                    repository_boundary: finding.repository_boundary.clone(),
+                    owner: record.owner.clone(),
+                    review_after: record.review_after.clone(),
+                    today: today.format("%Y-%m-%d").to_string(),
+                });
+            }
+            continue;
+        }
+
+        let partial: Vec<usize> = records
+            .iter()
+            .enumerate()
+            .filter(|(index, record)| {
+                !rejected[*index]
+                    && record.workflow == finding.workflow
+                    && record.job == finding.job
+                    && record.step == finding.step
+                    && record.capability == finding.capability
+            })
+            .map(|(index, _)| index)
+            .collect();
+
+        if partial.is_empty() {
+            out.unexcepted.push(finding.clone());
+            continue;
+        }
+
+        for index in partial {
+            consumed[index] = true;
+            let record = &records[index];
+            let mut drifted = Vec::new();
+            if record.trigger != finding.trigger {
+                drifted.push(DriftedField {
+                    field: "trigger",
+                    expected: record.trigger.clone(),
+                    actual: finding.trigger.clone(),
+                });
+            }
+            if record.finding_repository_boundary != finding.repository_boundary {
+                drifted.push(DriftedField {
+                    field: "finding_repository_boundary",
+                    expected: record.finding_repository_boundary.clone(),
+                    actual: finding.repository_boundary.clone(),
+                });
+            }
+            out.drifted.push(DriftedException {
+                workflow: finding.workflow.clone(),
+                job: finding.job.clone(),
+                step: finding.step.clone(),
+                capability: finding.capability.clone(),
+                owner: record.owner.clone(),
+                drifted,
+                remediation:
+                    "re-review the capability and rewrite the exact record, or remove the authority"
+                        .to_string(),
+            });
+        }
+    }
+
+    for (index, record) in records.iter().enumerate() {
+        if consumed[index] {
+            continue;
+        }
+        let reason = if rejected[index] {
+            "a record may not authorize an unparsed authority shape; fix the workflow permissions instead".to_string()
+        } else {
+            "no detector authority finding matches this record; delete it".to_string()
+        };
+        out.unused.push(UnusedException {
+            workflow: record.workflow.clone(),
+            job: record.job.clone(),
+            step: record.step.clone(),
+            capability: record.capability.clone(),
+            trigger: record.trigger.clone(),
+            finding_repository_boundary: record.finding_repository_boundary.clone(),
+            owner: record.owner.clone(),
+            review_after: record.review_after.clone(),
+            reason,
+        });
+    }
+
+    out
+}
+
+/// Load and validate the ledger, reporting failure as a finding.
+///
+/// A ledger that will not parse or will not validate is a blocking state, but
+/// it must not abort the run: the rest of the workflow report still has to
+/// render so an operator can see the whole picture.
+fn load_authority_records(
+    workspace_root: &Path,
+    today: Option<NaiveDate>,
+) -> (Vec<AuthorityException>, Vec<String>) {
+    let mut invalid = Vec::new();
+    let doc = match authority_exceptions::load(workspace_root) {
+        Ok(doc) => doc,
+        Err(error) => {
+            invalid.push(format!("{error:#}"));
+            return (Vec::new(), invalid);
+        }
+    };
+    match today {
+        Some(today) => {
+            if let Err(error) = authority_exceptions::validate_doc(&doc, today, |workflow| {
+                workspace_root.join(workflow).is_file()
+            }) {
+                invalid.push(format!("{error:#}"));
+                // A record that failed validation may not authorize anything.
+                // Returning it anyway let the report print ACCEPTED for a
+                // rejected record — and in advisory mode the report is the only
+                // output, so it would endorse exactly what the validator
+                // refused. Drop the ledger so every finding reports unexcepted.
+                return (Vec::new(), invalid);
+            }
+        }
+        None => {
+            invalid.push("could not resolve today's date to validate the ledger".to_string());
+            return (Vec::new(), invalid);
+        }
+    }
+    (doc.authority_exception, invalid)
 }
 
 fn workflow_name(yaml_text: &str) -> Option<String> {
@@ -2999,5 +3498,432 @@ jobs:
                 .iter()
                 .any(|finding| finding.capability == "git-push")
         );
+    }
+
+    // ─── Authority exception reconciliation ────────────────────────────────
+
+    fn reconciliation_today() -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, 8, 8).expect("valid date")
+    }
+
+    fn live_finding() -> WorkflowAuthorityFinding {
+        authority_finding(
+            ".github/workflows/droid-security-scan.yml",
+            "droid-security-scan",
+            "<permissions>",
+            "contents:write",
+            "schedule,workflow_dispatch",
+            "not declared",
+            "move the grant to the narrow job that needs it and prove the repository boundary",
+        )
+    }
+
+    fn matching_record() -> AuthorityException {
+        AuthorityException {
+            workflow: ".github/workflows/droid-security-scan.yml".to_string(),
+            job: "droid-security-scan".to_string(),
+            step: "<permissions>".to_string(),
+            capability: "contents:write".to_string(),
+            trigger: "schedule,workflow_dispatch".to_string(),
+            repository: "EffortlessMetrics/shipper-swarm".to_string(),
+            finding_repository_boundary: "not declared".to_string(),
+            owner: "release/ci".to_string(),
+            reason: "A durable security-report branch requires exact repository write authority."
+                .to_string(),
+            covered_by: "Scheduled/manual triggers, fixed action SHA, trusted runner, and review."
+                .to_string(),
+            created: "2026-08-06".to_string(),
+            review_after: "2026-11-06".to_string(),
+        }
+    }
+
+    /// Count only the reconciliation states the blocking modes reject.
+    fn blocking_authority_count(out: &AuthorityReconciliation) -> usize {
+        out.unexcepted.len() + out.expired.len() + out.drifted.len() + out.unused.len()
+    }
+
+    fn empty_findings() -> WorkflowFindings {
+        WorkflowFindings {
+            unreceipted: Vec::new(),
+            missing_fields: Vec::new(),
+            expired: Vec::new(),
+            stale: Vec::new(),
+            unused: Vec::new(),
+            invalid_policy_refs: Vec::new(),
+            repository_guard_violations: Vec::new(),
+            authority_violations: Vec::new(),
+            authorized_exceptions: Vec::new(),
+            unexcepted_authority: Vec::new(),
+            expired_exceptions: Vec::new(),
+            drifted_exceptions: Vec::new(),
+            unused_exceptions: Vec::new(),
+            invalid_authority_ledger: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn exact_record_authorizes_its_finding_without_blocking() {
+        let out = reconcile_authority_exceptions(
+            &[live_finding()],
+            &[matching_record()],
+            reconciliation_today(),
+        );
+
+        assert_eq!(out.authorized.len(), 1, "{out:#?}");
+        assert_eq!(out.authorized[0].capability, "contents:write");
+        assert_eq!(out.authorized[0].owner, "release/ci");
+        assert!(out.unexcepted.is_empty(), "{out:#?}");
+        assert!(out.expired.is_empty(), "{out:#?}");
+        assert!(out.drifted.is_empty(), "{out:#?}");
+        assert!(out.unused.is_empty(), "{out:#?}");
+        assert_eq!(blocking_authority_count(&out), 0);
+    }
+
+    #[test]
+    fn unexcepted_finding_blocks() {
+        let out = reconcile_authority_exceptions(&[live_finding()], &[], reconciliation_today());
+
+        assert_eq!(out.unexcepted, vec![live_finding()], "{out:#?}");
+        assert!(out.authorized.is_empty(), "{out:#?}");
+        assert_eq!(blocking_authority_count(&out), 1);
+    }
+
+    #[test]
+    fn expired_record_blocks_and_does_not_authorize() {
+        let mut record = matching_record();
+        record.review_after = "2026-08-07".to_string();
+
+        let out =
+            reconcile_authority_exceptions(&[live_finding()], &[record], reconciliation_today());
+
+        assert!(out.authorized.is_empty(), "{out:#?}");
+        assert_eq!(out.expired.len(), 1, "{out:#?}");
+        assert_eq!(out.expired[0].review_after, "2026-08-07");
+        assert_eq!(out.expired[0].today, "2026-08-08");
+        assert!(out.unused.is_empty(), "{out:#?}");
+        assert_eq!(blocking_authority_count(&out), 1);
+    }
+
+    #[test]
+    fn unparseable_review_date_is_treated_as_expired() {
+        let mut record = matching_record();
+        record.review_after = "soon".to_string();
+
+        let out =
+            reconcile_authority_exceptions(&[live_finding()], &[record], reconciliation_today());
+
+        assert!(out.authorized.is_empty(), "{out:#?}");
+        assert_eq!(out.expired.len(), 1, "{out:#?}");
+    }
+
+    #[test]
+    fn trigger_drift_blocks_and_authorizes_nothing() {
+        let mut record = matching_record();
+        record.trigger = "workflow_dispatch".to_string();
+
+        let out =
+            reconcile_authority_exceptions(&[live_finding()], &[record], reconciliation_today());
+
+        assert!(out.authorized.is_empty(), "{out:#?}");
+        assert_eq!(out.drifted.len(), 1, "{out:#?}");
+        assert_eq!(
+            out.drifted[0].drifted,
+            vec![DriftedField {
+                field: "trigger",
+                expected: "workflow_dispatch".to_string(),
+                actual: "schedule,workflow_dispatch".to_string(),
+            }]
+        );
+        // The drifted record is consumed by the drift finding, so it is not
+        // also double-reported as unused.
+        assert!(out.unused.is_empty(), "{out:#?}");
+        assert_eq!(blocking_authority_count(&out), 1);
+    }
+
+    #[test]
+    fn repository_boundary_drift_blocks_and_authorizes_nothing() {
+        let mut record = matching_record();
+        record.finding_repository_boundary = "EffortlessMetrics/shipper".to_string();
+
+        let out =
+            reconcile_authority_exceptions(&[live_finding()], &[record], reconciliation_today());
+
+        assert!(out.authorized.is_empty(), "{out:#?}");
+        assert_eq!(out.drifted.len(), 1, "{out:#?}");
+        assert_eq!(
+            out.drifted[0].drifted,
+            vec![DriftedField {
+                field: "finding_repository_boundary",
+                expected: "EffortlessMetrics/shipper".to_string(),
+                actual: "not declared".to_string(),
+            }]
+        );
+        assert_eq!(blocking_authority_count(&out), 1);
+    }
+
+    #[test]
+    fn drift_names_every_drifted_field_with_both_values() {
+        let mut record = matching_record();
+        record.trigger = "push".to_string();
+        record.finding_repository_boundary = "EffortlessMetrics/shipper".to_string();
+
+        let out =
+            reconcile_authority_exceptions(&[live_finding()], &[record], reconciliation_today());
+
+        let fields: Vec<&str> = out.drifted[0]
+            .drifted
+            .iter()
+            .map(|field| field.field)
+            .collect();
+        assert_eq!(fields, vec!["trigger", "finding_repository_boundary"]);
+        assert_eq!(out.drifted[0].drifted[0].expected, "push");
+        assert_eq!(
+            out.drifted[0].drifted[0].actual,
+            "schedule,workflow_dispatch"
+        );
+    }
+
+    #[test]
+    fn a_record_for_another_capability_never_absorbs_a_finding() {
+        let mut record = matching_record();
+        record.capability = "actions:write".to_string();
+
+        let out =
+            reconcile_authority_exceptions(&[live_finding()], &[record], reconciliation_today());
+
+        assert!(out.drifted.is_empty(), "{out:#?}");
+        assert_eq!(out.unexcepted, vec![live_finding()], "{out:#?}");
+        assert_eq!(out.unused.len(), 1, "{out:#?}");
+        assert_eq!(blocking_authority_count(&out), 2);
+    }
+
+    #[test]
+    fn unused_record_blocks() {
+        let out = reconcile_authority_exceptions(&[], &[matching_record()], reconciliation_today());
+
+        assert_eq!(out.unused.len(), 1, "{out:#?}");
+        assert!(
+            out.unused[0]
+                .reason
+                .contains("no detector authority finding"),
+            "{out:#?}"
+        );
+        assert_eq!(blocking_authority_count(&out), 1);
+    }
+
+    #[test]
+    fn a_record_may_not_authorize_an_unknown_permission_scalar() {
+        let finding = authority_finding(
+            ".github/workflows/droid-security-scan.yml",
+            "droid-security-scan",
+            "<permissions>",
+            "unknown-permission-scalar:inherit",
+            "schedule,workflow_dispatch",
+            "not declared",
+            "move the grant to the narrow job that needs it and prove the repository boundary",
+        );
+        let mut record = matching_record();
+        record.capability = "unknown-permission-scalar:inherit".to_string();
+
+        let out = reconcile_authority_exceptions(
+            std::slice::from_ref(&finding),
+            &[record],
+            reconciliation_today(),
+        );
+
+        assert!(out.authorized.is_empty(), "{out:#?}");
+        assert!(out.drifted.is_empty(), "{out:#?}");
+        assert_eq!(out.unexcepted, vec![finding], "{out:#?}");
+        assert_eq!(out.unused.len(), 1, "{out:#?}");
+        assert!(
+            out.unused[0].reason.contains("unparsed authority shape"),
+            "{out:#?}"
+        );
+        // The unexcepted finding and the rejected record each block.
+        assert_eq!(blocking_authority_count(&out), 2);
+    }
+
+    #[test]
+    fn every_unexcepted_or_invalid_authority_state_blocks() {
+        for mode in [Mode::BlockingAllowlist, Mode::BlockingStrict] {
+            let mut findings = empty_findings();
+            findings.unexcepted_authority = vec![live_finding()];
+            assert_eq!(workflow_blocking_count(mode, &findings), 1, "{mode:?}");
+
+            let mut findings = empty_findings();
+            findings.invalid_authority_ledger = vec!["ledger will not parse".to_string()];
+            assert_eq!(workflow_blocking_count(mode, &findings), 1, "{mode:?}");
+
+            let mut findings = empty_findings();
+            findings.expired_exceptions = vec![ExpiredException {
+                workflow: ".github/workflows/droid-security-scan.yml".to_string(),
+                job: "droid-security-scan".to_string(),
+                step: "<permissions>".to_string(),
+                capability: "contents:write".to_string(),
+                trigger: "schedule,workflow_dispatch".to_string(),
+                repository_boundary: "not declared".to_string(),
+                owner: "release/ci".to_string(),
+                review_after: "2026-08-07".to_string(),
+                today: "2026-08-08".to_string(),
+            }];
+            assert_eq!(workflow_blocking_count(mode, &findings), 1, "{mode:?}");
+
+            let mut findings = empty_findings();
+            findings.drifted_exceptions = vec![DriftedException {
+                workflow: ".github/workflows/droid-security-scan.yml".to_string(),
+                job: "droid-security-scan".to_string(),
+                step: "<permissions>".to_string(),
+                capability: "contents:write".to_string(),
+                owner: "release/ci".to_string(),
+                drifted: vec![DriftedField {
+                    field: "trigger",
+                    expected: "workflow_dispatch".to_string(),
+                    actual: "schedule,workflow_dispatch".to_string(),
+                }],
+                remediation: "re-review".to_string(),
+            }];
+            assert_eq!(workflow_blocking_count(mode, &findings), 1, "{mode:?}");
+
+            let mut findings = empty_findings();
+            findings.unused_exceptions = vec![UnusedException {
+                workflow: ".github/workflows/droid-security-scan.yml".to_string(),
+                job: "droid-security-scan".to_string(),
+                step: "<permissions>".to_string(),
+                capability: "contents:write".to_string(),
+                trigger: "schedule,workflow_dispatch".to_string(),
+                finding_repository_boundary: "not declared".to_string(),
+                owner: "release/ci".to_string(),
+                review_after: "2026-11-06".to_string(),
+                reason: "unused".to_string(),
+            }];
+            assert_eq!(workflow_blocking_count(mode, &findings), 1, "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn an_authorized_exception_is_never_blocking_but_stays_visible() {
+        let mut findings = empty_findings();
+        findings.authority_violations = vec![live_finding()];
+        findings.authorized_exceptions = vec![AuthorizedException {
+            workflow: ".github/workflows/droid-security-scan.yml".to_string(),
+            job: "droid-security-scan".to_string(),
+            step: "<permissions>".to_string(),
+            capability: "contents:write".to_string(),
+            trigger: "schedule,workflow_dispatch".to_string(),
+            repository_boundary: "not declared".to_string(),
+            repository: "EffortlessMetrics/shipper-swarm".to_string(),
+            owner: "release/ci".to_string(),
+            review_after: "2026-11-06".to_string(),
+        }];
+
+        assert_eq!(
+            workflow_blocking_count(Mode::BlockingAllowlist, &findings),
+            0
+        );
+        assert_eq!(workflow_blocking_count(Mode::BlockingStrict, &findings), 0);
+        // The raw detector total keeps the accepted capability visible.
+        assert_eq!(findings.authority_violations.len(), 1);
+    }
+
+    #[test]
+    fn an_invalid_ledger_is_reported_rather_than_panicking() {
+        // `xtask` declares no dev-dependencies and its manifest is covered by the
+        // dependency-surface policy, so `serial_test`/`tempfile` are not
+        // available here. Give each temp directory a process- and
+        // invocation-unique name instead, which removes the collision this
+        // isolation would have prevented.
+        let temp = unique_temp_dir("shipper-authority-ledger");
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(temp.join("policy")).expect("temp policy dir");
+        fs::write(
+            temp.join(authority_exceptions::LEDGER),
+            "schema_version = \"9.9\"\npolicy = \"workflow-authority-exceptions\"\nowner = \"release/ci\"\nstatus = \"active\"\n",
+        )
+        .expect("write ledger");
+
+        let (records, invalid) = load_authority_records(&temp, NaiveDate::from_ymd_opt(2026, 8, 8));
+
+        assert!(records.is_empty(), "{records:#?}");
+        assert_eq!(invalid.len(), 1, "{invalid:#?}");
+        assert!(invalid[0].contains("schema"), "{invalid:#?}");
+
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_record_that_fails_validation_never_reports_as_authorized() {
+        // The record below matches the live finding on all six identity fields
+        // but names a repository outside the organization, so the validator
+        // rejects it. Before this was fixed the reconciler still matched it and
+        // the report printed ACCEPTED for a record the validator had refused —
+        // and in advisory mode that report is the only output.
+        let temp = unique_temp_dir("shipper-authority-invalid-authorizes");
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(temp.join(".github/workflows")).expect("temp workflow dir");
+        fs::write(temp.join(".github/workflows/scan.yml"), "name: Scan\n").expect("write workflow");
+        fs::create_dir_all(temp.join("policy")).expect("temp policy dir");
+        fs::write(
+            temp.join(authority_exceptions::LEDGER),
+            r#"schema_version = "1.0"
+policy = "workflow-authority-exceptions"
+owner = "release/ci"
+status = "active"
+
+[[authority_exception]]
+workflow = ".github/workflows/scan.yml"
+job = "scan"
+step = "<permissions>"
+capability = "contents:write"
+trigger = "schedule"
+repository = "Attacker/evil"
+finding_repository_boundary = "not declared"
+owner = "release/ci"
+reason = "A durable security-report branch requires exact repository write authority."
+covered_by = "Scheduled triggers, fixed action SHA, trusted runner, and review."
+created = "2026-01-01"
+review_after = "2026-11-06"
+"#,
+        )
+        .expect("write ledger");
+
+        let (records, invalid) = load_authority_records(&temp, NaiveDate::from_ymd_opt(2026, 8, 8));
+
+        assert!(
+            records.is_empty(),
+            "an invalid ledger must yield no authorization candidates: {records:#?}"
+        );
+        assert_eq!(invalid.len(), 1, "{invalid:#?}");
+        assert!(invalid[0].contains("EffortlessMetrics"), "{invalid:#?}");
+
+        // And the finding it aimed at reports unexcepted, not authorized.
+        let finding = WorkflowAuthorityFinding {
+            workflow: ".github/workflows/scan.yml".to_string(),
+            job: "scan".to_string(),
+            step: "<permissions>".to_string(),
+            capability: "contents:write".to_string(),
+            trigger: "schedule".to_string(),
+            repository_boundary: "not declared".to_string(),
+            remediation: "remove the grant".to_string(),
+        };
+        let reconciled = reconcile_authority_exceptions(
+            std::slice::from_ref(&finding),
+            &records,
+            NaiveDate::from_ymd_opt(2026, 8, 8).expect("date"),
+        );
+        assert!(reconciled.authorized.is_empty(), "{reconciled:#?}");
+        assert_eq!(reconciled.unexcepted.len(), 1, "{reconciled:#?}");
+
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    /// A temp directory unique to this process and this call.
+    fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        std::env::temp_dir().join(format!(
+            "{prefix}-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ))
     }
 }
