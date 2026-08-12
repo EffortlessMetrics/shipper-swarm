@@ -1,5 +1,8 @@
 # Droid Review Rules
 
+> **Status: retired / restoration-only.** No Factory Droid workflow currently
+> consumes these rules.
+
 Droid review output is an inter-agent repair queue and inspection record, not a human approval signal.
 
 ## Review target
@@ -25,7 +28,7 @@ Review changed behavior against:
 - docs/ci/*
 - docs/agent-context/review-currentness.md
 
-The currentness document defines shared semantics only. This Factory rule and `.factory/skills/review-guidelines/SKILL.md` are Droid's executable authority; Claude and Codex use their complete provider-native skills.
+The currentness document defines shared semantics only. This Factory rule and `.factory/skills/review-guidelines/SKILL.md` are historical restoration inputs, not current executable authority; Claude and Codex use their complete provider-native skills.
 
 ## Exact subject
 

@@ -1,5 +1,8 @@
 # Droid Review Guidelines for shipper
 
+> **Status: retired / restoration-only.** No Factory Droid workflow currently
+> consumes this file. Codex and Claude use their active provider-native skills.
+
 These reviews are primarily consumed by follow-up coding agents, not by a human reading every comment manually.
 
 Optimize for structured, durable review records. Do not optimize for a low comment count.
@@ -30,7 +33,7 @@ Before reviewing, use:
 - docs/agent-context/review-invariants.md
 - docs/agent-context/review-currentness.md
 
-The shared currentness document defines semantics only. This Factory skill remains the executable Droid review authority; Claude and Codex use their own complete native review skills.
+The shared currentness document defines semantics only. This Factory skill is a historical restoration input, not current executable authority; Claude and Codex use their own complete native review skills.
 
 ## Product contract
 

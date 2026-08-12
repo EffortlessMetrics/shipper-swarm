@@ -25,9 +25,6 @@ this inventory aligned when workflows are added, removed, or retargeted.
 | `em-ci-routed-rust.yml` | `push` + `pull_request` + `merge_group` + `workflow_dispatch` | Required PR gate | Required via `Shipper Rust Small Result` |
 | `ci.yml` | `push` + `workflow_dispatch` + weekly `schedule` | Main/manual full-CI evidence + weekly heavy proptest | Required when triggered; not the default PR gate |
 | `coverage.yml` | `push` (main) + `pull_request` + `workflow_dispatch` | Advisory / labeled | Advisory |
-| `droid-review.yml` | `pull_request` | Advisory (same-repo + human-authored guard + generated security-report branch skip) | Advisory |
-| `droid.yml` | `issues` + `pull_request` (command-triggered) | Advisory (trusted-actor guard) | Advisory |
-| `droid-security-scan.yml` | `schedule` + `workflow_dispatch` | Scheduled (Mon 08:00 UTC) | Advisory |
 | `fuzz.yml` | `schedule` + `workflow_dispatch` | Nightly | Advisory |
 | `live-runner-interruption-rehearsal.yml` | `workflow_dispatch` + path-scoped `pull_request` | Safe runner-artifact interruption/resume proof | Advisory/manual; required when triggered |
 | `mutation.yml` | `schedule` + `workflow_dispatch` + `pull_request` (label-gated) | Weekly + label-gated PR | Advisory |
@@ -56,20 +53,22 @@ Public fork PRs are denied by the normalized result instead of running
 repository code on self-hosted runners. A maintainer can move trusted work onto
 a same-repo branch when it needs the swarm gate.
 
-Dependabot PRs are same-repo dependency maintenance, but their first
-bot-authored runs may not receive the selected repository secrets used by the
-router or Droid. Treat a `runner_token_missing` routed result or
-`FACTORY_API_KEY` Droid setup failure on a Dependabot PR as a trust-bootstrap
-condition, not as proof that the dependency bump is broken. The maintainer flow
-is:
+Dependabot PRs are same-repo dependency maintenance. Their bot-authored runs do
+not receive the runner-read secret, so the router automatically selects the
+secret-free GitHub-hosted Rust-small lane with
+`router_reason=bot_pr_github_fallback` and `fallback_allowed=true`. This is the
+normal bot-PR gate path, not a pre-evaluation failure or a reason to expose the
+secret. A maintainer-authored refresh is needed only when the normalized gate
+actually fails or the candidate requires a repair:
 
 ```text
 1. Inspect the dependency diff and confirm it is narrow.
 2. Run focused local validation such as `cargo check --workspace --locked`.
-3. Add a maintainer-authored refresh commit or recreate the bump on a trusted
-   same-repo branch.
-4. Require the normal `Shipper Rust Small Result`, Droid review, and any
-   focused dependency validation before merge.
+3. If the gate fails or the candidate needs repair, add a maintainer-authored
+   commit or recreate the bump on a trusted same-repo branch.
+4. Require the normal `Shipper Rust Small Result`, a current substantive review
+   through Codex, Claude, or a human reviewer, and any focused dependency
+   validation before merge.
 ```
 
 This is not a fallback-policy exception. Do not add release credentials, crates.io
@@ -190,8 +189,6 @@ The `policy` job runs each check in blocking-allowlist mode and uploads `target/
 | `rust-small` | `em-ci-routed-rust.yml` | PRs, merge groups, pushes to main, dispatch | Required Rust-small PR gate with self-hosted routing and explicit fallback control. Carries `cargo fmt --check` and `cargo clippy -- -D warnings`, because `ci.yml`'s `lint` job never sees a pull request. |
 | `ripr-pilot` | `ripr.yml` | PRs touching `crates/**`, `xtask/**`, `Cargo.{toml,lock}`, `ripr.toml`, `policy/ripr-suppressions.toml`, `.github/workflows/ripr.yml`. `continue-on-error: true`. | Static mutation-exposure analysis: does the diff appear exposed to a meaningful test oracle? |
 | `mutants-pr` | `mutation.yml` | PRs labeled `mutation` or `full-ci` | Runtime mutation backstop scoped to the PR's changed files via `cargo xtask mutants-pr --changed`. Blocking when it runs. |
-| `droid-review` | `droid-review.yml` | Human-authored same-repo PRs (excluding generated `droid/security-report-*` branches); maintainers can use `@droid review` for bot-authored refreshes. | Automated code review via Factory Droid (BYOK MiniMax M3). Advisory comments, no merge gate. |
-| `droid` | `droid.yml` | `@droid` mentions on issues / PRs by `OWNER`/`MEMBER`/`COLLABORATOR`. | On-demand Droid actions: review, refactor, explain. |
 
 ## Scheduled
 
@@ -200,7 +197,6 @@ The `policy` job runs each check in blocking-allowlist mode and uploads `target/
 | `fuzz` matrix (6 targets) | `fuzz.yml` — daily | Extended fuzz energy beyond the PR smoke pass. |
 | `crypto-proptests-heavy` | `ci.yml` — on `push` / `workflow_dispatch` / `schedule` | Full-strength `proptest` for `shipper-encrypt` round-trips (90-minute budget). |
 | `mutants-weekly` | `mutation.yml` — Sunday 04:00 UTC | Mutation score across `shipper-duration` / `shipper-types` / `shipper-config`. Expanding to full trust-critical surface is a future rollout step (60-minute budget today). |
-| `droid-security-scan` | `droid-security-scan.yml` — Monday 08:00 UTC | Factory Droid security scan, 7-day window, medium threshold, critical blocking. |
 
 ## Targeted Mutation on a PR (Label-Gated)
 

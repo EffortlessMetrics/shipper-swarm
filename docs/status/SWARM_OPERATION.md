@@ -185,10 +185,11 @@ bump opens in `EffortlessMetrics/shipper`, close the source-repo PR as duplicate
 maintenance work and let the accepted swarm commit flow back through the normal
 non-squash source sync.
 
-Dependabot and other bot-authored PRs intentionally skip the secret-bearing
-automatic Droid review workflow. The required Rust gate still evaluates bot
-diffs through its explicit GitHub-hosted fallback. When an LLM review is useful,
-use the maintainer refresh procedure in
+Factory Droid is retired, so bot-authored and human-authored PRs use the same
+current substantive-review requirement, satisfied through Codex, Claude, or a
+human reviewer. The required Rust gate evaluates bot diffs through its explicit
+GitHub-hosted fallback. When a
+maintainer-authored refresh is needed, use the procedure in
 [`docs/ci/test-evidence-lanes.md`](../ci/test-evidence-lanes.md) and
 [`docs/how-to/shipper-swarm-migration-runbook.md`](../how-to/shipper-swarm-migration-runbook.md):
 inspect the diff, run focused validation, push a maintainer-authored refresh or

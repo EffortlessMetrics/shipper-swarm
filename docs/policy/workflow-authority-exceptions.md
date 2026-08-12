@@ -63,11 +63,12 @@ The validator rejects:
 - non-EffortlessMetrics repository identities;
 - secret-like material in reasons or controls.
 
-## Current exception candidate
+## Current ledger state
 
-The initial ledger contains one entry for the scheduled/manual Droid security scan's job-local `contents: write` capability. The scan may create a reviewable security-report branch and pull request. It no longer has OIDC authority, runs only on scheduled/manual triggers, uses a fixed action SHA and trusted runner labels, and its generated branch remains subject to pull-request review.
-
-This record is not a broad approval for Droid workflows, all security workflows, or repository writes generally.
+The ledger is empty. PR #287 removed the scheduled/manual Droid security scan
+and deleted its job-local `contents: write` exception. Any future restoration
+must re-run the detector and justify a new exact record; the historical
+exception grants no current authority.
 
 ## Blocking integration
 
