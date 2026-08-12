@@ -49,6 +49,7 @@ use shipper_core::types::{
 mod doctor;
 mod output;
 
+use crate::output::outcome::{ActionKind, OperatorAction};
 use crate::output::progress::ProgressReporter;
 
 /// Extra build metadata shown by `shipper --version --verbose`.
@@ -2375,6 +2376,7 @@ fn print_version(verbose: bool) {
 #[derive(Debug, Serialize)]
 struct PlanReport {
     schema_version: &'static str,
+    outcome: PlanOutcomeReport,
     plan_id: String,
     registry: PlanRegistryReport,
     workspace_root: String,
@@ -2385,6 +2387,19 @@ struct PlanReport {
     artifacts: Vec<PlanArtifactReport>,
     packages: Vec<PlanPackageReport>,
     skipped: Vec<PlanSkippedPackageReport>,
+}
+
+#[derive(Debug, Serialize)]
+struct PlanOutcomeReport {
+    status: PlanOutcomeStatus,
+    publication_performed: bool,
+    next_action: OperatorAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum PlanOutcomeStatus {
+    Planned,
 }
 
 #[derive(Debug, Serialize)]
@@ -2459,8 +2474,8 @@ struct PreflightArtifactReport {
 }
 
 fn print_plan(ws: &plan::PlannedWorkspace, verbose: bool, format: &str) {
+    let report = build_plan_report(ws);
     if format == "json" {
-        let report = build_plan_report(ws);
         let json = serde_json::to_string_pretty(&report).expect("serialize plan report");
         println!("{}", json);
         return;
@@ -2510,6 +2525,13 @@ fn print_plan(ws: &plan::PlannedWorkspace, verbose: bool, format: &str) {
             );
         }
     }
+
+    println!();
+    println!("Result: {}", plan_outcome_summary(&report.outcome));
+    match report.outcome.next_action.command_line() {
+        Some(command) => println!("Next: {command} — {}", report.outcome.next_action.reason),
+        None => println!("Next: {}", report.outcome.next_action.reason),
+    }
 }
 
 fn build_plan_report(ws: &plan::PlannedWorkspace) -> PlanReport {
@@ -2555,6 +2577,7 @@ fn build_plan_report(ws: &plan::PlannedWorkspace) -> PlanReport {
 
     PlanReport {
         schema_version: "shipper.plan.v1",
+        outcome: build_plan_outcome(),
         plan_id: ws.plan.plan_id.clone(),
         registry: PlanRegistryReport {
             name: ws.plan.registry.name.clone(),
@@ -2569,6 +2592,38 @@ fn build_plan_report(ws: &plan::PlannedWorkspace) -> PlanReport {
         artifacts: vec![plan_artifact_report()],
         packages,
         skipped,
+    }
+}
+
+fn build_plan_outcome() -> PlanOutcomeReport {
+    PlanOutcomeReport {
+        status: PlanOutcomeStatus::Planned,
+        publication_performed: false,
+        next_action: OperatorAction::posture(
+            ActionKind::Preflight,
+            "run preflight with the same manifest, package, configuration, and registry selection",
+        ),
+    }
+}
+
+fn plan_outcome_summary(outcome: &PlanOutcomeReport) -> &'static str {
+    match outcome.status {
+        PlanOutcomeStatus::Planned => "plan created; no packages were published",
+    }
+}
+
+#[cfg(test)]
+mod plan_outcome_tests {
+    use super::*;
+
+    #[test]
+    fn publishable_plan_points_to_context_preserving_preflight() {
+        let outcome = build_plan_outcome();
+        assert_eq!(outcome.status, PlanOutcomeStatus::Planned);
+        assert!(!outcome.publication_performed);
+        assert_eq!(outcome.next_action.kind, ActionKind::Preflight);
+        assert_eq!(outcome.next_action.command_line(), None);
+        assert!(!outcome.next_action.requires_confirmation);
     }
 }
 

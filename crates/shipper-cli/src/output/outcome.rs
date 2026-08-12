@@ -54,13 +54,6 @@ impl OperatorAction {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "#274 ambiguous and terminal command integrations consume posture actions"
-        )
-    )]
     pub(crate) fn posture(kind: ActionKind, reason: impl Into<String>) -> Self {
         Self {
             kind,

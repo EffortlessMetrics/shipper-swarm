@@ -200,6 +200,9 @@ fn plan_command_snapshot() {
       Plan artifact: .shipper/plan.txt (`shipper plan --format json` capture)
 
       1. demo@0.1.0 (no workspace dependencies)
+
+    Result: plan created; no packages were published
+    Next: run preflight with the same manifest, package, configuration, and registry selection
     "
     );
 }
