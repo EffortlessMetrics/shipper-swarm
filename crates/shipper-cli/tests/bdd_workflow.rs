@@ -3120,6 +3120,30 @@ mod plan_json_format {
         let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid plan JSON");
 
         assert_eq!(json["schema_version"].as_str(), Some("shipper.plan.v1"));
+        assert_eq!(
+            json.pointer("/outcome/status")
+                .and_then(serde_json::Value::as_str),
+            Some("planned")
+        );
+        assert_eq!(
+            json.pointer("/outcome/publication_performed")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            json.pointer("/outcome/next_action/kind")
+                .and_then(serde_json::Value::as_str),
+            Some("preflight")
+        );
+        assert_eq!(
+            json.pointer("/outcome/next_action/command").cloned(),
+            Some(serde_json::json!(["shipper", "preflight"]))
+        );
+        assert_eq!(
+            json.pointer("/outcome/next_action/requires_confirmation")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
         assert!(json["plan_id"].is_string(), "missing plan_id: {stdout}");
         assert_eq!(json["publishable_count"].as_u64(), Some(3));
         assert_eq!(json["skipped_count"].as_u64(), Some(0));

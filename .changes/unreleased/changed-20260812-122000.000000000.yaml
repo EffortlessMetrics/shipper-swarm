@@ -1,0 +1,7 @@
+kind: changed
+body: Make `shipper plan` state that it performed no publication and report the same typed next action in human and JSON output, including a terminal result when no packages remain.
+time: 2026-08-12T12:20:00Z
+custom:
+  Audience: CLI users and CI operators
+  Importance: Detailed
+  PR: pending
