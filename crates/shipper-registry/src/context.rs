@@ -176,12 +176,10 @@ impl RegistryClient {
 
     /// Calculate the index path for a crate using Cargo's sparse index scheme.
     ///
-    /// - 1 char  → `1/{name}`
-    /// - 2 chars → `2/{name}`
-    /// - 3 chars → `3/{name[0]}/{name}`
-    /// - 4+ chars → `{name[0..2]}/{name[2..4]}/{name}`
-    ///
-    /// All names are lowercased per Cargo convention.
+    /// Sharding is measured in Unicode scalar values after lowercasing. The
+    /// shared helper owns the layout contract; this adapter only delegates to
+    /// it before constructing cache and network paths. Registry-specific name
+    /// validation is intentionally separate.
     fn calculate_index_path(&self, crate_name: &str) -> String {
         shipper_sparse_index::sparse_index_path(crate_name)
     }

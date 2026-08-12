@@ -52,6 +52,10 @@ pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
 pub const USER_AGENT: &str = concat!("shipper/", env!("CARGO_PKG_VERSION"));
 
 /// Compute the sparse-index path for a crate name.
+///
+/// Sharding is based on Unicode scalar values after lowercasing. This performs
+/// path derivation only; the target registry remains responsible for enforcing
+/// its crate-name policy.
 pub fn sparse_index_path(crate_name: &str) -> String {
     shipper_sparse_index::sparse_index_path(crate_name)
 }
