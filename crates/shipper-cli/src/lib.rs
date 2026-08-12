@@ -2527,12 +2527,6 @@ fn print_plan(ws: &plan::PlannedWorkspace, verbose: bool, format: &str) {
         }
     }
 
-    println!();
-    println!("Result: {}", plan_outcome_summary(&report.outcome));
-    match report.outcome.next_action.command_line() {
-        Some(command) => println!("Next: {command} — {}", report.outcome.next_action.reason),
-        None => println!("Next: {}", report.outcome.next_action.reason),
-    }
 }
 
 fn build_plan_report(ws: &plan::PlannedWorkspace) -> PlanReport {
@@ -2615,13 +2609,6 @@ fn build_plan_outcome(publishable_count: usize) -> PlanOutcomeReport {
                 "run preflight with the same manifest, package, configuration, and registry selection",
             ),
         }
-    }
-}
-
-fn plan_outcome_summary(outcome: &PlanOutcomeReport) -> &'static str {
-    match outcome.status {
-        PlanOutcomeStatus::Planned => "plan created; no packages were published",
-        PlanOutcomeStatus::NothingToPublish => "nothing to publish; no packages were published",
     }
 }
 
