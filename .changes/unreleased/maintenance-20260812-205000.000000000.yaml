@@ -1,0 +1,6 @@
+kind: maintenance
+body: Validate process and network policy profile ownership, review dates, duplicate names, and live workflow references in structured policy reports.
+time: 2026-08-12T20:50:00Z
+custom:
+  Audience: Maintainers
+  Importance: Maintenance
