@@ -162,6 +162,12 @@ not json
     }
 
     #[test]
+    fn sparse_index_path_treats_combining_marks_as_distinct_scalars() {
+        assert_eq!(sparse_index_path("éab"), "3/é/éab");
+        assert_eq!(sparse_index_path("e\u{301}ab"), "e\u{301}/ab/e\u{301}ab");
+    }
+
+    #[test]
     fn sparse_index_path_ascii_only_unicode_safe() {
         // Pure ASCII with non-alpha chars does not panic
         let path = sparse_index_path("a-b_c");

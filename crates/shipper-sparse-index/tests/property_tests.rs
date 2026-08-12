@@ -13,6 +13,21 @@ fn version_strategy() -> impl Strategy<Value = String> {
     "[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}"
 }
 
+/// Independent, test-only expression of Cargo's sparse-index layout.
+fn expected_unicode_path(name: &str) -> String {
+    let lower = name.to_lowercase();
+    let scalars = lower.chars().collect::<Vec<_>>();
+    match scalars.as_slice() {
+        [] => "0/".to_string(),
+        [_] => format!("1/{lower}"),
+        [_, _] => format!("2/{lower}"),
+        [first, _, _] => format!("3/{first}/{lower}"),
+        [first, second, third, fourth, ..] => {
+            format!("{first}{second}/{third}{fourth}/{lower}")
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // sparse_index_path: index URL / path computation
 // ---------------------------------------------------------------------------
@@ -24,6 +39,7 @@ proptest! {
         let first = sparse_index_path(&name);
         let second = sparse_index_path(&name);
         prop_assert_eq!(&first, &second);
+        prop_assert_eq!(&first, &expected_unicode_path(&name));
 
         if !name.is_empty() {
             prop_assert!(first.ends_with(&name.to_lowercase()));
