@@ -53,17 +53,19 @@ Public fork PRs are denied by the normalized result instead of running
 repository code on self-hosted runners. A maintainer can move trusted work onto
 a same-repo branch when it needs the swarm gate.
 
-Dependabot PRs are same-repo dependency maintenance, but their first
-bot-authored runs may not receive the selected repository secret used by the
-runner router. Treat a `runner_token_missing` routed result as a
-trust-bootstrap condition, not as proof that the dependency bump is broken.
-The maintainer flow is:
+Dependabot PRs are same-repo dependency maintenance. Their bot-authored runs do
+not receive the runner-read secret, so the router automatically selects the
+secret-free GitHub-hosted Rust-small lane with
+`router_reason=bot_pr_github_fallback` and `fallback_allowed=true`. This is the
+normal bot-PR gate path, not a pre-evaluation failure or a reason to expose the
+secret. A maintainer-authored refresh is needed only when the normalized gate
+actually fails or the candidate requires a repair:
 
 ```text
 1. Inspect the dependency diff and confirm it is narrow.
 2. Run focused local validation such as `cargo check --workspace --locked`.
-3. Add a maintainer-authored refresh commit or recreate the bump on a trusted
-   same-repo branch.
+3. If the gate fails or the candidate needs repair, add a maintainer-authored
+   commit or recreate the bump on a trusted same-repo branch.
 4. Require the normal `Shipper Rust Small Result`, a current substantive
    provider-native review, and any focused dependency validation before merge.
 ```
