@@ -24,9 +24,9 @@ surface = "docs"
 classification = "documentation"
 owner = "docs"
 reason = "Top-level project README."
-covered_by = ["manual review", "future: cargo xtask check-file-policy"]
+covered_by = ["manual review", "cargo xtask check-file-policy"]
 created = "2026-05-11"
-review_after = "2026-08-11"
+review_after = "2026-11-12"
 
 [[file]]
 path = "CHANGELOG.md"
@@ -35,9 +35,9 @@ surface = "release"
 classification = "documentation"
 owner = "release/ci"
 reason = "Release history and user-facing change log."
-covered_by = ["manual review", "future: cargo xtask check-file-policy"]
+covered_by = ["manual review", "cargo xtask check-file-policy"]
 created = "2026-05-11"
-review_after = "2026-08-11"
+review_after = "2026-11-12"
 
 [[file]]
 path = "CONTRIBUTING.md"
@@ -48,7 +48,7 @@ owner = "docs"
 reason = "Contributor onboarding and conventions."
 covered_by = ["manual review"]
 created = "2026-05-11"
-review_after = "2026-08-11"
+review_after = "2026-11-12"
 
 [[file]]
 path = "SECURITY.md"
@@ -59,7 +59,7 @@ owner = "security"
 reason = "Security disclosure and vulnerability reporting policy."
 covered_by = ["manual review"]
 created = "2026-05-11"
-review_after = "2026-08-11"
+review_after = "2026-11-12"
 
 [[file]]
 path = "MISSION.md"
@@ -70,7 +70,7 @@ owner = "product"
 reason = "Project north star: mission, vision, audience, beliefs."
 covered_by = ["manual review"]
 created = "2026-05-11"
-review_after = "2026-08-11"
+review_after = "2026-11-12"
 
 [[file]]
 path = "ROADMAP.md"
@@ -81,7 +81,7 @@ owner = "product"
 reason = "Five-pillar roadmap and nine-competency thesis."
 covered_by = ["manual review"]
 created = "2026-05-11"
-review_after = "2026-08-11"
+review_after = "2026-11-12"
 
 [[file]]
 path = "GAPS_CLOSEOUT.md"
@@ -105,7 +105,7 @@ owner = "agent-maintainers"
 reason = "Repository instructions for agentic maintainers."
 covered_by = ["manual review"]
 created = "2026-05-11"
-review_after = "2026-08-11"
+review_after = "2026-11-12"
 
 [[file]]
 path = "CLAUDE.md"
@@ -116,7 +116,7 @@ owner = "agent-maintainers"
 reason = "Claude-specific repository instructions."
 covered_by = ["manual review"]
 created = "2026-05-11"
-review_after = "2026-08-11"
+review_after = "2026-11-12"
 
 [[file]]
 path = "GEMINI.md"
@@ -127,7 +127,7 @@ owner = "agent-maintainers"
 reason = "Gemini-specific repository instructions."
 covered_by = ["manual review"]
 created = "2026-05-11"
-review_after = "2026-08-11"
+review_after = "2026-11-12"
 
 # ─── Licensing ──────────────────────────────────────────────────────────────
 
@@ -243,7 +243,7 @@ owner = "release/ci"
 reason = "Codecov status and reporting configuration."
 covered_by = ["codecov upload step in coverage.yml"]
 created = "2026-05-11"
-review_after = "2026-08-11"
+review_after = "2026-11-12"
 
 # ─── Subtrees: documentation, BDD features, templates, fuzz harness ─────────
 
@@ -256,7 +256,7 @@ owner = "docs"
 reason = "Project documentation and policy explanations."
 covered_by = ["manual review"]
 created = "2026-05-11"
-review_after = "2026-08-11"
+review_after = "2026-11-12"
 
 [[glob]]
 pattern = "assets/logo/**"
@@ -278,7 +278,7 @@ owner = "bdd/tests"
 reason = "Cucumber BDD feature specifications for release and publishing behavior."
 covered_by = ["cargo test --workspace --locked"]
 created = "2026-05-11"
-review_after = "2026-08-11"
+review_after = "2026-11-12"
 
 [[glob]]
 pattern = "templates/**"
@@ -289,7 +289,7 @@ owner = "release/templates"
 reason = "CI template fixtures (azure-pipelines, circleci, github-trusted-publishing) used to validate generated/release surfaces."
 covered_by = ["cargo test --workspace --locked"]
 created = "2026-05-11"
-review_after = "2026-08-11"
+review_after = "2026-11-12"
 
 # ─── Repo-level dotfiles / agent / GH config ────────────────────────────────
 
@@ -324,7 +324,7 @@ owner = "rust/build"
 reason = "Cargo workspace-level config (config.toml aliases, mutants.toml for cargo-mutants)."
 covered_by = ["cargo check --workspace --locked"]
 created = "2026-05-11"
-review_after = "2026-08-11"
+review_after = "2026-11-12"
 
 [[glob]]
 pattern = ".config/**"
@@ -335,18 +335,18 @@ owner = "rust/build"
 reason = "Per-tool configuration (nextest config, etc.)."
 covered_by = ["cargo test --workspace --locked", "cargo xtask check-file-policy"]
 created = "2026-05-11"
-review_after = "2026-08-11"
+review_after = "2026-11-12"
 
 [[glob]]
 pattern = ".factory/**"
-kind = "droid_review_config"
-surface = "ci"
-classification = "config"
-owner = "release/ci"
-reason = "Factory Droid review skill + rules consumed by Droid review workflows."
-covered_by = ["docs/agent-context/droid-smoke-tests.md", "xtask/tests/agent_review_flow.rs"]
+kind = "historical_agent_record"
+surface = "docs"
+classification = "documentation"
+owner = "agent-maintainers"
+reason = "Inactive Factory Droid review and security records retained as historical context after the Droid workflows were retired."
+covered_by = ["manual review", "PR #287 workflow-retirement record"]
 created = "2026-05-11"
-review_after = "2026-11-07"
+review_after = "2026-11-12"
 
 [[glob]]
 pattern = ".agents/skills/**/*.md"
@@ -456,7 +456,7 @@ owner = "release/ci"
 reason = "GitHub CODEOWNERS for review routing."
 covered_by = ["manual review"]
 created = "2026-05-11"
-review_after = "2026-08-11"
+review_after = "2026-11-12"
 
 [[file]]
 path = ".github/copilot-instructions.md"
@@ -467,7 +467,7 @@ owner = "agent-maintainers"
 reason = "Copilot-specific repository instructions."
 covered_by = ["manual review"]
 created = "2026-05-11"
-review_after = "2026-08-11"
+review_after = "2026-11-12"
 
 [[file]]
 path = ".github/settings.yml"
@@ -478,7 +478,7 @@ owner = "release/ci"
 reason = "Probot-style declarative repository settings."
 covered_by = ["manual review"]
 created = "2026-05-11"
-review_after = "2026-08-11"
+review_after = "2026-11-12"
 
 [[file]]
 path = ".gitignore"
@@ -524,7 +524,7 @@ owner = "agent-maintainers"
 reason = "Per-crate agent-context AGENTS.md files (root and nested directories under crates/*/src/)."
 covered_by = ["manual review"]
 created = "2026-05-11"
-review_after = "2026-08-11"
+review_after = "2026-11-12"
 
 [[glob]]
 pattern = "crates/**/CLAUDE.md"
@@ -535,7 +535,7 @@ owner = "agent-maintainers"
 reason = "Per-crate Claude-specific instructions (root and nested directories under crates/*/src/)."
 covered_by = ["manual review"]
 created = "2026-05-11"
-review_after = "2026-08-11"
+review_after = "2026-11-12"
 
 [[glob]]
 pattern = "crates/*/README.md"
@@ -546,7 +546,7 @@ owner = "docs"
 reason = "Per-crate README displayed on crates.io and on the crate's docs.rs page."
 covered_by = ["manual review", "cargo publish --dry-run"]
 created = "2026-05-11"
-review_after = "2026-08-11"
+review_after = "2026-11-12"
 
 [[glob]]
 pattern = "crates/*/proptest-regressions/**"
@@ -570,4 +570,4 @@ owner = "rust/build"
 reason = "Authoritative TOML ledgers consumed by the cargo xtask check-* family."
 covered_by = ["cargo xtask check-file-policy", "cargo xtask policy-report"]
 created = "2026-05-11"
-review_after = "2026-08-11"
+review_after = "2026-11-12"
