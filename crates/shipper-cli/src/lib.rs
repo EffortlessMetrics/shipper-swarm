@@ -2526,7 +2526,6 @@ fn print_plan(ws: &plan::PlannedWorkspace, verbose: bool, format: &str) {
             );
         }
     }
-
 }
 
 fn build_plan_report(ws: &plan::PlannedWorkspace) -> PlanReport {
