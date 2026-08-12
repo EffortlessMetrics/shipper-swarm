@@ -8,21 +8,29 @@ use serde::Deserialize;
 
 /// Compute the Cargo sparse-index path for a crate name.
 ///
-/// Layout:
+/// Layout, measured in Unicode scalar values after lowercasing:
 /// - `1/{name}` for length 1
 /// - `2/{name}` for length 2
-/// - `3/{name[0]}/{name}` for length 3
-/// - `{name[0..2]}/{name[2..4]}/{name}` for length >= 4
+/// - `3/{first}/{name}` for length 3
+/// - `{first two}/{next two}/{name}` for length >= 4
 ///
-/// Names are lowercased using ASCII rules.
+/// This helper performs mechanical path derivation only. Individual registries
+/// may impose stricter crate-name policies, including ASCII-only names.
 pub fn sparse_index_path(crate_name: &str) -> String {
-    let lower = crate_name.to_ascii_lowercase();
-    match lower.len() {
+    let lower = crate_name.to_lowercase();
+    match lower.chars().count() {
         0 => "0/".to_string(),
         1 => format!("1/{}", lower),
         2 => format!("2/{}", lower),
-        3 => format!("3/{}/{}", &lower[..1], lower),
-        _ => format!("{}/{}/{}", &lower[..2], &lower[2..4], lower),
+        3 => {
+            let first = lower.chars().next().into_iter().collect::<String>();
+            format!("3/{first}/{lower}")
+        }
+        _ => {
+            let first_two = lower.chars().take(2).collect::<String>();
+            let next_two = lower.chars().skip(2).take(2).collect::<String>();
+            format!("{first_two}/{next_two}/{lower}")
+        }
     }
 }
 
@@ -140,10 +148,17 @@ not json
     }
 
     #[test]
-    #[should_panic(expected = "byte index")]
-    fn sparse_index_path_panics_on_multibyte_unicode() {
-        // Crate names must be ASCII; multi-byte chars cause an indexing panic
-        let _ = sparse_index_path("café");
+    fn sparse_index_path_handles_multibyte_unicode_by_character() {
+        assert_eq!(sparse_index_path("é"), "1/é");
+        assert_eq!(sparse_index_path("éß"), "2/éß");
+        assert_eq!(sparse_index_path("åßç"), "3/å/åßç");
+        assert_eq!(sparse_index_path("café"), "ca/fé/café");
+        assert_eq!(sparse_index_path("éclair"), "éc/la/éclair");
+    }
+
+    #[test]
+    fn sparse_index_path_shards_after_unicode_lowercasing() {
+        assert_eq!(sparse_index_path("İX"), "3/i/i̇x");
     }
 
     #[test]

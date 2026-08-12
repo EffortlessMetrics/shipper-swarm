@@ -18,6 +18,18 @@ fn version_strategy() -> impl Strategy<Value = String> {
 // ---------------------------------------------------------------------------
 
 proptest! {
+    /// Path derivation is total and deterministic for arbitrary UTF-8 input.
+    #[test]
+    fn path_is_total_and_deterministic(name in any::<String>()) {
+        let first = sparse_index_path(&name);
+        let second = sparse_index_path(&name);
+        prop_assert_eq!(&first, &second);
+
+        if !name.is_empty() {
+            prop_assert!(first.ends_with(&name.to_lowercase()));
+        }
+    }
+
     /// Case-insensitive: upper and lower name produce the same path.
     #[test]
     fn path_is_case_insensitive(name in crate_name_strategy()) {
@@ -76,6 +88,19 @@ proptest! {
             path.starts_with(&expected_prefix),
             "expected prefix '{}', got '{}'", expected_prefix, path
         );
+    }
+
+    /// Existing valid-ASCII mappings remain byte-for-byte compatible.
+    #[test]
+    fn valid_ascii_path_matches_cargo_layout(name in crate_name_strategy()) {
+        let lower = name.to_ascii_lowercase();
+        let expected = match lower.len() {
+            1 => format!("1/{lower}"),
+            2 => format!("2/{lower}"),
+            3 => format!("3/{}/{lower}", &lower[..1]),
+            _ => format!("{}/{}/{lower}", &lower[..2], &lower[2..4]),
+        };
+        prop_assert_eq!(sparse_index_path(&name), expected);
     }
 
     /// The number of path segments matches the Cargo sparse-index spec.
