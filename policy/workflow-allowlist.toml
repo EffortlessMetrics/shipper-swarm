@@ -20,7 +20,7 @@ reason = "Broad full-CI workflow for pushes to main, manual dispatch, and weekly
 process_policy = "ci"
 network_policy = "ci"
 created = "2026-05-11"
-review_after = "2026-08-11"
+review_after = "2026-11-12"
 
 [[workflow]]
 path = ".github/workflows/coverage.yml"
@@ -30,7 +30,7 @@ reason = "Code coverage via cargo-llvm-cov uploaded to Codecov. Runs on main and
 process_policy = "ci"
 network_policy = "ci"
 created = "2026-05-11"
-review_after = "2026-08-11"
+review_after = "2026-11-12"
 
 [[workflow]]
 path = ".github/workflows/architecture-guard.yml"
@@ -40,7 +40,7 @@ reason = "Enforces the plan/state/runtime/ops/engine layering rules documented i
 process_policy = "ci"
 network_policy = "ci"
 created = "2026-05-11"
-review_after = "2026-08-11"
+review_after = "2026-11-12"
 
 [[workflow]]
 path = ".github/workflows/runner-routing-guard.yml"
@@ -60,7 +60,7 @@ reason = "Scheduled cargo-fuzz runs using nightly toolchain. Out of the default 
 process_policy = "ci"
 network_policy = "ci"
 created = "2026-05-11"
-review_after = "2026-08-11"
+review_after = "2026-11-12"
 
 [[workflow]]
 path = ".github/workflows/mutation.yml"
@@ -70,7 +70,7 @@ reason = "Scheduled cargo-mutants runs for targeted mutation testing of trust-cr
 process_policy = "ci"
 network_policy = "ci"
 created = "2026-05-11"
-review_after = "2026-08-11"
+review_after = "2026-11-12"
 
 [[workflow]]
 path = ".github/workflows/ripr.yml"
@@ -113,7 +113,7 @@ process_policy = "release"
 network_policy = "release"
 required_repository_guard = "EffortlessMetrics/shipper"
 created = "2026-05-11"
-review_after = "2026-08-11"
+review_after = "2026-11-12"
 
 # ─── Dependabot configuration (not a workflow, but governs the bot itself) ──
 
@@ -125,4 +125,4 @@ reason = "Dependabot configuration for cargo and github-actions ecosystems."
 process_policy = "ci"
 network_policy = "ci"
 created = "2026-05-11"
-review_after = "2026-08-11"
+review_after = "2026-11-12"
