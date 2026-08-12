@@ -2239,11 +2239,15 @@ const KNOWN_COMMANDS: &[&str] = &[
 
 pub fn check_process_policy(mode: Mode) -> Result<()> {
     let workspace_root = workspace_root()?;
-    let entries = load_workflow_allowlist(&workspace_root)?;
-    let workflows = tracked_workflow_files(&workspace_root)?;
+    check_process_policy_at(&workspace_root, mode)
+}
+
+fn check_process_policy_at(workspace_root: &Path, mode: Mode) -> Result<()> {
+    let entries = load_workflow_allowlist(workspace_root)?;
+    let workflows = tracked_workflow_files(workspace_root)?;
     let today = today_date()?;
     let referenced = referenced_profiles(&entries, &workflows, ProfileKind::Process);
-    let catalog = load_profile_catalog(&workspace_root, PROCESS_ALLOWLIST, &referenced, today)?;
+    let catalog = load_profile_catalog(workspace_root, PROCESS_ALLOWLIST, &referenced, today)?;
     let profiles_by_name = &catalog.profiles;
 
     let mut per_workflow = Vec::new();
@@ -2264,7 +2268,7 @@ pub fn check_process_policy(mode: Mode) -> Result<()> {
             .map(|p| p.allowed_processes.iter().cloned().collect())
             .unwrap_or_default();
 
-        let content = read_workflow_content(&workspace_root, path).unwrap_or_default();
+        let content = read_workflow_content(workspace_root, path).unwrap_or_default();
         let detected = detect_commands_in_runs(&content, KNOWN_COMMANDS);
         let unknown: Vec<String> = detected
             .iter()
@@ -2297,7 +2301,7 @@ pub fn check_process_policy(mode: Mode) -> Result<()> {
         findings: catalog.findings,
         workflows: per_workflow,
     };
-    write_scan_report(&workspace_root, "process-policy-report", &report)?;
+    write_scan_report(workspace_root, "process-policy-report", &report)?;
     println!(
         "{} ({}): workflows={} profiles={} unknown_total={} missing_fields={} invalid_profiles={} stale={} orphaned={}",
         report.tool,
@@ -2328,11 +2332,15 @@ pub fn check_process_policy(mode: Mode) -> Result<()> {
 
 pub fn check_network_policy(mode: Mode) -> Result<()> {
     let workspace_root = workspace_root()?;
-    let entries = load_workflow_allowlist(&workspace_root)?;
-    let workflows = tracked_workflow_files(&workspace_root)?;
+    check_network_policy_at(&workspace_root, mode)
+}
+
+fn check_network_policy_at(workspace_root: &Path, mode: Mode) -> Result<()> {
+    let entries = load_workflow_allowlist(workspace_root)?;
+    let workflows = tracked_workflow_files(workspace_root)?;
     let today = today_date()?;
     let referenced = referenced_profiles(&entries, &workflows, ProfileKind::Network);
-    let catalog = load_profile_catalog(&workspace_root, NETWORK_ALLOWLIST, &referenced, today)?;
+    let catalog = load_profile_catalog(workspace_root, NETWORK_ALLOWLIST, &referenced, today)?;
     let profiles_by_name = &catalog.profiles;
     let host_re =
         Regex::new(r"https?://([A-Za-z0-9.\-]+)").context("compiling network hostname regex")?;
@@ -2354,7 +2362,7 @@ pub fn check_network_policy(mode: Mode) -> Result<()> {
             .map(|p| p.allowed_endpoints.iter().cloned().collect())
             .unwrap_or_default();
 
-        let content = read_workflow_content(&workspace_root, path).unwrap_or_default();
+        let content = read_workflow_content(workspace_root, path).unwrap_or_default();
         let mut detected: BTreeSet<String> = BTreeSet::new();
         for caps in host_re.captures_iter(&content) {
             if let Some(host) = caps.get(1) {
@@ -2393,7 +2401,7 @@ pub fn check_network_policy(mode: Mode) -> Result<()> {
         findings: catalog.findings,
         workflows: per_workflow,
     };
-    write_scan_report(&workspace_root, "network-policy-report", &report)?;
+    write_scan_report(workspace_root, "network-policy-report", &report)?;
     println!(
         "{} ({}): workflows={} profiles={} unknown_total={} missing_fields={} invalid_profiles={} stale={} orphaned={}",
         report.tool,
@@ -4463,6 +4471,186 @@ review_after = "2026-11-06"
         let markdown = render_scan_md(&report);
         assert!(markdown.contains("**Stale profile** `ci`"));
         assert!(markdown.contains("**Orphan profile** `unused`"));
+    }
+
+    #[test]
+    fn process_and_network_adapters_enforce_lifecycle_modes_and_reports() {
+        #[derive(Clone, Copy)]
+        struct Case {
+            name: &'static str,
+            profiles: fn(&str, &str) -> String,
+            missing: usize,
+            invalid: usize,
+            stale: usize,
+            orphaned: usize,
+            allowlist_blocks: bool,
+            strict_blocks: bool,
+        }
+
+        fn profile(name: &str, created: &str, review_after: &str) -> String {
+            format!(
+                r#"[[profile]]
+name = "{name}"
+allowed_processes = ["cargo", "curl"]
+allowed_endpoints = ["crates.io"]
+owner = "release/ci"
+reason = "Required by the live fixture workflow."
+created = "{created}"
+review_after = "{review_after}"
+"#
+            )
+        }
+
+        let today = today_iso();
+        let yesterday = NaiveDate::parse_from_str(&today, "%Y-%m-%d")
+            .expect("current date parses")
+            .pred_opt()
+            .expect("current date has a predecessor")
+            .format("%Y-%m-%d")
+            .to_string();
+        let cases = [
+            Case {
+                name: "valid",
+                profiles: |today, _| profile("ci", today, today),
+                missing: 0,
+                invalid: 0,
+                stale: 0,
+                orphaned: 0,
+                allowlist_blocks: false,
+                strict_blocks: false,
+            },
+            Case {
+                name: "missing",
+                profiles: |today, _| {
+                    profile("ci", today, today).replace("owner = \"release/ci\"\n", "")
+                },
+                missing: 1,
+                invalid: 0,
+                stale: 0,
+                orphaned: 0,
+                allowlist_blocks: true,
+                strict_blocks: true,
+            },
+            Case {
+                name: "malformed",
+                profiles: |_, _| profile("ci", "2026-02-30", "2026-08-12"),
+                missing: 0,
+                invalid: 1,
+                stale: 0,
+                orphaned: 0,
+                allowlist_blocks: true,
+                strict_blocks: true,
+            },
+            Case {
+                name: "duplicate",
+                profiles: |today, _| {
+                    format!(
+                        "{}{}",
+                        profile("ci", today, today),
+                        profile("ci", today, today)
+                    )
+                },
+                missing: 0,
+                invalid: 1,
+                stale: 0,
+                orphaned: 0,
+                allowlist_blocks: true,
+                strict_blocks: true,
+            },
+            Case {
+                name: "stale-orphan",
+                profiles: |today, yesterday| {
+                    format!(
+                        "{}{}",
+                        profile("ci", yesterday, yesterday),
+                        profile("orphan", today, today)
+                    )
+                },
+                missing: 0,
+                invalid: 0,
+                stale: 1,
+                orphaned: 1,
+                allowlist_blocks: false,
+                strict_blocks: true,
+            },
+        ];
+
+        for kind in [ProfileKind::Process, ProfileKind::Network] {
+            for case in cases {
+                let root = unique_temp_dir(&format!("shipper-profile-{}-{:?}", case.name, kind));
+                let _ = fs::remove_dir_all(&root);
+                fs::create_dir_all(root.join(".github/workflows")).expect("workflow directory");
+                fs::create_dir_all(root.join("policy")).expect("policy directory");
+                fs::write(
+                    root.join(".github/workflows/live.yml"),
+                    "jobs:\n  test:\n    steps:\n      - run: cargo test && curl https://crates.io\n",
+                )
+                .expect("write workflow");
+                fs::write(
+                    root.join(WORKFLOW_ALLOWLIST),
+                    r#"[[workflow]]
+path = ".github/workflows/live.yml"
+kind = "workflow"
+process_policy = "ci"
+network_policy = "ci"
+"#,
+                )
+                .expect("write workflow ledger");
+                let profile_doc = (case.profiles)(&today, &yesterday);
+                fs::write(root.join(PROCESS_ALLOWLIST), &profile_doc)
+                    .expect("write process ledger");
+                fs::write(root.join(NETWORK_ALLOWLIST), &profile_doc)
+                    .expect("write network ledger");
+                let init = Command::new("git")
+                    .arg("init")
+                    .arg("--quiet")
+                    .arg(&root)
+                    .status()
+                    .expect("initialize fixture repository");
+                assert!(init.success());
+                let add = Command::new("git")
+                    .arg("-C")
+                    .arg(&root)
+                    .args(["add", ".github/workflows/live.yml"])
+                    .status()
+                    .expect("track fixture workflow");
+                assert!(add.success());
+
+                let run = |mode| match kind {
+                    ProfileKind::Process => check_process_policy_at(&root, mode),
+                    ProfileKind::Network => check_network_policy_at(&root, mode),
+                };
+                assert!(run(Mode::Advisory).is_ok(), "{} {kind:?}", case.name);
+                assert_eq!(
+                    run(Mode::BlockingAllowlist).is_err(),
+                    case.allowlist_blocks,
+                    "{} {kind:?} allowlist",
+                    case.name
+                );
+                assert_eq!(
+                    run(Mode::BlockingStrict).is_err(),
+                    case.strict_blocks,
+                    "{} {kind:?} strict",
+                    case.name
+                );
+
+                let basename = match kind {
+                    ProfileKind::Process => "process-policy-report.json",
+                    ProfileKind::Network => "network-policy-report.json",
+                };
+                let report: serde_json::Value = serde_json::from_str(
+                    &fs::read_to_string(root.join(OUTPUT_DIR_REL).join(basename))
+                        .expect("read adapter report"),
+                )
+                .expect("parse adapter report");
+                assert_eq!(report["summary"]["missing_fields"], case.missing);
+                assert_eq!(report["summary"]["invalid_profiles"], case.invalid);
+                assert_eq!(report["summary"]["stale"], case.stale);
+                assert_eq!(report["summary"]["orphaned"], case.orphaned);
+
+                let _ = fs::remove_dir_all(&root);
+            }
+        }
     }
 
     /// A temp directory unique to this process and this call.
