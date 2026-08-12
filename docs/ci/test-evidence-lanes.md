@@ -66,8 +66,9 @@ actually fails or the candidate requires a repair:
 2. Run focused local validation such as `cargo check --workspace --locked`.
 3. If the gate fails or the candidate needs repair, add a maintainer-authored
    commit or recreate the bump on a trusted same-repo branch.
-4. Require the normal `Shipper Rust Small Result`, a current substantive
-   provider-native review, and any focused dependency validation before merge.
+4. Require the normal `Shipper Rust Small Result`, a current substantive review
+   through Codex, Claude, or a human reviewer, and any focused dependency
+   validation before merge.
 ```
 
 This is not a fallback-policy exception. Do not add release credentials, crates.io
