@@ -137,10 +137,10 @@ Cargo 1.90 stabilized multi-package workspace publishing. Shipper's value is wha
 
 Factory Droid is retired. The `droid`, `droid-review`, and `droid-security-scan` workflows were removed, so no automatic review, `@droid` mention handling, or scheduled security scan runs. The references below are retained as history for anyone restoring the lane.
 
-- [`.factory/skills/review-guidelines/SKILL.md`](.factory/skills/review-guidelines/SKILL.md) — the active review skill: product contract, finding format, no-naked-LGTM record, evidence provenance, notification hygiene.
-- [`.factory/rules/droid-review.md`](.factory/rules/droid-review.md) — the compact rule version: clean-review requirements, priority surfaces, repo lenses.
-- [`docs/agent-context/review-invariants.md`](docs/agent-context/review-invariants.md) — durable product, CI, and Droid-workflow invariants a reviewer can rely on.
-- [`docs/agent-context/droid-smoke-tests.md`](docs/agent-context/droid-smoke-tests.md) — how to verify the Droid workflows after a change.
+- [`.factory/skills/review-guidelines/SKILL.md`](.factory/skills/review-guidelines/SKILL.md) — retired review guidance retained as a restoration record.
+- [`.factory/rules/droid-review.md`](.factory/rules/droid-review.md) — retired compact rules retained as a restoration record.
+- [`docs/agent-context/review-invariants.md`](docs/agent-context/review-invariants.md) — current shared invariants plus an explicitly retired Droid configuration record.
+- [`docs/agent-context/droid-smoke-tests.md`](docs/agent-context/droid-smoke-tests.md) — restoration-only verification procedure; it is not runnable against the current workflow inventory.
 
 The `droid*.yml` workflows no longer exist. If the lane is ever restored, follow the smoke-test procedure and update `review-invariants.md` first — and note that the Droid action mints its GitHub token via OIDC, so the job needs `id-token: write` plus a matching authority-exception record.
 

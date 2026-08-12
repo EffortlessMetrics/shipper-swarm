@@ -1,6 +1,6 @@
 # Review Invariants
 
-This file captures durable invariants for human, Factory Droid, Claude Code, and Codex review of shipper PRs. It is shared semantic context, not an executable review authority; each provider's native skill carries its complete operating procedure.
+This file captures durable invariants for human, Claude Code, and Codex review of shipper PRs, plus a restoration record for the retired Factory Droid lane. It is shared semantic context, not an executable review authority; each active provider's native skill carries its complete operating procedure.
 
 ## Product invariants
 
@@ -31,7 +31,7 @@ This file captures durable invariants for human, Factory Droid, Claude Code, and
 - Reviewer identity alone does not create independence. Record authorship/repair posture, live evidence reloaded, external controls, correlated-failure risk, and author-side versus independent posture.
 - Every PR in a stack receives its own candidate judgment before campaign synthesis.
 - Valid inline findings receive a reply naming the fixing commit and focused proof, or an evidence-backed rejection, before resolution. Blanket automated thread resolution is forbidden.
-- Shared semantics live in `docs/agent-context/review-currentness.md`, but executable authority remains in `.agents/skills/`, `.claude/skills/`, and `.factory/` respectively.
+- Shared semantics live in `docs/agent-context/review-currentness.md`, while current executable authority remains in `.agents/skills/` and `.claude/skills/`. Retained `.factory/**` material is restoration-only.
 
 ## Droid workflow invariants (retired)
 

@@ -1,6 +1,6 @@
 # Pull-request review currentness
 
-This document defines shared semantics for repository review evidence. It is **not an executable review authority**. Claude Code executes `.claude/skills/*`; Codex executes `.agents/skills/*`; Factory Droid executes its own skill and rules. Those provider-native paths must carry the complete procedure they need at the point of work.
+This document defines shared semantics for repository review evidence. It is **not an executable review authority**. Claude Code executes `.claude/skills/*`; Codex executes `.agents/skills/*`. Factory Droid is retired, and its retained `.factory/**` files are historical restoration records rather than a current review route. Active provider-native paths must carry the complete procedure they need at the point of work.
 
 ## Effective subject
 

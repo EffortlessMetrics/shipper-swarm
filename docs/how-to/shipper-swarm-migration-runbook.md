@@ -306,9 +306,9 @@ Operator instruction to contributors:
 - Do not run real publish flows in swarm PR CI.
 
 Dependabot maintenance PRs stay in the swarm queue like any other PR, but their
-first bot-authored workflow run can fail before evaluation if the router or
-Droid cannot read selected repository secrets. In that case, do not broaden
-secret access and do not move release credentials into `shipper-swarm`.
+first bot-authored workflow run can fail before evaluation if the router cannot
+read its selected repository secret. In that case, do not broaden secret access
+and do not move release credentials into `shipper-swarm`.
 
 Use this maintainer refresh procedure instead:
 
