@@ -3135,9 +3135,11 @@ mod plan_json_format {
                 .and_then(serde_json::Value::as_str),
             Some("preflight")
         );
-        assert_eq!(
-            json.pointer("/outcome/next_action/command").cloned(),
-            Some(serde_json::json!(["shipper", "preflight"]))
+        assert!(json.pointer("/outcome/next_action/command").is_none());
+        assert!(
+            json.pointer("/outcome/next_action/reason")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|reason| reason.contains("same manifest"))
         );
         assert_eq!(
             json.pointer("/outcome/next_action/requires_confirmation")

@@ -2610,10 +2610,9 @@ fn build_plan_outcome(publishable_count: usize) -> PlanOutcomeReport {
         PlanOutcomeReport {
             status: PlanOutcomeStatus::Planned,
             publication_performed: false,
-            next_action: OperatorAction::command(
+            next_action: OperatorAction::posture(
                 ActionKind::Preflight,
-                ["shipper", "preflight"],
-                "prove reversible readiness before publishing",
+                "run preflight with the same manifest, package, configuration, and registry selection",
             ),
         }
     }
@@ -2631,15 +2630,12 @@ mod plan_outcome_tests {
     use super::*;
 
     #[test]
-    fn publishable_plan_points_to_preflight_without_claiming_publication() {
+    fn publishable_plan_points_to_context_preserving_preflight() {
         let outcome = build_plan_outcome(2);
         assert_eq!(outcome.status, PlanOutcomeStatus::Planned);
         assert!(!outcome.publication_performed);
         assert_eq!(outcome.next_action.kind, ActionKind::Preflight);
-        assert_eq!(
-            outcome.next_action.command_line().as_deref(),
-            Some("shipper preflight")
-        );
+        assert_eq!(outcome.next_action.command_line(), None);
         assert!(!outcome.next_action.requires_confirmation);
     }
 
