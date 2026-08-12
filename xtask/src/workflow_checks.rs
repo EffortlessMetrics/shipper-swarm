@@ -2251,7 +2251,6 @@ fn check_process_policy_at(workspace_root: &Path, mode: Mode) -> Result<()> {
     let profiles_by_name = &catalog.profiles;
 
     let mut per_workflow = Vec::new();
-    let mut unknown_total = 0usize;
     for e in live_workflow_entries(&entries, &workflows) {
         if is_dependabot_config(e) {
             // dependabot.yml is a config file, not a script — there are no
@@ -2275,8 +2274,6 @@ fn check_process_policy_at(workspace_root: &Path, mode: Mode) -> Result<()> {
             .filter(|c| !allowed.contains(c.as_str()))
             .cloned()
             .collect();
-        unknown_total += unknown.len();
-
         per_workflow.push(PerWorkflowReport {
             workflow: path.clone(),
             declared_profile: profile,
@@ -2285,47 +2282,15 @@ fn check_process_policy_at(workspace_root: &Path, mode: Mode) -> Result<()> {
         });
     }
 
-    let report = ScanReport {
-        tool: "cargo xtask check-process-policy",
-        mode: mode_str(mode),
-        today: today.format("%Y-%m-%d").to_string(),
-        summary: ScanSummary {
-            workflows: per_workflow.len(),
-            profiles: catalog.entries,
-            unknown_total,
-            missing_fields: catalog.findings.missing_fields.len(),
-            invalid_profiles: catalog.findings.invalid_profiles.len(),
-            stale: catalog.findings.stale.len(),
-            orphaned: catalog.findings.orphaned.len(),
-        },
-        findings: catalog.findings,
-        workflows: per_workflow,
-    };
-    write_scan_report(workspace_root, "process-policy-report", &report)?;
-    println!(
-        "{} ({}): workflows={} profiles={} unknown_total={} missing_fields={} invalid_profiles={} stale={} orphaned={}",
-        report.tool,
-        report.mode,
-        report.summary.workflows,
-        report.summary.profiles,
-        report.summary.unknown_total,
-        report.summary.missing_fields,
-        report.summary.invalid_profiles,
-        report.summary.stale,
-        report.summary.orphaned,
-    );
-
-    let blocking = profile_blocking_count(mode, &report.findings, unknown_total);
-    if blocking > 0 && !matches!(mode, Mode::Advisory) {
-        bail!(
-            "{}: {} mode found {} blocking issue(s) across {} workflow(s)",
-            report.tool,
-            report.mode,
-            blocking,
-            report.summary.workflows
-        );
-    }
-    Ok(())
+    finish_profile_scan(
+        workspace_root,
+        "cargo xtask check-process-policy",
+        "process-policy-report",
+        mode,
+        today,
+        catalog,
+        per_workflow,
+    )
 }
 
 // ─── check-network-policy ───────────────────────────────────────────────────
@@ -2346,7 +2311,6 @@ fn check_network_policy_at(workspace_root: &Path, mode: Mode) -> Result<()> {
         Regex::new(r"https?://([A-Za-z0-9.\-]+)").context("compiling network hostname regex")?;
 
     let mut per_workflow = Vec::new();
-    let mut unknown_total = 0usize;
     for e in live_workflow_entries(&entries, &workflows) {
         if is_dependabot_config(e) {
             // dependabot.yml is configuration, not a script — no URLs to scan.
@@ -2375,8 +2339,6 @@ fn check_network_policy_at(workspace_root: &Path, mode: Mode) -> Result<()> {
             .filter(|h| !endpoint_covered(h, &allowed))
             .cloned()
             .collect();
-        unknown_total += unknown.len();
-
         per_workflow.push(PerWorkflowReport {
             workflow: path.clone(),
             declared_profile: profile,
@@ -2385,12 +2347,36 @@ fn check_network_policy_at(workspace_root: &Path, mode: Mode) -> Result<()> {
         });
     }
 
+    finish_profile_scan(
+        workspace_root,
+        "cargo xtask check-network-policy",
+        "network-policy-report",
+        mode,
+        today,
+        catalog,
+        per_workflow,
+    )
+}
+
+fn finish_profile_scan(
+    workspace_root: &Path,
+    tool: &'static str,
+    report_basename: &str,
+    mode: Mode,
+    today: NaiveDate,
+    catalog: ProfileCatalog,
+    workflows: Vec<PerWorkflowReport>,
+) -> Result<()> {
+    let unknown_total = workflows
+        .iter()
+        .map(|workflow| workflow.unknown.len())
+        .sum();
     let report = ScanReport {
-        tool: "cargo xtask check-network-policy",
+        tool,
         mode: mode_str(mode),
         today: today.format("%Y-%m-%d").to_string(),
         summary: ScanSummary {
-            workflows: per_workflow.len(),
+            workflows: workflows.len(),
             profiles: catalog.entries,
             unknown_total,
             missing_fields: catalog.findings.missing_fields.len(),
@@ -2399,9 +2385,9 @@ fn check_network_policy_at(workspace_root: &Path, mode: Mode) -> Result<()> {
             orphaned: catalog.findings.orphaned.len(),
         },
         findings: catalog.findings,
-        workflows: per_workflow,
+        workflows,
     };
-    write_scan_report(workspace_root, "network-policy-report", &report)?;
+    write_scan_report(workspace_root, report_basename, &report)?;
     println!(
         "{} ({}): workflows={} profiles={} unknown_total={} missing_fields={} invalid_profiles={} stale={} orphaned={}",
         report.tool,

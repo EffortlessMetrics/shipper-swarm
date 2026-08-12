@@ -42,7 +42,7 @@ Changes to the release workflow must be reviewed with extra scrutiny. The `polic
 
 ### Process Behavior
 
-The `policy/process-allowlist.toml` receipts which shell commands and subprocesses each workflow is permitted to invoke. Each profile carries a non-empty `name`, `owner`, and `reason`, plus canonical `created` and `review_after` dates. The release workflow's permitted processes include: `cargo`, `rustup`, `shipper`, `gh`, `tar`, `sha256sum`.
+The `policy/process-allowlist.toml` receipts which shell commands and subprocesses each workflow is permitted to invoke. Each profile carries a non-empty `name`, `owner`, and `reason`. Its `created` and `review_after` values must be exact `YYYY-MM-DD` calendar dates, and `review_after` cannot be before `created`. The release workflow's permitted processes include: `cargo`, `rustup`, `shipper`, `gh`, `tar`, `sha256sum`.
 
 ### Network Behavior
 

@@ -106,6 +106,8 @@ created = "2026-05-11"
 review_after = "2026-11-12"
 ```
 
+Profile `created` and `review_after` values must be exact `YYYY-MM-DD` calendar dates. `review_after` cannot be before `created`.
+
 ### Network Policy Entry
 
 ```toml
