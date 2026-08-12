@@ -1,5 +1,5 @@
 kind: changed
-body: Make `shipper plan --format json` state that it performed no publication and report a typed, context-preserving next action, including a terminal result when no packages remain.
+body: Make `shipper plan --format json` state that it performed no publication and report a typed, context-preserving preflight action without inferring terminal completion from package count alone.
 time: 2026-08-12T12:20:00Z
 custom:
   Audience: CLI users and CI operators

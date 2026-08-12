@@ -2400,7 +2400,6 @@ struct PlanOutcomeReport {
 #[serde(rename_all = "snake_case")]
 enum PlanOutcomeStatus {
     Planned,
-    NothingToPublish,
 }
 
 #[derive(Debug, Serialize)]
@@ -2571,7 +2570,7 @@ fn build_plan_report(ws: &plan::PlannedWorkspace) -> PlanReport {
 
     PlanReport {
         schema_version: "shipper.plan.v1",
-        outcome: build_plan_outcome(ws.plan.packages.len()),
+        outcome: build_plan_outcome(),
         plan_id: ws.plan.plan_id.clone(),
         registry: PlanRegistryReport {
             name: ws.plan.registry.name.clone(),
@@ -2589,25 +2588,14 @@ fn build_plan_report(ws: &plan::PlannedWorkspace) -> PlanReport {
     }
 }
 
-fn build_plan_outcome(publishable_count: usize) -> PlanOutcomeReport {
-    if publishable_count == 0 {
-        PlanOutcomeReport {
-            status: PlanOutcomeStatus::NothingToPublish,
-            publication_performed: false,
-            next_action: OperatorAction::posture(
-                ActionKind::NoneComplete,
-                "no publishable packages remain for this selection",
-            ),
-        }
-    } else {
-        PlanOutcomeReport {
-            status: PlanOutcomeStatus::Planned,
-            publication_performed: false,
-            next_action: OperatorAction::posture(
-                ActionKind::Preflight,
-                "run preflight with the same manifest, package, configuration, and registry selection",
-            ),
-        }
+fn build_plan_outcome() -> PlanOutcomeReport {
+    PlanOutcomeReport {
+        status: PlanOutcomeStatus::Planned,
+        publication_performed: false,
+        next_action: OperatorAction::posture(
+            ActionKind::Preflight,
+            "run preflight with the same manifest, package, configuration, and registry selection",
+        ),
     }
 }
 
@@ -2617,7 +2605,7 @@ mod plan_outcome_tests {
 
     #[test]
     fn publishable_plan_points_to_context_preserving_preflight() {
-        let outcome = build_plan_outcome(2);
+        let outcome = build_plan_outcome();
         assert_eq!(outcome.status, PlanOutcomeStatus::Planned);
         assert!(!outcome.publication_performed);
         assert_eq!(outcome.next_action.kind, ActionKind::Preflight);
@@ -2626,11 +2614,11 @@ mod plan_outcome_tests {
     }
 
     #[test]
-    fn empty_plan_terminates_without_fabricating_work() {
-        let outcome = build_plan_outcome(0);
-        assert_eq!(outcome.status, PlanOutcomeStatus::NothingToPublish);
+    fn empty_plan_does_not_overclaim_terminal_completion() {
+        let outcome = build_plan_outcome();
+        assert_eq!(outcome.status, PlanOutcomeStatus::Planned);
         assert!(!outcome.publication_performed);
-        assert_eq!(outcome.next_action.kind, ActionKind::NoneComplete);
+        assert_eq!(outcome.next_action.kind, ActionKind::Preflight);
         assert_eq!(outcome.next_action.command_line(), None);
         assert!(!outcome.next_action.requires_confirmation);
     }
