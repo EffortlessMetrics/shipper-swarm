@@ -80,6 +80,61 @@ struct RawProfile {
     allowed_processes: Vec<String>,
     #[serde(default)]
     allowed_endpoints: Vec<String>,
+    owner: Option<String>,
+    reason: Option<String>,
+    created: Option<String>,
+    review_after: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProfileKind {
+    Process,
+    Network,
+}
+
+impl ProfileKind {
+    fn reference(self, entry: &RawWorkflowEntry) -> Option<&str> {
+        match self {
+            Self::Process => entry.process_policy.as_deref(),
+            Self::Network => entry.network_policy.as_deref(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ProfileCatalog {
+    entries: usize,
+    profiles: BTreeMap<String, RawProfile>,
+    findings: ProfileLifecycleFindings,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct ProfileLifecycleFindings {
+    missing_fields: Vec<ProfileMissingFields>,
+    invalid_profiles: Vec<InvalidProfile>,
+    stale: Vec<StaleProfile>,
+    orphaned: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ProfileMissingFields {
+    profile: String,
+    missing: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct InvalidProfile {
+    profile: String,
+    field: &'static str,
+    value: String,
+    reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct StaleProfile {
+    profile: String,
+    review_after: String,
+    today: String,
 }
 
 // ─── check-workflow-surfaces ────────────────────────────────────────────────
@@ -2131,13 +2186,19 @@ struct ScanReport {
     mode: &'static str,
     today: String,
     summary: ScanSummary,
+    findings: ProfileLifecycleFindings,
     workflows: Vec<PerWorkflowReport>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 struct ScanSummary {
     workflows: usize,
+    profiles: usize,
     unknown_total: usize,
+    missing_fields: usize,
+    invalid_profiles: usize,
+    stale: usize,
+    orphaned: usize,
 }
 
 /// Well-known shell-command tokens we look for inside workflow contents.
@@ -2178,13 +2239,19 @@ const KNOWN_COMMANDS: &[&str] = &[
 
 pub fn check_process_policy(mode: Mode) -> Result<()> {
     let workspace_root = workspace_root()?;
-    let entries = load_workflow_allowlist(&workspace_root)?;
-    let profiles_by_name = load_profiles(&workspace_root, PROCESS_ALLOWLIST)?;
-    let today = today_iso();
+    check_process_policy_at(&workspace_root, mode)
+}
+
+fn check_process_policy_at(workspace_root: &Path, mode: Mode) -> Result<()> {
+    let entries = load_workflow_allowlist(workspace_root)?;
+    let workflows = tracked_workflow_files(workspace_root)?;
+    let today = today_date()?;
+    let referenced = referenced_profiles(&entries, &workflows, ProfileKind::Process);
+    let catalog = load_profile_catalog(workspace_root, PROCESS_ALLOWLIST, &referenced, today)?;
+    let profiles_by_name = &catalog.profiles;
 
     let mut per_workflow = Vec::new();
-    let mut unknown_total = 0usize;
-    for e in &entries {
+    for e in live_workflow_entries(&entries, &workflows) {
         if is_dependabot_config(e) {
             // dependabot.yml is a config file, not a script — there are no
             // shell commands to scan for.
@@ -2200,15 +2267,13 @@ pub fn check_process_policy(mode: Mode) -> Result<()> {
             .map(|p| p.allowed_processes.iter().cloned().collect())
             .unwrap_or_default();
 
-        let content = read_workflow_content(&workspace_root, path).unwrap_or_default();
+        let content = read_workflow_content(workspace_root, path).unwrap_or_default();
         let detected = detect_commands_in_runs(&content, KNOWN_COMMANDS);
         let unknown: Vec<String> = detected
             .iter()
             .filter(|c| !allowed.contains(c.as_str()))
             .cloned()
             .collect();
-        unknown_total += unknown.len();
-
         per_workflow.push(PerWorkflowReport {
             workflow: path.clone(),
             declared_profile: profile,
@@ -2217,47 +2282,36 @@ pub fn check_process_policy(mode: Mode) -> Result<()> {
         });
     }
 
-    let report = ScanReport {
-        tool: "cargo xtask check-process-policy",
-        mode: mode_str(mode),
+    finish_profile_scan(
+        workspace_root,
+        "cargo xtask check-process-policy",
+        "process-policy-report",
+        mode,
         today,
-        summary: ScanSummary {
-            workflows: per_workflow.len(),
-            unknown_total,
-        },
-        workflows: per_workflow,
-    };
-    write_scan_report(&workspace_root, "process-policy-report", &report)?;
-    println!(
-        "{} ({}): workflows={} unknown_total={}",
-        report.tool, report.mode, report.summary.workflows, report.summary.unknown_total
-    );
-
-    if !matches!(mode, Mode::Advisory) && unknown_total > 0 {
-        bail!(
-            "{}: {} mode found {} unknown command(s) across {} workflow(s)",
-            report.tool,
-            report.mode,
-            unknown_total,
-            report.summary.workflows
-        );
-    }
-    Ok(())
+        catalog,
+        per_workflow,
+    )
 }
 
 // ─── check-network-policy ───────────────────────────────────────────────────
 
 pub fn check_network_policy(mode: Mode) -> Result<()> {
     let workspace_root = workspace_root()?;
-    let entries = load_workflow_allowlist(&workspace_root)?;
-    let profiles_by_name = load_profiles(&workspace_root, NETWORK_ALLOWLIST)?;
-    let today = today_iso();
+    check_network_policy_at(&workspace_root, mode)
+}
+
+fn check_network_policy_at(workspace_root: &Path, mode: Mode) -> Result<()> {
+    let entries = load_workflow_allowlist(workspace_root)?;
+    let workflows = tracked_workflow_files(workspace_root)?;
+    let today = today_date()?;
+    let referenced = referenced_profiles(&entries, &workflows, ProfileKind::Network);
+    let catalog = load_profile_catalog(workspace_root, NETWORK_ALLOWLIST, &referenced, today)?;
+    let profiles_by_name = &catalog.profiles;
     let host_re =
         Regex::new(r"https?://([A-Za-z0-9.\-]+)").context("compiling network hostname regex")?;
 
     let mut per_workflow = Vec::new();
-    let mut unknown_total = 0usize;
-    for e in &entries {
+    for e in live_workflow_entries(&entries, &workflows) {
         if is_dependabot_config(e) {
             // dependabot.yml is configuration, not a script — no URLs to scan.
             continue;
@@ -2272,7 +2326,7 @@ pub fn check_network_policy(mode: Mode) -> Result<()> {
             .map(|p| p.allowed_endpoints.iter().cloned().collect())
             .unwrap_or_default();
 
-        let content = read_workflow_content(&workspace_root, path).unwrap_or_default();
+        let content = read_workflow_content(workspace_root, path).unwrap_or_default();
         let mut detected: BTreeSet<String> = BTreeSet::new();
         for caps in host_re.captures_iter(&content) {
             if let Some(host) = caps.get(1) {
@@ -2285,8 +2339,6 @@ pub fn check_network_policy(mode: Mode) -> Result<()> {
             .filter(|h| !endpoint_covered(h, &allowed))
             .cloned()
             .collect();
-        unknown_total += unknown.len();
-
         per_workflow.push(PerWorkflowReport {
             workflow: path.clone(),
             declared_profile: profile,
@@ -2295,28 +2347,67 @@ pub fn check_network_policy(mode: Mode) -> Result<()> {
         });
     }
 
-    let report = ScanReport {
-        tool: "cargo xtask check-network-policy",
-        mode: mode_str(mode),
+    finish_profile_scan(
+        workspace_root,
+        "cargo xtask check-network-policy",
+        "network-policy-report",
+        mode,
         today,
+        catalog,
+        per_workflow,
+    )
+}
+
+fn finish_profile_scan(
+    workspace_root: &Path,
+    tool: &'static str,
+    report_basename: &str,
+    mode: Mode,
+    today: NaiveDate,
+    catalog: ProfileCatalog,
+    workflows: Vec<PerWorkflowReport>,
+) -> Result<()> {
+    let unknown_total = workflows
+        .iter()
+        .map(|workflow| workflow.unknown.len())
+        .sum();
+    let report = ScanReport {
+        tool,
+        mode: mode_str(mode),
+        today: today.format("%Y-%m-%d").to_string(),
         summary: ScanSummary {
-            workflows: per_workflow.len(),
+            workflows: workflows.len(),
+            profiles: catalog.entries,
             unknown_total,
+            missing_fields: catalog.findings.missing_fields.len(),
+            invalid_profiles: catalog.findings.invalid_profiles.len(),
+            stale: catalog.findings.stale.len(),
+            orphaned: catalog.findings.orphaned.len(),
         },
-        workflows: per_workflow,
+        findings: catalog.findings,
+        workflows,
     };
-    write_scan_report(&workspace_root, "network-policy-report", &report)?;
+    write_scan_report(workspace_root, report_basename, &report)?;
     println!(
-        "{} ({}): workflows={} unknown_total={}",
-        report.tool, report.mode, report.summary.workflows, report.summary.unknown_total
+        "{} ({}): workflows={} profiles={} unknown_total={} missing_fields={} invalid_profiles={} stale={} orphaned={}",
+        report.tool,
+        report.mode,
+        report.summary.workflows,
+        report.summary.profiles,
+        report.summary.unknown_total,
+        report.summary.missing_fields,
+        report.summary.invalid_profiles,
+        report.summary.stale,
+        report.summary.orphaned,
     );
 
-    if !matches!(mode, Mode::Advisory) && unknown_total > 0 {
+    let blocking = profile_blocking_count(mode, &report.findings, unknown_total);
+    if blocking > 0 && !matches!(mode, Mode::Advisory) {
         bail!(
-            "{}: {} mode found {} unknown endpoint(s) across {} workflow(s)",
+            "{}: {} mode found {} blocking issue(s) across {} workflow(s)",
             report.tool,
             report.mode,
-            unknown_total,
+            blocking,
             report.summary.workflows
         );
     }
@@ -2371,22 +2462,190 @@ fn load_workflow_allowlist(workspace_root: &Path) -> Result<Vec<RawWorkflowEntry
 }
 
 fn load_profile_names(workspace_root: &Path, rel: &str) -> Result<BTreeSet<String>> {
-    let profiles = load_profiles(workspace_root, rel)?;
-    Ok(profiles.keys().cloned().collect())
-}
-
-fn load_profiles(workspace_root: &Path, rel: &str) -> Result<BTreeMap<String, RawProfile>> {
     let path = workspace_root.join(rel);
     let raw = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     let doc: ProfileDoc =
         toml::from_str(&raw).with_context(|| format!("parsing TOML in {}", path.display()))?;
-    let mut by_name = BTreeMap::new();
-    for p in doc.profile {
-        if let Some(name) = p.name.clone() {
-            by_name.insert(name, p);
+    Ok(doc.profile.into_iter().filter_map(|p| p.name).collect())
+}
+
+fn load_profile_catalog(
+    workspace_root: &Path,
+    rel: &str,
+    referenced: &BTreeSet<String>,
+    today: NaiveDate,
+) -> Result<ProfileCatalog> {
+    let path = workspace_root.join(rel);
+    let raw = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let doc: ProfileDoc =
+        toml::from_str(&raw).with_context(|| format!("parsing TOML in {}", path.display()))?;
+    Ok(reconcile_profiles(doc.profile, referenced, today))
+}
+
+fn reconcile_profiles(
+    raw_profiles: Vec<RawProfile>,
+    referenced: &BTreeSet<String>,
+    today: NaiveDate,
+) -> ProfileCatalog {
+    let entries = raw_profiles.len();
+    let mut findings = ProfileLifecycleFindings::default();
+    let mut name_counts = BTreeMap::<String, usize>::new();
+    for raw in &raw_profiles {
+        if let Some(name) = nonblank(raw.name.as_deref()) {
+            *name_counts.entry(name.to_string()).or_default() += 1;
         }
     }
-    Ok(by_name)
+    for (name, count) in &name_counts {
+        if *count > 1 {
+            findings.invalid_profiles.push(InvalidProfile {
+                profile: name.clone(),
+                field: "name",
+                value: name.clone(),
+                reason: format!("duplicate profile name appears {count} times"),
+            });
+        }
+    }
+
+    let mut profiles = BTreeMap::new();
+    for (index, raw) in raw_profiles.into_iter().enumerate() {
+        let label = nonblank(raw.name.as_deref())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("profile[{index}]"));
+        let missing = profile_missing_fields(&raw);
+        if !missing.is_empty() {
+            findings.missing_fields.push(ProfileMissingFields {
+                profile: label,
+                missing,
+            });
+            continue;
+        }
+        let name = raw.name.as_deref().unwrap_or_default().trim().to_string();
+        if name_counts.get(&name).copied().unwrap_or_default() > 1 {
+            continue;
+        }
+
+        let created =
+            parse_canonical_profile_date(&name, "created", raw.created.as_deref(), &mut findings);
+        let review_after = parse_canonical_profile_date(
+            &name,
+            "review_after",
+            raw.review_after.as_deref(),
+            &mut findings,
+        );
+        let mut valid = created.is_some() && review_after.is_some();
+        if let (Some(created), Some(review_after)) = (created, review_after) {
+            if review_after < created {
+                findings.invalid_profiles.push(InvalidProfile {
+                    profile: name.clone(),
+                    field: "review_after",
+                    value: raw.review_after.clone().unwrap_or_default(),
+                    reason: "review_after is before created".to_string(),
+                });
+                valid = false;
+            } else if review_after < today {
+                findings.stale.push(StaleProfile {
+                    profile: name.clone(),
+                    review_after: raw.review_after.clone().unwrap_or_default(),
+                    today: today.format("%Y-%m-%d").to_string(),
+                });
+            }
+        }
+        if valid {
+            profiles.insert(name, raw);
+        }
+    }
+
+    findings.orphaned = profiles
+        .keys()
+        .filter(|name| !referenced.contains(name.as_str()))
+        .cloned()
+        .collect();
+    ProfileCatalog {
+        entries,
+        profiles,
+        findings,
+    }
+}
+
+fn profile_blocking_count(
+    mode: Mode,
+    findings: &ProfileLifecycleFindings,
+    unknown_total: usize,
+) -> usize {
+    let allowlist_blocking =
+        unknown_total + findings.missing_fields.len() + findings.invalid_profiles.len();
+    match mode {
+        Mode::Advisory | Mode::BlockingAllowlist => allowlist_blocking,
+        Mode::BlockingStrict => allowlist_blocking + findings.stale.len() + findings.orphaned.len(),
+    }
+}
+
+fn profile_missing_fields(raw: &RawProfile) -> Vec<String> {
+    [
+        ("name", raw.name.as_deref()),
+        ("owner", raw.owner.as_deref()),
+        ("reason", raw.reason.as_deref()),
+        ("created", raw.created.as_deref()),
+        ("review_after", raw.review_after.as_deref()),
+    ]
+    .into_iter()
+    .filter(|(_, value)| nonblank(*value).is_none())
+    .map(|(field, _)| field.to_string())
+    .collect()
+}
+
+fn nonblank(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn parse_canonical_profile_date(
+    profile: &str,
+    field: &'static str,
+    raw: Option<&str>,
+    findings: &mut ProfileLifecycleFindings,
+) -> Option<NaiveDate> {
+    let raw = raw?;
+    let parsed = NaiveDate::parse_from_str(raw, "%Y-%m-%d").ok();
+    if let Some(date) = parsed
+        && date.format("%Y-%m-%d").to_string() == raw
+    {
+        return Some(date);
+    }
+    findings.invalid_profiles.push(InvalidProfile {
+        profile: profile.to_string(),
+        field,
+        value: raw.to_string(),
+        reason: "expected canonical YYYY-MM-DD calendar date".to_string(),
+    });
+    None
+}
+
+fn live_workflow_entries<'a>(
+    entries: &'a [RawWorkflowEntry],
+    workflows: &[String],
+) -> Vec<&'a RawWorkflowEntry> {
+    let tracked: BTreeSet<&str> = workflows.iter().map(String::as_str).collect();
+    entries
+        .iter()
+        .filter(|entry| !is_dependabot_config(entry))
+        .filter(|entry| {
+            entry
+                .path
+                .as_deref()
+                .is_some_and(|path| tracked.contains(path))
+        })
+        .collect()
+}
+
+fn referenced_profiles(
+    entries: &[RawWorkflowEntry],
+    workflows: &[String],
+    kind: ProfileKind,
+) -> BTreeSet<String> {
+    live_workflow_entries(entries, workflows)
+        .into_iter()
+        .filter_map(|entry| nonblank(kind.reference(entry)).map(str::to_string))
+        .collect()
 }
 
 fn read_workflow_content(workspace_root: &Path, rel: &str) -> Result<String> {
@@ -2529,10 +2788,54 @@ fn render_scan_md(r: &ScanReport) -> String {
     ));
     out.push_str("## Summary\n\n");
     out.push_str(&format!("- Workflows scanned: {}\n", r.summary.workflows));
+    out.push_str(&format!("- Profiles declared: {}\n", r.summary.profiles));
     out.push_str(&format!(
-        "- Unknown commands/endpoints total: {}\n\n",
+        "- Unknown commands/endpoints total: {}\n",
         r.summary.unknown_total
     ));
+    out.push_str(&format!(
+        "- Profiles with missing fields: {}\n",
+        r.summary.missing_fields
+    ));
+    out.push_str(&format!(
+        "- Invalid profile findings: {}\n",
+        r.summary.invalid_profiles
+    ));
+    out.push_str(&format!("- Stale profiles: {}\n", r.summary.stale));
+    out.push_str(&format!("- Orphan profiles: {}\n\n", r.summary.orphaned));
+
+    out.push_str("## Profile lifecycle findings\n\n");
+    if r.findings.missing_fields.is_empty()
+        && r.findings.invalid_profiles.is_empty()
+        && r.findings.stale.is_empty()
+        && r.findings.orphaned.is_empty()
+    {
+        out.push_str("_(none)_\n\n");
+    } else {
+        for finding in &r.findings.missing_fields {
+            out.push_str(&format!(
+                "- **Missing metadata** `{}`: {}\n",
+                finding.profile,
+                finding.missing.join(", ")
+            ));
+        }
+        for finding in &r.findings.invalid_profiles {
+            out.push_str(&format!(
+                "- **Invalid profile** `{}` field `{}` value `{}`: {}\n",
+                finding.profile, finding.field, finding.value, finding.reason
+            ));
+        }
+        for finding in &r.findings.stale {
+            out.push_str(&format!(
+                "- **Stale profile** `{}`: review_after `{}` is before `{}`\n",
+                finding.profile, finding.review_after, finding.today
+            ));
+        }
+        for profile in &r.findings.orphaned {
+            out.push_str(&format!("- **Orphan profile** `{profile}`\n"));
+        }
+        out.push('\n');
+    }
     out.push_str("## Per-workflow\n\n");
     for w in &r.workflows {
         out.push_str(&format!(
@@ -2602,6 +2905,12 @@ fn today_iso() -> String {
         .date_naive()
         .format("%Y-%m-%d")
         .to_string()
+}
+
+fn today_date() -> Result<NaiveDate> {
+    let today = today_iso();
+    NaiveDate::parse_from_str(&today, "%Y-%m-%d")
+        .with_context(|| format!("parsing generated current date `{today}`"))
 }
 
 #[cfg(test)]
@@ -3914,6 +4223,420 @@ review_after = "2026-11-06"
         assert_eq!(reconciled.unexcepted.len(), 1, "{reconciled:#?}");
 
         let _ = fs::remove_dir_all(&temp);
+    }
+
+    fn valid_profile(name: &str, review_after: &str) -> RawProfile {
+        RawProfile {
+            name: Some(name.to_string()),
+            allowed_processes: vec!["cargo".to_string()],
+            allowed_endpoints: vec!["crates.io".to_string()],
+            owner: Some("release/ci".to_string()),
+            reason: Some("Required by the test workflow.".to_string()),
+            created: Some("2026-01-01".to_string()),
+            review_after: Some(review_after.to_string()),
+        }
+    }
+
+    #[test]
+    fn profile_lifecycle_accepts_current_referenced_profiles() {
+        let today = NaiveDate::from_ymd_opt(2026, 8, 12).expect("valid fixture date");
+        let referenced = BTreeSet::from(["ci".to_string(), "release".to_string()]);
+        let catalog = reconcile_profiles(
+            vec![
+                valid_profile("ci", "2026-08-12"),
+                valid_profile("release", "2026-08-13"),
+            ],
+            &referenced,
+            today,
+        );
+
+        assert_eq!(catalog.entries, 2);
+        assert_eq!(catalog.profiles.len(), 2);
+        assert!(catalog.findings.missing_fields.is_empty());
+        assert!(catalog.findings.invalid_profiles.is_empty());
+        assert!(catalog.findings.stale.is_empty());
+        assert!(catalog.findings.orphaned.is_empty());
+    }
+
+    #[test]
+    fn profile_lifecycle_classifies_blank_and_invalid_fields_once() {
+        let today = NaiveDate::from_ymd_opt(2026, 8, 12).expect("valid fixture date");
+        let mut blank_owner = valid_profile("blank-owner", "2026-08-13");
+        blank_owner.owner = Some("  ".to_string());
+        let mut malformed_created = valid_profile("bad-created", "2026-08-13");
+        malformed_created.created = Some("2026-8-01".to_string());
+        let mut impossible_review = valid_profile("bad-review", "2026-02-30");
+        impossible_review.created = Some("2026-01-01".to_string());
+        let mut reversed = valid_profile("reversed", "2026-01-01");
+        reversed.created = Some("2026-01-02".to_string());
+        let mut blank_name = valid_profile("placeholder", "2026-08-13");
+        blank_name.name = Some("  ".to_string());
+
+        let catalog = reconcile_profiles(
+            vec![
+                blank_owner,
+                malformed_created,
+                impossible_review,
+                reversed,
+                blank_name,
+            ],
+            &BTreeSet::new(),
+            today,
+        );
+
+        assert_eq!(catalog.findings.missing_fields.len(), 2);
+        assert_eq!(catalog.findings.missing_fields[0].profile, "blank-owner");
+        assert_eq!(catalog.findings.missing_fields[0].missing, ["owner"]);
+        assert_eq!(catalog.findings.missing_fields[1].profile, "profile[4]");
+        assert_eq!(catalog.findings.missing_fields[1].missing, ["name"]);
+        assert_eq!(catalog.findings.invalid_profiles.len(), 3);
+        assert!(catalog.findings.stale.is_empty());
+        assert!(catalog.findings.orphaned.is_empty());
+        assert!(catalog.profiles.is_empty());
+    }
+
+    #[test]
+    fn duplicate_profile_names_fail_closed_without_last_write_wins() {
+        let today = NaiveDate::from_ymd_opt(2026, 8, 12).expect("valid fixture date");
+        let mut first = valid_profile("ci", "2026-08-13");
+        first.allowed_processes = vec!["cargo".to_string()];
+        let mut second = valid_profile("ci", "2026-08-13");
+        second.allowed_processes = vec!["curl".to_string()];
+
+        let catalog = reconcile_profiles(
+            vec![first, second],
+            &BTreeSet::from(["ci".to_string()]),
+            today,
+        );
+
+        assert_eq!(catalog.findings.invalid_profiles.len(), 1);
+        assert!(
+            catalog.findings.invalid_profiles[0]
+                .reason
+                .contains("appears 2 times")
+        );
+        assert!(!catalog.profiles.contains_key("ci"));
+    }
+
+    #[test]
+    fn stale_and_orphan_findings_only_block_strict_mode() {
+        let today = NaiveDate::from_ymd_opt(2026, 8, 12).expect("valid fixture date");
+        let catalog = reconcile_profiles(
+            vec![
+                valid_profile("stale", "2026-08-11"),
+                valid_profile("orphan", "2026-08-12"),
+            ],
+            &BTreeSet::from(["stale".to_string()]),
+            today,
+        );
+
+        assert_eq!(catalog.findings.stale.len(), 1);
+        assert_eq!(catalog.findings.orphaned, ["orphan"]);
+        assert_eq!(
+            profile_blocking_count(Mode::Advisory, &catalog.findings, 0),
+            0
+        );
+        assert_eq!(
+            profile_blocking_count(Mode::BlockingAllowlist, &catalog.findings, 0),
+            0
+        );
+        assert_eq!(
+            profile_blocking_count(Mode::BlockingStrict, &catalog.findings, 0),
+            2
+        );
+    }
+
+    #[test]
+    fn missing_invalid_and_unknown_findings_block_both_blocking_modes() {
+        let findings = ProfileLifecycleFindings {
+            missing_fields: vec![ProfileMissingFields {
+                profile: "ci".to_string(),
+                missing: vec!["owner".to_string()],
+            }],
+            invalid_profiles: vec![InvalidProfile {
+                profile: "release".to_string(),
+                field: "created",
+                value: "soon".to_string(),
+                reason: "invalid date".to_string(),
+            }],
+            ..ProfileLifecycleFindings::default()
+        };
+
+        assert_eq!(
+            profile_blocking_count(Mode::BlockingAllowlist, &findings, 1),
+            3
+        );
+        assert_eq!(
+            profile_blocking_count(Mode::BlockingStrict, &findings, 1),
+            3
+        );
+    }
+
+    #[test]
+    fn profile_references_use_only_live_non_dependabot_workflows() {
+        let entries = vec![
+            RawWorkflowEntry {
+                path: Some(".github/workflows/live.yml".to_string()),
+                kind: Some("workflow".to_string()),
+                owner: None,
+                reason: None,
+                process_policy: Some("ci".to_string()),
+                network_policy: Some("network-ci".to_string()),
+                required_repository_guard: None,
+                created: None,
+                review_after: None,
+                expires: None,
+            },
+            RawWorkflowEntry {
+                path: Some(".github/workflows/removed.yml".to_string()),
+                kind: Some("workflow".to_string()),
+                owner: None,
+                reason: None,
+                process_policy: Some("stale-receipt".to_string()),
+                network_policy: Some("stale-network".to_string()),
+                required_repository_guard: None,
+                created: None,
+                review_after: None,
+                expires: None,
+            },
+            RawWorkflowEntry {
+                path: Some(".github/dependabot.yml".to_string()),
+                kind: Some("dependabot_config".to_string()),
+                owner: None,
+                reason: None,
+                process_policy: Some("dependabot".to_string()),
+                network_policy: Some("dependabot".to_string()),
+                required_repository_guard: None,
+                created: None,
+                review_after: None,
+                expires: None,
+            },
+        ];
+        let workflows = vec![".github/workflows/live.yml".to_string()];
+
+        assert_eq!(
+            referenced_profiles(&entries, &workflows, ProfileKind::Process),
+            BTreeSet::from(["ci".to_string()])
+        );
+        assert_eq!(
+            referenced_profiles(&entries, &workflows, ProfileKind::Network),
+            BTreeSet::from(["network-ci".to_string()])
+        );
+    }
+
+    #[test]
+    fn scan_markdown_and_json_keep_lifecycle_findings_structured() {
+        let report = ScanReport {
+            tool: "cargo xtask check-process-policy",
+            mode: "advisory",
+            today: "2026-08-12".to_string(),
+            summary: ScanSummary {
+                workflows: 1,
+                profiles: 2,
+                unknown_total: 0,
+                missing_fields: 0,
+                invalid_profiles: 0,
+                stale: 1,
+                orphaned: 1,
+            },
+            findings: ProfileLifecycleFindings {
+                stale: vec![StaleProfile {
+                    profile: "ci".to_string(),
+                    review_after: "2026-08-11".to_string(),
+                    today: "2026-08-12".to_string(),
+                }],
+                orphaned: vec!["unused".to_string()],
+                ..ProfileLifecycleFindings::default()
+            },
+            workflows: Vec::new(),
+        };
+
+        let json = serde_json::to_value(&report).expect("serialize report");
+        assert_eq!(json["summary"]["stale"], 1);
+        assert_eq!(json["findings"]["orphaned"][0], "unused");
+        let markdown = render_scan_md(&report);
+        assert!(markdown.contains("**Stale profile** `ci`"));
+        assert!(markdown.contains("**Orphan profile** `unused`"));
+    }
+
+    #[test]
+    fn process_and_network_adapters_enforce_lifecycle_modes_and_reports() {
+        #[derive(Clone, Copy)]
+        struct Case {
+            name: &'static str,
+            profiles: fn(&str, &str) -> String,
+            missing: usize,
+            invalid: usize,
+            stale: usize,
+            orphaned: usize,
+            allowlist_blocks: bool,
+            strict_blocks: bool,
+        }
+
+        fn profile(name: &str, created: &str, review_after: &str) -> String {
+            format!(
+                r#"[[profile]]
+name = "{name}"
+allowed_processes = ["cargo", "curl"]
+allowed_endpoints = ["crates.io"]
+owner = "release/ci"
+reason = "Required by the live fixture workflow."
+created = "{created}"
+review_after = "{review_after}"
+"#
+            )
+        }
+
+        let today = today_iso();
+        let yesterday = NaiveDate::parse_from_str(&today, "%Y-%m-%d")
+            .expect("current date parses")
+            .pred_opt()
+            .expect("current date has a predecessor")
+            .format("%Y-%m-%d")
+            .to_string();
+        let cases = [
+            Case {
+                name: "valid",
+                profiles: |today, _| profile("ci", today, today),
+                missing: 0,
+                invalid: 0,
+                stale: 0,
+                orphaned: 0,
+                allowlist_blocks: false,
+                strict_blocks: false,
+            },
+            Case {
+                name: "missing",
+                profiles: |today, _| {
+                    profile("ci", today, today).replace("owner = \"release/ci\"\n", "")
+                },
+                missing: 1,
+                invalid: 0,
+                stale: 0,
+                orphaned: 0,
+                allowlist_blocks: true,
+                strict_blocks: true,
+            },
+            Case {
+                name: "malformed",
+                profiles: |_, _| profile("ci", "2026-02-30", "2026-08-12"),
+                missing: 0,
+                invalid: 1,
+                stale: 0,
+                orphaned: 0,
+                allowlist_blocks: true,
+                strict_blocks: true,
+            },
+            Case {
+                name: "duplicate",
+                profiles: |today, _| {
+                    format!(
+                        "{}{}",
+                        profile("ci", today, today),
+                        profile("ci", today, today)
+                    )
+                },
+                missing: 0,
+                invalid: 1,
+                stale: 0,
+                orphaned: 0,
+                allowlist_blocks: true,
+                strict_blocks: true,
+            },
+            Case {
+                name: "stale-orphan",
+                profiles: |today, yesterday| {
+                    format!(
+                        "{}{}",
+                        profile("ci", yesterday, yesterday),
+                        profile("orphan", today, today)
+                    )
+                },
+                missing: 0,
+                invalid: 0,
+                stale: 1,
+                orphaned: 1,
+                allowlist_blocks: false,
+                strict_blocks: true,
+            },
+        ];
+
+        for kind in [ProfileKind::Process, ProfileKind::Network] {
+            for case in cases {
+                let root = unique_temp_dir(&format!("shipper-profile-{}-{:?}", case.name, kind));
+                let _ = fs::remove_dir_all(&root);
+                fs::create_dir_all(root.join(".github/workflows")).expect("workflow directory");
+                fs::create_dir_all(root.join("policy")).expect("policy directory");
+                fs::write(
+                    root.join(".github/workflows/live.yml"),
+                    "jobs:\n  test:\n    steps:\n      - run: cargo test && curl https://crates.io\n",
+                )
+                .expect("write workflow");
+                fs::write(
+                    root.join(WORKFLOW_ALLOWLIST),
+                    r#"[[workflow]]
+path = ".github/workflows/live.yml"
+kind = "workflow"
+process_policy = "ci"
+network_policy = "ci"
+"#,
+                )
+                .expect("write workflow ledger");
+                let profile_doc = (case.profiles)(&today, &yesterday);
+                fs::write(root.join(PROCESS_ALLOWLIST), &profile_doc)
+                    .expect("write process ledger");
+                fs::write(root.join(NETWORK_ALLOWLIST), &profile_doc)
+                    .expect("write network ledger");
+                let init = Command::new("git")
+                    .arg("init")
+                    .arg("--quiet")
+                    .arg(&root)
+                    .status()
+                    .expect("initialize fixture repository");
+                assert!(init.success());
+                let add = Command::new("git")
+                    .arg("-C")
+                    .arg(&root)
+                    .args(["add", ".github/workflows/live.yml"])
+                    .status()
+                    .expect("track fixture workflow");
+                assert!(add.success());
+
+                let run = |mode| match kind {
+                    ProfileKind::Process => check_process_policy_at(&root, mode),
+                    ProfileKind::Network => check_network_policy_at(&root, mode),
+                };
+                assert!(run(Mode::Advisory).is_ok(), "{} {kind:?}", case.name);
+                assert_eq!(
+                    run(Mode::BlockingAllowlist).is_err(),
+                    case.allowlist_blocks,
+                    "{} {kind:?} allowlist",
+                    case.name
+                );
+                assert_eq!(
+                    run(Mode::BlockingStrict).is_err(),
+                    case.strict_blocks,
+                    "{} {kind:?} strict",
+                    case.name
+                );
+
+                let basename = match kind {
+                    ProfileKind::Process => "process-policy-report.json",
+                    ProfileKind::Network => "network-policy-report.json",
+                };
+                let report: serde_json::Value = serde_json::from_str(
+                    &fs::read_to_string(root.join(OUTPUT_DIR_REL).join(basename))
+                        .expect("read adapter report"),
+                )
+                .expect("parse adapter report");
+                assert_eq!(report["summary"]["missing_fields"], case.missing);
+                assert_eq!(report["summary"]["invalid_profiles"], case.invalid);
+                assert_eq!(report["summary"]["stale"], case.stale);
+                assert_eq!(report["summary"]["orphaned"], case.orphaned);
+
+                let _ = fs::remove_dir_all(&root);
+            }
+        }
     }
 
     /// A temp directory unique to this process and this call.
