@@ -186,8 +186,9 @@ maintenance work and let the accepted swarm commit flow back through the normal
 non-squash source sync.
 
 Factory Droid is retired, so bot-authored and human-authored PRs use the same
-provider-native substantive-review requirement. The required Rust gate
-evaluates bot diffs through its explicit GitHub-hosted fallback. When a
+current substantive-review requirement, satisfied through Codex, Claude, or a
+human reviewer. The required Rust gate evaluates bot diffs through its explicit
+GitHub-hosted fallback. When a
 maintainer-authored refresh is needed, use the procedure in
 [`docs/ci/test-evidence-lanes.md`](../ci/test-evidence-lanes.md) and
 [`docs/how-to/shipper-swarm-migration-runbook.md`](../how-to/shipper-swarm-migration-runbook.md):

@@ -317,8 +317,10 @@ Use this maintainer refresh procedure instead:
    for Cargo dependency bumps.
 3. Push a maintainer-authored refresh commit or recreate the bump on a trusted
    same-repo branch.
-4. Merge only after the normal `Shipper Rust Small Result` and advisory review
-   signals are clean.
+4. Merge only after the normal `Shipper Rust Small Result` is successful and a
+   current substantive review through Codex, Claude, or a human reviewer is
+   clean. Advisory bot signals are supplemental when available and are not a
+   substitute for substantive review.
 
 If the same bump also opens in `EffortlessMetrics/shipper`, close the source
 repo PR as duplicate maintenance work. Accepted dependency updates flow back to
