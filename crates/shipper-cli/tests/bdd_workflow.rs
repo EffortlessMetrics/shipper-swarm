@@ -3086,6 +3086,100 @@ mod plan_quiet_mode {
     }
 }
 
+mod plan_outcome_output {
+    use super::*;
+
+    // Scenario: Human plan output carries the same semantic outcome as JSON
+    //
+    // Given: a workspace with one publishable crate
+    // When: I run `shipper plan`
+    // Then: the output states that no publication happened
+    // And: the next action preserves invocation context instead of fabricating a command
+    #[test]
+    fn given_workspace_when_plan_then_human_outcome_is_actionable() {
+        let td = tempdir().expect("tempdir");
+        create_single_crate_workspace(td.path());
+
+        loopback_shipper_cmd()
+            .arg("--manifest-path")
+            .arg(td.path().join("Cargo.toml"))
+            .arg("plan")
+            .assert()
+            .success()
+            .stdout(contains("Result: plan created; no packages were published"))
+            .stdout(contains(
+                "Next: run preflight with the same manifest, package, configuration, and registry selection",
+            ));
+    }
+
+    // Scenario: No publishable packages does not become terminal completion
+    //
+    // Given: every workspace package has `publish = false`
+    // When: I inspect both human and JSON plan output
+    // Then: both remain `planned` and point to context-preserving preflight
+    // And: neither surface claims that publication occurred
+    #[test]
+    fn given_no_publishable_packages_when_plan_then_human_and_json_do_not_overclaim() {
+        let td = tempdir().expect("tempdir");
+        write_file(
+            &td.path().join("Cargo.toml"),
+            r#"
+[workspace]
+members = ["internal"]
+resolver = "2"
+"#,
+        );
+        write_file(
+            &td.path().join("internal/Cargo.toml"),
+            r#"
+[package]
+name = "internal"
+version = "0.1.0"
+edition = "2021"
+publish = false
+"#,
+        );
+        write_file(&td.path().join("internal/src/lib.rs"), "");
+
+        loopback_shipper_cmd()
+            .arg("--manifest-path")
+            .arg(td.path().join("Cargo.toml"))
+            .arg("plan")
+            .assert()
+            .success()
+            .stdout(contains("Total packages to publish: 0"))
+            .stdout(contains("Result: plan created; no packages were published"))
+            .stdout(contains(
+                "Next: run preflight with the same manifest, package, configuration, and registry selection",
+            ));
+
+        let output = loopback_shipper_cmd()
+            .arg("--manifest-path")
+            .arg(td.path().join("Cargo.toml"))
+            .arg("--format")
+            .arg("json")
+            .arg("plan")
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let json: serde_json::Value =
+            serde_json::from_slice(&output).expect("valid zero-package plan JSON");
+        assert_eq!(json["publishable_count"].as_u64(), Some(0));
+        assert_eq!(json["outcome"]["status"].as_str(), Some("planned"));
+        assert_eq!(
+            json["outcome"]["publication_performed"].as_bool(),
+            Some(false)
+        );
+        assert_eq!(
+            json["outcome"]["next_action"]["kind"].as_str(),
+            Some("preflight")
+        );
+        assert!(json["outcome"]["next_action"].get("command").is_none());
+    }
+}
+
 // ============================================================================
 // Feature: JSON output format
 // ============================================================================

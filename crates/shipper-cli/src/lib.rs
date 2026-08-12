@@ -2525,6 +2525,13 @@ fn print_plan(ws: &plan::PlannedWorkspace, verbose: bool, format: &str) {
             );
         }
     }
+
+    println!();
+    println!("Result: {}", plan_outcome_summary(&report.outcome));
+    match report.outcome.next_action.command_line() {
+        Some(command) => println!("Next: {command} — {}", report.outcome.next_action.reason),
+        None => println!("Next: {}", report.outcome.next_action.reason),
+    }
 }
 
 fn build_plan_report(ws: &plan::PlannedWorkspace) -> PlanReport {
@@ -2599,22 +2606,18 @@ fn build_plan_outcome() -> PlanOutcomeReport {
     }
 }
 
+fn plan_outcome_summary(outcome: &PlanOutcomeReport) -> &'static str {
+    match outcome.status {
+        PlanOutcomeStatus::Planned => "plan created; no packages were published",
+    }
+}
+
 #[cfg(test)]
 mod plan_outcome_tests {
     use super::*;
 
     #[test]
     fn publishable_plan_points_to_context_preserving_preflight() {
-        let outcome = build_plan_outcome();
-        assert_eq!(outcome.status, PlanOutcomeStatus::Planned);
-        assert!(!outcome.publication_performed);
-        assert_eq!(outcome.next_action.kind, ActionKind::Preflight);
-        assert_eq!(outcome.next_action.command_line(), None);
-        assert!(!outcome.next_action.requires_confirmation);
-    }
-
-    #[test]
-    fn empty_plan_does_not_overclaim_terminal_completion() {
         let outcome = build_plan_outcome();
         assert_eq!(outcome.status, PlanOutcomeStatus::Planned);
         assert!(!outcome.publication_performed);
