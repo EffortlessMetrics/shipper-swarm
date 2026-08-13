@@ -3185,6 +3185,7 @@ mode = "turbo"
 #[cfg(test)]
 mod config_parsing_edge_case_tests {
     use super::*;
+    use serial_test::serial;
     use std::io::Write;
     use tempfile::tempdir;
 
@@ -3259,6 +3260,7 @@ api_base = "http://127.0.0.1:9/api"
     }
 
     #[test]
+    #[serial]
     fn diagnostic_workspace_loader_distinguishes_absent_invalid_and_malformed() {
         let td = tempdir().expect("tempdir");
         assert!(
