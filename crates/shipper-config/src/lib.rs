@@ -967,6 +967,14 @@ mod tests {
     }
 
     #[test]
+    fn parsed_retry_defaults_to_half_jitter() {
+        let config: ShipperConfig =
+            toml::from_str("[retry]\nmax_attempts = 6\n").expect("retry table must parse");
+
+        assert_eq!(config.retry.jitter, 0.5);
+    }
+
+    #[test]
     fn test_validate_invalid_output_lines() {
         let mut config = ShipperConfig::default();
         config.output.lines = 0;
@@ -989,6 +997,15 @@ mod tests {
         config.retry.base_delay = Duration::from_secs(1);
         config.retry.max_delay = Duration::from_millis(500);
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn retry_max_delay_may_equal_base_delay() {
+        let mut config = ShipperConfig::default();
+        config.retry.base_delay = Duration::from_secs(3);
+        config.retry.max_delay = config.retry.base_delay;
+
+        assert!(config.validate().is_ok());
     }
 
     #[test]
@@ -1113,6 +1130,99 @@ mod tests {
             .validate()
             .expect_err("enabled rehearsal must not target live registry");
         assert!(err.to_string().contains("must differ"));
+    }
+
+    #[test]
+    fn rehearsal_live_target_conflicts_cover_each_resolution_route() {
+        let registry = |name: &str, default: bool| RegistryConfig {
+            name: name.to_string(),
+            api_base: format!("https://{name}.example/api"),
+            index_base: Some(format!("https://{name}.example/index")),
+            token: None,
+            default,
+            allow_private: false,
+        };
+
+        let mut legacy = ShipperConfig {
+            registry: Some(registry("live", true)),
+            ..ShipperConfig::default()
+        };
+        legacy.rehearsal.enabled = true;
+        legacy.rehearsal.registry = Some("live".to_string());
+        assert!(legacy.validate().is_err());
+        legacy.rehearsal.registry = Some("rehearsal".to_string());
+        assert!(legacy.validate().is_ok());
+
+        let mut configured = ShipperConfig {
+            registries: MultiRegistryConfig {
+                registries: vec![registry("first", false), registry("chosen", true)],
+                default_registries: vec!["published".to_string()],
+            },
+            ..ShipperConfig::default()
+        };
+        configured.rehearsal.enabled = true;
+        configured.rehearsal.registry = Some("published".to_string());
+        assert!(configured.validate().is_err());
+
+        configured.registries.default_registries.clear();
+        configured.rehearsal.registry = Some("chosen".to_string());
+        assert!(configured.validate().is_err());
+
+        configured.registries.registries[1].default = false;
+        configured.rehearsal.registry = Some("first".to_string());
+        assert!(configured.validate().is_err());
+
+        let mut crates_io = ShipperConfig::default();
+        crates_io.rehearsal.enabled = true;
+        crates_io.rehearsal.registry = Some("crates-io".to_string());
+        assert!(crates_io.validate().is_err());
+        crates_io.rehearsal.enabled = false;
+        assert!(crates_io.validate().is_ok());
+    }
+
+    #[test]
+    fn loopback_validation_requires_matching_rehearsal_posture() {
+        let local = RegistryConfig {
+            name: "local".to_string(),
+            api_base: "http://127.0.0.1:8080".to_string(),
+            index_base: Some("http://127.0.0.1:8080/index".to_string()),
+            token: None,
+            default: false,
+            allow_private: false,
+        };
+        let mut single = ShipperConfig {
+            registry: Some(local.clone()),
+            ..ShipperConfig::default()
+        };
+        single.rehearsal.allow_loopback = true;
+        single.rehearsal.registry = Some("local".to_string());
+        assert!(single.validate().is_ok());
+        single.rehearsal.registry = Some("other".to_string());
+        assert!(single.validate().is_err());
+
+        let mut multiple = ShipperConfig {
+            registries: MultiRegistryConfig {
+                registries: vec![
+                    RegistryConfig {
+                        name: "live".to_string(),
+                        api_base: "https://live.example/api".to_string(),
+                        index_base: Some("https://live.example/index".to_string()),
+                        token: None,
+                        default: true,
+                        allow_private: false,
+                    },
+                    local,
+                ],
+                default_registries: vec![],
+            },
+            ..ShipperConfig::default()
+        };
+        multiple.rehearsal.enabled = true;
+        multiple.rehearsal.registry = Some("local".to_string());
+        let result = multiple.validate();
+        assert!(result.is_ok(), "{result:?}");
+        multiple.rehearsal.registry = Some("other".to_string());
+        assert!(multiple.validate().is_err());
     }
 
     #[test]
@@ -3146,6 +3256,27 @@ api_base = "http://127.0.0.1:9/api"
             Some("unsafe-test")
         );
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn diagnostic_workspace_loader_distinguishes_absent_invalid_and_malformed() {
+        let td = tempdir().expect("tempdir");
+        assert!(
+            ShipperConfig::load_from_workspace_for_diagnostics(td.path())
+                .expect("absent config is not an error")
+                .is_none()
+        );
+
+        let config_path = td.path().join(".shipper.toml");
+        std::fs::write(&config_path, "[retry]\njitter = -0.25\n").expect("write invalid config");
+        let config = ShipperConfig::load_from_workspace_for_diagnostics(td.path())
+            .expect("diagnostic loading defers value validation")
+            .expect("present config must be returned");
+        assert_eq!(config.retry.jitter, -0.25);
+        assert!(config.validate().is_err());
+
+        std::fs::write(&config_path, "[retry\n").expect("write malformed config");
+        assert!(ShipperConfig::load_from_workspace_for_diagnostics(td.path()).is_err());
     }
 
     // ── Empty TOML file uses all defaults ────────────────────────────
