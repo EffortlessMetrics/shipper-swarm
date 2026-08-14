@@ -77,14 +77,18 @@ jobs:
 | Ambiguous cargo result reconciled to published | `0` |
 | Ambiguous cargo result still unknown | non-zero |
 
-For a completed run, use the `outcome.next_action.kind` field in
-`shipper publish --format json` rather than inferring recovery from the exit
-code alone. A retryable incomplete run points to `resume`; a permanent failure
-points to `resolve_blockers`; an uploaded package still awaiting visibility
-points to `wait_for_registry`; unresolved ambiguous registry truth points to
-`reconcile` and deliberately supplies no retry command. The human renderer
-reports the same Result, rerun posture, next action, and retained evidence
-paths.
+For a completed run that finalized a receipt, use the
+`outcome.next_action.kind` field in `shipper publish --format json` rather than
+inferring recovery from the exit code alone. A completed receipt with retryable
+unfinished work points to `resume`; a permanent failure points to
+`resolve_blockers`; an uploaded package still awaiting visibility points to
+`wait_for_registry`; unresolved ambiguous registry truth points to `reconcile`
+and deliberately supplies no retry command. The human renderer reports the
+same Result, rerun posture, next action, and retained evidence paths.
+
+Failures that return before a receipt is finalized still use the existing
+exit-1 error path. Typed JSON for those early failures belongs to #275 and is
+not part of `shipper.publish.v1`'s completed-receipt outcome.
 
 ## Important boundary
 

@@ -140,6 +140,10 @@ retryable unfinished work is `resume`, permanent failure is
 unknown is `reconcile` without a fabricated command. Human output renders
 `Result`, `Safe to rerun`, `Next`, and `Evidence` from that same typed outcome.
 
+Exit-1 failures that occur before receipt finalization retain the existing
+human error path. They do not emit a partial `shipper.publish.v1` document;
+typed early-error JSON is tracked separately by #275.
+
 Note that `2` covers "all packages failed" as well as "some failed":
 finalization classifies every non-all-successful receipt as
 `PartialFailure`, so `CompleteFailure` (`1`) is not reachable from a

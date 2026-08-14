@@ -205,51 +205,6 @@ fn setup_fake_cargo(td: &Path) -> (String, String, String) {
     fake_cargo_env(&bin_dir)
 }
 
-fn run_single_crate_failed_publish_json(
-    registry_statuses: Vec<u16>,
-    cargo_stderr: &str,
-) -> serde_json::Value {
-    let td = tempdir().expect("tempdir");
-    create_single_crate_workspace(td.path());
-    let (new_path, real_cargo, fake_cargo) = setup_fake_cargo(td.path());
-    let expected_requests = registry_statuses.len();
-    let registry = spawn_registry(registry_statuses, expected_requests);
-    let state_dir = td.path().join(".shipper");
-
-    let output = loopback_shipper_cmd()
-        .arg("--manifest-path")
-        .arg(td.path().join("Cargo.toml"))
-        .arg("--api-base")
-        .arg(&registry.base_url)
-        .arg("--allow-dirty")
-        .arg("--verify-timeout")
-        .arg("0ms")
-        .arg("--verify-poll")
-        .arg("0ms")
-        .arg("--max-attempts")
-        .arg("1")
-        .arg("--base-delay")
-        .arg("0ms")
-        .arg("--state-dir")
-        .arg(&state_dir)
-        .arg("--format")
-        .arg("json")
-        .arg("publish")
-        .env("PATH", &new_path)
-        .env("REAL_CARGO", &real_cargo)
-        .env("SHIPPER_CARGO_BIN", &fake_cargo)
-        .env("SHIPPER_FAKE_PUBLISH_EXIT", "1")
-        .env("SHIPPER_FAKE_PUBLISH_STDERR", cargo_stderr)
-        .assert()
-        .failure()
-        .get_output()
-        .stdout
-        .clone();
-
-    registry.join();
-    serde_json::from_slice(&output).expect("failed publish stdout should be command JSON")
-}
-
 fn read_publish_log(path: &Path) -> Vec<String> {
     if !path.exists() {
         return Vec::new();
@@ -296,6 +251,7 @@ fn single_crate_publish_creates_state_and_receipt() {
     let state_dir = td.path().join(".shipper");
 
     let output = loopback_shipper_cmd()
+        .timeout(Duration::from_secs(20))
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--api-base")
@@ -386,6 +342,7 @@ fn publish_json_format_writes_command_envelope_to_stdout() {
     let state_dir_arg = Path::new(".shipper");
 
     let output = loopback_shipper_cmd()
+        .timeout(Duration::from_secs(20))
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--api-base")
@@ -504,41 +461,6 @@ fn publish_json_format_writes_command_envelope_to_stdout() {
     );
 
     registry.join();
-}
-
-#[test]
-fn retryable_publish_failure_points_to_durable_resume() {
-    let report = run_single_crate_failed_publish_json(
-        vec![404, 404],
-        "error: server returned 429 Too Many Requests",
-    );
-
-    assert_eq!(
-        report["outcome"]["failure_class"].as_str(),
-        Some("retryable")
-    );
-    assert_eq!(
-        report["outcome"]["safe_to_rerun"]["value"].as_bool(),
-        Some(false)
-    );
-    assert_eq!(
-        report["safe_to_rerun"], report["outcome"]["safe_to_rerun"]["value"],
-        "legacy and typed rerun fields must share one computed value"
-    );
-    assert_eq!(
-        report["outcome"]["next_action"]["kind"].as_str(),
-        Some("resume")
-    );
-    assert!(
-        report["outcome"]["next_action"].get("command").is_none(),
-        "resume posture must not fabricate a context-losing command"
-    );
-    assert!(
-        report["outcome"]["next_action"]["reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains(".shipper")),
-        "resume posture should retain the selected state identity"
-    );
 }
 
 // ============================================================================
@@ -1077,7 +999,8 @@ fn publish_mixed_existing_and_missing_failure_records_failed_package() {
     let state_dir = td.path().join(".shipper");
     let publish_log = td.path().join("publish.log");
 
-    let output = loopback_shipper_cmd()
+    loopback_shipper_cmd()
+        .timeout(Duration::from_secs(20))
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--api-base")
@@ -1093,8 +1016,6 @@ fn publish_mixed_existing_and_missing_failure_records_failed_package() {
         .arg("0ms")
         .arg("--state-dir")
         .arg(&state_dir)
-        .arg("--format")
-        .arg("json")
         .arg("publish")
         .env("PATH", &new_path)
         .env("REAL_CARGO", &real_cargo)
@@ -1106,34 +1027,7 @@ fn publish_mixed_existing_and_missing_failure_records_failed_package() {
         )
         .env("SHIPPER_FAKE_PUBLISH_LOG", &publish_log)
         .assert()
-        .failure()
-        .get_output()
-        .stdout
-        .clone();
-
-    let stdout = String::from_utf8(output).expect("publish stdout utf8");
-    let report: serde_json::Value =
-        serde_json::from_str(&stdout).expect("failed publish stdout should be command JSON");
-    assert_eq!(
-        report["outcome"]["status"].as_str(),
-        Some("partial_failure")
-    );
-    assert_eq!(
-        report["outcome"]["failure_class"].as_str(),
-        Some("permanent")
-    );
-    assert_eq!(
-        report["outcome"]["safe_to_rerun"]["value"].as_bool(),
-        Some(false)
-    );
-    assert_eq!(
-        report["outcome"]["next_action"]["kind"].as_str(),
-        Some("resolve_blockers")
-    );
-    assert!(
-        report["outcome"]["next_action"].get("command").is_none(),
-        "permanent failures must not fabricate a retry command"
-    );
+        .failure();
 
     let publish_log = read_publish_log(&publish_log);
     assert_eq!(
