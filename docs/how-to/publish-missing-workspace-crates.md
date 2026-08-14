@@ -80,9 +80,11 @@ jobs:
 For a completed run, use the `outcome.next_action.kind` field in
 `shipper publish --format json` rather than inferring recovery from the exit
 code alone. A retryable incomplete run points to `resume`; a permanent failure
-points to `resolve_blockers`; unresolved registry truth points to `reconcile`
-and deliberately supplies no retry command. The human renderer reports the
-same Result, rerun posture, next action, and retained evidence paths.
+points to `resolve_blockers`; an uploaded package still awaiting visibility
+points to `wait_for_registry`; unresolved ambiguous registry truth points to
+`reconcile` and deliberately supplies no retry command. The human renderer
+reports the same Result, rerun posture, next action, and retained evidence
+paths.
 
 ## Important boundary
 

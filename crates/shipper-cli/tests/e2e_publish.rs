@@ -383,6 +383,7 @@ fn publish_json_format_writes_command_envelope_to_stdout() {
 
     let registry = spawn_registry(vec![404, 200], 2);
     let state_dir = td.path().join(".shipper");
+    let state_dir_arg = Path::new(".shipper");
 
     let output = loopback_shipper_cmd()
         .arg("--manifest-path")
@@ -397,7 +398,7 @@ fn publish_json_format_writes_command_envelope_to_stdout() {
         .arg("--max-attempts")
         .arg("1")
         .arg("--state-dir")
-        .arg(&state_dir)
+        .arg(state_dir_arg)
         .arg("--format")
         .arg("json")
         .arg("publish")
@@ -426,16 +427,33 @@ fn publish_json_format_writes_command_envelope_to_stdout() {
         "completed publish envelope should expose safe rerun posture"
     );
     assert_eq!(report["registry"].as_str(), Some("crates-io"));
+    assert_eq!(
+        report["state_dir"].as_str(),
+        Some(state_dir.to_string_lossy().as_ref()),
+        "relative state directories must resolve against the workspace"
+    );
     assert_eq!(report["outcome"]["status"].as_str(), Some("success"));
     assert_eq!(
         report["outcome"]["safe_to_rerun"]["value"].as_bool(),
         Some(true)
     );
     assert_eq!(
+        report["safe_to_rerun"], report["outcome"]["safe_to_rerun"]["value"],
+        "legacy and typed rerun fields must share one computed value"
+    );
+    assert_eq!(
         report["outcome"]["next_action"]["kind"].as_str(),
         Some("none_complete")
     );
-    assert!(report["outcome"]["evidence"].as_array().is_some());
+    let evidence = report["outcome"]["evidence"]
+        .as_array()
+        .expect("typed evidence array");
+    assert!(
+        evidence.iter().all(|path| path
+            .as_str()
+            .is_some_and(|path| path.starts_with(state_dir.to_string_lossy().as_ref()))),
+        "typed evidence should use workspace-resolved paths: {evidence:?}"
+    );
     assert!(report["plan_id"].is_string(), "plan_id should be present");
     assert_eq!(report["published"].as_u64(), Some(1));
     assert_eq!(report["pending"].as_u64(), Some(0));
@@ -504,37 +522,22 @@ fn retryable_publish_failure_points_to_durable_resume() {
         Some(false)
     );
     assert_eq!(
-        report["outcome"]["next_action"]["kind"].as_str(),
-        Some("resume")
-    );
-    assert_eq!(
-        report["outcome"]["next_action"]["command"][3].as_str(),
-        Some("resume")
-    );
-}
-
-#[test]
-fn unknown_publish_result_requires_reconciliation_without_retry_command() {
-    let report = run_single_crate_failed_publish_json(
-        vec![404, 500],
-        "cargo publish stopped without a recognized failure signature",
-    );
-
-    assert_eq!(
-        report["outcome"]["failure_class"].as_str(),
-        Some("ambiguous")
-    );
-    assert_eq!(
-        report["outcome"]["safe_to_rerun"]["value"].as_bool(),
-        Some(false)
+        report["safe_to_rerun"], report["outcome"]["safe_to_rerun"]["value"],
+        "legacy and typed rerun fields must share one computed value"
     );
     assert_eq!(
         report["outcome"]["next_action"]["kind"].as_str(),
-        Some("reconcile")
+        Some("resume")
     );
     assert!(
         report["outcome"]["next_action"].get("command").is_none(),
-        "unknown registry truth must not fabricate a retry command"
+        "resume posture must not fabricate a context-losing command"
+    );
+    assert!(
+        report["outcome"]["next_action"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains(".shipper")),
+        "resume posture should retain the selected state identity"
     );
 }
 

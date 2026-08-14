@@ -135,9 +135,10 @@ the invocation was rejected or that a blind retry is safe. In
 `shipper.publish.v1`, the additive `outcome` field derives one next-action
 posture from the completed receipt: terminal success is `none_complete`,
 retryable unfinished work is `resume`, permanent failure is
-`resolve_blockers`, and unresolved registry truth is `reconcile` without a
-fabricated command. Human output renders `Result`, `Safe to rerun`, `Next`, and
-`Evidence` from that same typed outcome.
+`resolve_blockers`, an uploaded package awaiting visibility is
+`wait_for_registry`, and an ambiguous outcome whose registry truth remains
+unknown is `reconcile` without a fabricated command. Human output renders
+`Result`, `Safe to rerun`, `Next`, and `Evidence` from that same typed outcome.
 
 Note that `2` covers "all packages failed" as well as "some failed":
 finalization classifies every non-all-successful receipt as

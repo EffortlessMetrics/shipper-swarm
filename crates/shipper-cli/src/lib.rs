@@ -3490,9 +3490,11 @@ fn print_publish_output(
     format: &str,
 ) -> Result<()> {
     let counts = command_package_counts(receipt);
-    let outcome = build_publish_operator_outcome(&receipt.execution_result, &counts, state_dir);
+    let evidence_state_dir = publish_evidence_state_dir(workspace_root, state_dir);
+    let outcome =
+        build_publish_operator_outcome(&receipt.execution_result, &counts, &evidence_state_dir);
     if format == "json" {
-        let report = build_publish_json_report(receipt, state_dir, outcome)?;
+        let report = build_publish_json_report(receipt, &evidence_state_dir, outcome)?;
         let json = serde_json::to_string_pretty(&report)
             .context("failed to serialize publish JSON envelope")?;
         println!("{}", json);
@@ -3502,6 +3504,14 @@ fn print_publish_output(
     print_receipt(receipt, workspace_root, state_dir, format);
     print_publish_operator_outcome(&outcome);
     Ok(())
+}
+
+fn publish_evidence_state_dir(workspace_root: &Path, state_dir: &Path) -> PathBuf {
+    if state_dir.is_absolute() {
+        state_dir.to_path_buf()
+    } else {
+        workspace_root.join(state_dir)
+    }
 }
 
 fn print_resume_output(
@@ -3530,8 +3540,7 @@ fn build_publish_json_report<'a>(
     let reconciled = reconciled_packages(state_dir)?;
     let packages = command_package_reports(receipt, &reconciled);
     let counts = command_package_counts(receipt);
-    let safe_to_rerun =
-        counts.pending == 0 && counts.failed == 0 && counts.ambiguous == 0 && counts.uploaded == 0;
+    let safe_to_rerun = outcome.safe_to_rerun.value;
 
     Ok(PublishJsonReport {
         schema_version: "shipper.publish.v1",
@@ -3682,15 +3691,12 @@ fn build_publish_operator_outcome(
     } else if counts.retryable_failures > 0 || counts.pending > 0 {
         (
             counts.retryable_failures.gt(&0).then_some("retryable"),
-            OperatorAction::command(
+            OperatorAction::posture(
                 ActionKind::Resume,
-                [
-                    "shipper".to_string(),
-                    "--state-dir".to_string(),
-                    state_dir.display().to_string(),
-                    "resume".to_string(),
-                ],
-                "continue from the durable state instead of rerunning publish",
+                format!(
+                    "resume from the durable state at {} using the same workspace, manifest, configuration, and registry selection",
+                    state_dir.display()
+                ),
             ),
             "unfinished work must continue through the durable resume path",
         )
@@ -5424,7 +5430,7 @@ mod tests {
                 action: ActionKind::Resume,
                 safe_to_rerun: false,
                 failure_class: None,
-                has_command: true,
+                has_command: false,
             },
             Case {
                 name: "retryable failure resumes durable state",
@@ -5433,7 +5439,7 @@ mod tests {
                 action: ActionKind::Resume,
                 safe_to_rerun: false,
                 failure_class: Some("retryable"),
-                has_command: true,
+                has_command: false,
             },
             Case {
                 name: "permanent failure requires repair",
@@ -5502,7 +5508,7 @@ mod tests {
     }
 
     #[test]
-    fn publish_resume_action_uses_the_selected_state_directory() {
+    fn publish_resume_action_preserves_state_identity_without_fabricating_context() {
         let counts = CommandJsonPackageCounts {
             pending: 1,
             ..CommandJsonPackageCounts::default()
@@ -5513,9 +5519,20 @@ mod tests {
             Path::new("custom-state"),
         );
 
+        assert!(outcome.next_action.command.is_empty());
+        assert!(outcome.next_action.reason.contains("custom-state"));
+    }
+
+    #[test]
+    fn relative_publish_evidence_is_resolved_against_the_workspace() {
+        let resolved =
+            publish_evidence_state_dir(Path::new("workspace"), Path::new("custom-state"));
+        assert_eq!(resolved, Path::new("workspace").join("custom-state"));
+
+        let absolute = std::env::temp_dir().join("shipper-publish-outcome-evidence");
         assert_eq!(
-            outcome.next_action.command,
-            ["shipper", "--state-dir", "custom-state", "resume"]
+            publish_evidence_state_dir(Path::new("ignored"), &absolute),
+            absolute
         );
     }
 
