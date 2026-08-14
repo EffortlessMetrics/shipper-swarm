@@ -264,11 +264,11 @@ that could silently drop that context.
 
 Dry-runs passed, but ownership could not be verified for one or more packages. This typically happens when no token is available, the token lacks the required scope, or the ownership API returned an error in non-strict mode.
 
-**Action:** If every ownership gap is for a first publish, review the advisory
-and deliberately publish or rehearse with the same selection. If an existing
-crate has an ownership gap, inspect authentication and ownership before
-rerunning preflight; Shipper does not treat that uncertainty as permission to
-publish.
+**Action:** If every selected package is a first-publish candidate, review the
+advisory and deliberately publish or rehearse with the same selection. If the
+selection includes an existing crate, inspect authentication and ownership
+before rerunning preflight; Shipper does not treat that mixed-selection
+uncertainty as permission to publish.
 
 ### Failed
 
