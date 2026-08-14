@@ -2438,6 +2438,7 @@ struct PlanArtifactReport {
 #[derive(Debug, Serialize)]
 struct PreflightJsonReport<'a> {
     schema_version: &'static str,
+    outcome: PreflightOutcomeReport,
     #[serde(flatten)]
     report: &'a PreflightReport,
     proofs: Vec<PreflightEvidenceItem>,
@@ -2447,6 +2448,13 @@ struct PreflightJsonReport<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     registry_profile: Option<PreflightRegistryProfileReport>,
     artifacts: Vec<PreflightArtifactReport>,
+}
+
+#[derive(Debug, Serialize)]
+struct PreflightOutcomeReport {
+    status: Finishability,
+    publication_performed: bool,
+    next_action: OperatorAction,
 }
 
 #[derive(Debug, Serialize)]
@@ -2800,9 +2808,9 @@ fn print_detailed_plan(ws: &plan::PlannedWorkspace) {
 }
 
 fn print_preflight(rep: &PreflightReport, format: &str) {
+    let report = build_preflight_json_report(rep);
     match format {
         "json" => {
-            let report = build_preflight_json_report(rep);
             let json = serde_json::to_string_pretty(&report).expect("serialize preflight report");
             println!("{}", json);
         }
@@ -2914,34 +2922,181 @@ fn print_preflight(rep: &PreflightReport, format: &str) {
 
             print_preflight_proof_explanation(rep, total, dry_run_passed);
 
-            // What to do next guidance
-            println!("What to do next:");
-            println!("-----------------");
-            match rep.finishability {
-                Finishability::Proven => {
-                    println!(
-                        "\x1b[32m✓ All local preflight checks passed. Next: shipper publish\x1b[0m"
-                    );
+            println!("Result: {}", preflight_outcome_summary(&report.outcome));
+            match report.outcome.next_action.command_line() {
+                Some(command) => {
+                    println!("Next: {command} — {}", report.outcome.next_action.reason)
                 }
-                Finishability::NotProven => {
-                    println!(
-                        "\x1b[33m⚠ Preflight did not prove every release prerequisite.\x1b[0m"
-                    );
-                    println!(
-                        "  - configure registry auth or Trusted Publishing if ownership is unverified"
-                    );
-                    println!("  - rerun `shipper preflight`");
-                    println!(
-                        "  - if you accept the uncertainty, run `shipper publish` with an explicit policy choice"
-                    );
-                }
-                Finishability::Failed => {
-                    println!(
-                        "\x1b[31m✗ Preflight failed. Fix the failed checks above, then rerun `shipper preflight`.\x1b[0m"
-                    );
-                }
+                None => println!("Next: {}", report.outcome.next_action.reason),
             }
         }
+    }
+}
+
+fn build_preflight_outcome(rep: &PreflightReport) -> PreflightOutcomeReport {
+    let next_action = match rep.finishability {
+        Finishability::Proven => OperatorAction::posture(
+            ActionKind::Publish,
+            "publish or rehearse with the same manifest, package, configuration, and registry selection",
+        )
+        .with_confirmation(),
+        Finishability::NotProven if all_packages_are_first_publish_candidates(rep) => {
+            OperatorAction::posture(
+                ActionKind::Publish,
+                "ownership cannot be verified before a first publish; review the advisory gaps, then deliberately publish or rehearse with the same selection",
+            )
+            .with_confirmation()
+        }
+        Finishability::NotProven => OperatorAction::posture(
+            ActionKind::InvestigateUnknowns,
+            "inspect the ownership and authentication gaps, correct configuration if needed, then rerun preflight with the same selection",
+        ),
+        Finishability::Failed => OperatorAction::posture(
+            ActionKind::ResolveBlockers,
+            "resolve the failed checks above, then rerun preflight with the same selection",
+        ),
+    };
+
+    PreflightOutcomeReport {
+        status: rep.finishability.clone(),
+        publication_performed: false,
+        next_action,
+    }
+}
+
+fn all_packages_are_first_publish_candidates(rep: &PreflightReport) -> bool {
+    !rep.packages.is_empty()
+        && rep
+            .packages
+            .iter()
+            .all(|package| package.is_new_crate && package.dry_run_passed)
+}
+
+fn preflight_outcome_summary(outcome: &PreflightOutcomeReport) -> &'static str {
+    match outcome.status {
+        Finishability::Proven => {
+            "preflight proved the selected release inputs; no packages were published"
+        }
+        Finishability::NotProven => {
+            "preflight completed with advisory proof gaps; no packages were published"
+        }
+        Finishability::Failed => "preflight found blocking checks; no packages were published",
+    }
+}
+
+#[cfg(test)]
+mod preflight_outcome_tests {
+    use super::*;
+    use anyhow::ensure;
+    use chrono::Utc;
+
+    fn report(
+        finishability: Finishability,
+        token_detected: bool,
+        packages: Vec<PreflightPackage>,
+    ) -> PreflightReport {
+        PreflightReport {
+            plan_id: "plan-test".to_string(),
+            token_detected,
+            finishability,
+            packages,
+            timestamp: Utc::now(),
+            estimated_publish_duration: None,
+            dry_run_output: None,
+        }
+    }
+
+    fn package(
+        name: &str,
+        is_new_crate: bool,
+        ownership_verified: bool,
+        dry_run_passed: bool,
+    ) -> PreflightPackage {
+        PreflightPackage {
+            name: name.to_string(),
+            version: "1.0.0".to_string(),
+            already_published: false,
+            is_new_crate,
+            auth_type: None,
+            ownership_verified,
+            dry_run_passed,
+            dry_run_output: None,
+        }
+    }
+
+    #[test]
+    fn proven_preflight_requires_deliberate_context_preserving_publish() -> Result<()> {
+        let outcome = build_preflight_outcome(&report(
+            Finishability::Proven,
+            true,
+            vec![package("existing", false, true, true)],
+        ));
+
+        ensure!(outcome.status == Finishability::Proven);
+        ensure!(!outcome.publication_performed);
+        ensure!(outcome.next_action.kind == ActionKind::Publish);
+        ensure!(outcome.next_action.command_line().is_none());
+        ensure!(outcome.next_action.requires_confirmation);
+        Ok(())
+    }
+
+    #[test]
+    fn first_publish_ownership_gap_remains_an_advisory_publish_posture() -> Result<()> {
+        let outcome = build_preflight_outcome(&report(
+            Finishability::NotProven,
+            false,
+            vec![package("new-crate", true, false, true)],
+        ));
+
+        ensure!(outcome.next_action.kind == ActionKind::Publish);
+        ensure!(outcome.next_action.command_line().is_none());
+        ensure!(outcome.next_action.requires_confirmation);
+        ensure!(outcome.next_action.reason.contains("first publish"));
+        Ok(())
+    }
+
+    #[test]
+    fn mixed_ownership_gap_does_not_recommend_blind_publish() -> Result<()> {
+        let outcome = build_preflight_outcome(&report(
+            Finishability::NotProven,
+            true,
+            vec![
+                package("new-crate", true, false, true),
+                package("existing", false, true, true),
+            ],
+        ));
+
+        ensure!(outcome.next_action.kind == ActionKind::InvestigateUnknowns);
+        ensure!(outcome.next_action.command_line().is_none());
+        ensure!(!outcome.next_action.requires_confirmation);
+        Ok(())
+    }
+
+    #[test]
+    fn existing_crate_ownership_gap_stays_investigative() -> Result<()> {
+        let outcome = build_preflight_outcome(&report(
+            Finishability::NotProven,
+            true,
+            vec![package("existing", false, false, true)],
+        ));
+
+        ensure!(outcome.next_action.kind == ActionKind::InvestigateUnknowns);
+        ensure!(!outcome.next_action.requires_confirmation);
+        Ok(())
+    }
+
+    #[test]
+    fn failed_preflight_resolves_blockers_without_suggesting_publish() -> Result<()> {
+        let outcome = build_preflight_outcome(&report(
+            Finishability::Failed,
+            false,
+            vec![package("broken", true, false, false)],
+        ));
+
+        ensure!(outcome.next_action.kind == ActionKind::ResolveBlockers);
+        ensure!(outcome.next_action.command_line().is_none());
+        ensure!(!outcome.next_action.requires_confirmation);
+        Ok(())
     }
 }
 
@@ -3058,6 +3213,7 @@ fn build_preflight_json_report(rep: &PreflightReport) -> PreflightJsonReport<'_>
 
     PreflightJsonReport {
         schema_version: "shipper.preflight.v1",
+        outcome: build_preflight_outcome(rep),
         report: rep,
         proofs,
         gaps,
