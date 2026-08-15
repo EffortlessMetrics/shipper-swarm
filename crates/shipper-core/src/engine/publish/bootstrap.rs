@@ -5,8 +5,7 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 
 use crate::engine::{
-    Reporter, enforce_strict_ownership_for_registry, init_registry_client, init_state,
-    policy_effects, rehearsal,
+    Reporter, init_registry_client, init_state, prevalidate_publish_registry_tokens, rehearsal,
 };
 use crate::git;
 use crate::lock;
@@ -54,8 +53,7 @@ pub(in crate::engine) fn prepare_publish_run(
 ) -> Result<PublishBootstrap> {
     let workspace_root = &ws.workspace_root;
     let state_dir = resolve_state_dir(workspace_root, &opts.state_dir);
-    let effects = policy_effects(opts);
-    enforce_strict_ownership_for_registry(&ws.plan.registry.name, &effects)?;
+    prevalidate_publish_registry_tokens(ws, opts)?;
 
     // #97 PR 3: rehearsal hard gate. Only fires when a rehearsal registry
     // is configured; opt-in until rehearsal phase-2 is stable.

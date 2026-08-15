@@ -120,7 +120,7 @@ struct Cli {
     #[arg(long, global = true)]
     skip_ownership_check: bool,
 
-    /// Require a registry token before strict-ownership preflight or publish.
+    /// Require a registry token during strict-ownership preflight and before publish execution.
     /// Preflight also fails when ownership verification fails.
     ///
     /// Note: crates.io token scopes may not allow querying owners; this is best-effort.
@@ -1374,6 +1374,12 @@ pub fn run() -> Result<std::process::ExitCode> {
             } else {
                 opts.registries.clone()
             };
+
+            if let Err(error) = engine::prevalidate_publish_registry_tokens(&planned, &opts) {
+                let classification = classify_publish_early_error(&error);
+                let error = error.context(publish_failure_hint(&opts.state_dir));
+                return Err(mark_publish_early_error(error, &cli.format, classification));
+            }
 
             let mut worst_outcome: Option<ExecutionResult> = None;
             for reg in target_registries {

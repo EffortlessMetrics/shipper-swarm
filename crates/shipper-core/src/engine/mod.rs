@@ -116,6 +116,26 @@ pub(in crate::engine) fn enforce_strict_ownership_for_registry(
     require_strict_ownership_token(effects, token.as_deref())
 }
 
+/// Validate strict-ownership token presence for every registry selected for a
+/// publish command before any registry-specific execution begins.
+///
+/// This is exposed for the CLI adapter's atomic multi-registry boundary. The
+/// publish bootstrap invokes it again defensively before engine side effects.
+#[doc(hidden)]
+pub fn prevalidate_publish_registry_tokens(
+    ws: &PlannedWorkspace,
+    opts: &RuntimeOptions,
+) -> Result<()> {
+    let effects = policy_effects(opts);
+    if opts.registries.is_empty() {
+        return enforce_strict_ownership_for_registry(&ws.plan.registry.name, &effects);
+    }
+    for registry in &opts.registries {
+        enforce_strict_ownership_for_registry(&registry.name, &effects)?;
+    }
+    Ok(())
+}
+
 fn init_registry_client(
     registry: Registry,
     state_dir: &Path,
