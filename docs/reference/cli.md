@@ -158,6 +158,15 @@ error chain and renders the same Result, Safe-to-rerun, Next, and Evidence
 posture. Configuration/option validation errors outside those boundaries and
 other commands keep their existing error output.
 
+`StillUnknown` is the evidence-backed exception to that generic early-error
+posture. Although the engine stops before finalizing a receipt, it has already
+persisted authoritative reconciliation evidence. Structured output therefore
+emits one uncontaminated `shipper.publish.error.v1` document with category
+`ambiguous`, `safe_to_rerun.value: false`, a commandless `reconcile` action,
+and the resolved `state.json`, `events.jsonl`, and `reconciliation.json` paths.
+Human output derives the same posture from that evidence. No receipt is
+claimed, and exit code `1` is unchanged.
+
 Note that `2` covers "all packages failed" as well as "some failed":
 finalization classifies every non-all-successful receipt as
 `PartialFailure`, so `CompleteFailure` (`1`) is not reachable from a

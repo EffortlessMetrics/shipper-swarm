@@ -91,6 +91,11 @@ is finalized still exit 1. For `publish --format json`, those wrapped failures w
 `shipper.publish.error.v1` envelope to stderr and keep stdout empty. A null
 safe-rerun value means no completed receipt proves whether a rerun is safe; fix
 or investigate the reported category instead of blindly retrying.
+If the engine persisted a `StillUnknown` reconciliation outcome before
+stopping, the same error schema instead reports category `ambiguous`, an
+explicitly unsafe rerun posture, a commandless `reconcile` action, and the
+resolved state, event, and reconciliation evidence paths. It does not claim a
+receipt or change the exit code from `1`.
 Argument-parsing and other usage errors continue to exit 2 and use Clap's
 usage output. Configuration and option-validation failures outside the wrapped
 plan/engine boundary retain their existing output. Early-error JSON is separate
