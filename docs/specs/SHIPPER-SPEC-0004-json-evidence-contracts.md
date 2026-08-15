@@ -74,8 +74,9 @@ The publish and resume JSON rows are command-owned envelopes with nested
 receipt evidence, package summaries, safe rerun/resume posture where exposed,
 and artifact paths. `shipper.resume.v1` also carries an additive `outcome`
 object derived from the completed receipt. Its typed safe-to-resume posture,
-next action, and evidence references drive the human footer as well; the legacy
-top-level `safe_to_resume` value is derived from that same posture.
+next action, and evidence references drive the human footer as well. The legacy
+top-level `safe_to_resume` predicate remains compatibility-frozen; consumers
+that need the evidence-based posture should read `outcome.safe_to_resume`.
 The remediation command rows are command-owned envelopes with top-level
 planning fields plus `schema_version` and `command`. The remediation artifact
 row is durable dry-run evidence only; neither surface implies guarded live
@@ -100,7 +101,8 @@ placeholder in durable remediation artifacts.
 - Generating JSON Schema files for every command.
 - Replacing Rust snapshot or integration tests with schema-only validation.
 - Changing the receipt schema.
-- Changing human output.
+- Replacing or removing existing human output; additive typed outcome footers
+  are permitted when the original receipt rendering remains intact.
 - Promoting command envelopes before implementation proof exists.
 
 ## Required Evidence

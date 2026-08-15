@@ -1067,7 +1067,7 @@ mod state_updated_atomically {
         assert_eq!(envelope["safe_to_resume"].as_bool(), Some(true));
         assert_eq!(
             envelope["safe_to_resume"], envelope["outcome"]["safe_to_resume"]["value"],
-            "legacy and typed resume posture must share one source"
+            "legacy and typed resume posture agree for terminal success"
         );
         assert_eq!(envelope["outcome"]["status"].as_str(), Some("success"));
         assert_eq!(

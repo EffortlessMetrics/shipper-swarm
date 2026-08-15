@@ -3776,7 +3776,7 @@ fn build_resume_json_report<'a>(
     let reconciled = reconciled_packages(evidence_state_dir)?;
     let packages = command_package_reports(receipt, &reconciled);
     let counts = command_package_counts(receipt);
-    let safe_to_resume = outcome.safe_to_resume.value;
+    let safe_to_resume = legacy_safe_to_resume(&counts);
 
     Ok(ResumeJsonReport {
         schema_version: "shipper.resume.v1",
@@ -3798,6 +3798,10 @@ fn build_resume_json_report<'a>(
         artifacts: command_json_artifacts_with_lookup(state_dir, evidence_state_dir),
         receipt,
     })
+}
+
+fn legacy_safe_to_resume(counts: &CommandJsonPackageCounts) -> bool {
+    counts.failed == 0 && counts.ambiguous == 0
 }
 
 fn command_package_counts(receipt: &shipper_core::types::Receipt) -> CommandJsonPackageCounts {
@@ -5972,6 +5976,37 @@ mod tests {
                 case.name
             );
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn resume_legacy_and_typed_safety_preserve_intentional_compatibility_divergence() -> Result<()>
+    {
+        let retryable = CommandJsonPackageCounts {
+            failed: 1,
+            retryable_failures: 1,
+            ..CommandJsonPackageCounts::default()
+        };
+        let retryable_outcome = build_resume_operator_outcome(
+            &ExecutionResult::PartialFailure,
+            &retryable,
+            Path::new("state"),
+        );
+        anyhow::ensure!(!legacy_safe_to_resume(&retryable));
+        anyhow::ensure!(retryable_outcome.safe_to_resume.value);
+
+        let uploaded = CommandJsonPackageCounts {
+            uploaded: 1,
+            ..CommandJsonPackageCounts::default()
+        };
+        let uploaded_outcome = build_resume_operator_outcome(
+            &ExecutionResult::PartialFailure,
+            &uploaded,
+            Path::new("state"),
+        );
+        anyhow::ensure!(legacy_safe_to_resume(&uploaded));
+        anyhow::ensure!(!uploaded_outcome.safe_to_resume.value);
 
         Ok(())
     }
