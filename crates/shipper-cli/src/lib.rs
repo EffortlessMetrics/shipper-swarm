@@ -993,10 +993,14 @@ struct PublishEarlySafeRerun {
     reason: &'static str,
 }
 
-fn mark_publish_early_error(error: anyhow::Error, format: &str) -> anyhow::Error {
-    let rendered_error = shipper_output_sanitizer::redact_sensitive(&format_error(&error));
-    let normalized = rendered_error.to_ascii_lowercase();
-    let (category, summary, action) = if normalized.contains("manifest")
+fn classify_publish_early_error(error: &anyhow::Error) -> (&'static str, &'static str, ActionKind) {
+    let normalized = error
+        .chain()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_ascii_lowercase();
+    if normalized.contains("manifest")
         || normalized.contains("cargo metadata")
         || normalized.contains("release plan")
     {
@@ -1020,9 +1024,15 @@ fn mark_publish_early_error(error: anyhow::Error, format: &str) -> anyhow::Error
             "publish authorization could not be proven",
             ActionKind::ResolveBlockers,
         )
+    } else if normalized.contains("lock") || normalized.contains("plan_id") {
+        (
+            "state_conflict",
+            "durable publish state conflicts with this invocation",
+            ActionKind::ResolveBlockers,
+        )
     } else if normalized.contains("registry")
         || normalized.contains("connect")
-        || normalized.contains("http")
+        || normalized.contains("request failed")
     {
         (
             "registry_unreachable",
@@ -1035,7 +1045,16 @@ fn mark_publish_early_error(error: anyhow::Error, format: &str) -> anyhow::Error
             "publish stopped before a receipt was finalized",
             ActionKind::StopAndInvestigate,
         )
-    };
+    }
+}
+
+fn mark_publish_early_error(
+    error: anyhow::Error,
+    format: &str,
+    classification: (&'static str, &'static str, ActionKind),
+) -> anyhow::Error {
+    let rendered_error = shipper_output_sanitizer::redact_sensitive(&format_error(&error));
+    let (category, summary, action) = classification;
 
     PublishEarlyError {
         format: format.to_string(),
@@ -1174,13 +1193,14 @@ pub fn run() -> Result<std::process::ExitCode> {
             )
         }
         Err(err) => {
+            let classification = classify_publish_early_error(&err);
             let error = err.context(plan_failure_hint(
                 &spec.manifest_path,
                 &cli.packages,
                 command_name,
             ));
             if matches!(cli.cmd.as_ref(), Some(Commands::Publish)) {
-                return Err(mark_publish_early_error(error, &cli.format));
+                return Err(mark_publish_early_error(error, &cli.format, classification));
             }
             return Err(error);
         }
@@ -1330,7 +1350,9 @@ pub fn run() -> Result<std::process::ExitCode> {
     let config_for_merge = config.clone().unwrap_or_default();
     let opts: RuntimeOptions = config_for_merge.build_runtime_options(cli_overrides);
 
-    let mut reporter = CliReporter::new(cli.quiet);
+    let structured_publish =
+        matches!(cli.cmd.as_ref(), Some(Commands::Publish)) && cli.format == "json";
+    let mut reporter = CliReporter::new(cli.quiet || structured_publish);
 
     match cli.cmd.expect("subcommand checked above") {
         Commands::Plan => {
@@ -1357,16 +1379,11 @@ pub fn run() -> Result<std::process::ExitCode> {
 
             let mut worst_outcome: Option<ExecutionResult> = None;
             for reg in target_registries {
-                if opts.registries.len() > 1 {
-                    if cli.format == "json" {
-                        eprintln!();
-                        eprintln!("Publishing to registry: {} ({})", reg.name, reg.api_base);
-                    } else {
-                        println!(
-                            "\n🚀 Publishing to registry: {} ({})",
-                            reg.name, reg.api_base
-                        );
-                    }
+                if opts.registries.len() > 1 && !structured_publish {
+                    println!(
+                        "\n🚀 Publishing to registry: {} ({})",
+                        reg.name, reg.api_base
+                    );
                 }
 
                 let mut current_planned = planned.clone();
@@ -1379,7 +1396,8 @@ pub fn run() -> Result<std::process::ExitCode> {
                 }
 
                 let total_packages = current_planned.plan.packages.len();
-                let mut progress = ProgressReporter::new(total_packages, cli.quiet);
+                let mut progress =
+                    ProgressReporter::new(total_packages, cli.quiet || structured_publish);
                 let package_positions: BTreeMap<String, usize> = current_planned
                     .plan
                     .packages
@@ -1399,9 +1417,20 @@ pub fn run() -> Result<std::process::ExitCode> {
                 // countdown via ProgressReporter::retry_countdown.
                 reporter.install_progress(progress, package_positions);
 
-                let receipt = engine::run_publish(&current_planned, &current_opts, &mut reporter)
-                    .with_context(|| publish_failure_hint(&current_opts.state_dir))
-                    .map_err(|error| mark_publish_early_error(error, &cli.format))?;
+                let receipt =
+                    match engine::run_publish(&current_planned, &current_opts, &mut reporter) {
+                        Ok(receipt) => receipt,
+                        Err(error) => {
+                            let classification = classify_publish_early_error(&error);
+                            let error =
+                                error.context(publish_failure_hint(&current_opts.state_dir));
+                            return Err(mark_publish_early_error(
+                                error,
+                                &cli.format,
+                                classification,
+                            ));
+                        }
+                    };
 
                 if let Some(progress) = reporter.take_progress() {
                     progress.finish();
@@ -5729,13 +5758,28 @@ mod tests {
     fn publish_early_error_redacts_secret_bearing_cause() {
         let error = anyhow::anyhow!("CARGO_REGISTRY_TOKEN=EARLY_ERROR_SECRET")
             .context("publish authorization failed");
-        let marked = mark_publish_early_error(error, "json");
+        let classification = classify_publish_early_error(&error);
+        let marked = mark_publish_early_error(error, "json", classification);
         let publish_error = marked
             .downcast_ref::<PublishEarlyError>()
             .expect("publish marker");
         assert_eq!(publish_error.category, "authentication_required");
         assert!(publish_error.rendered_error.contains("[REDACTED]"));
         assert!(!publish_error.rendered_error.contains("EARLY_ERROR_SECRET"));
+    }
+
+    #[test]
+    fn publish_early_error_category_uses_raw_cause_not_generic_hint() {
+        let lock = anyhow::anyhow!("failed to acquire publish lock: stale lock");
+        let unknown = anyhow::anyhow!("unexpected internal adapter failure");
+        let registry = anyhow::anyhow!("registry request failed: connection refused");
+
+        assert_eq!(classify_publish_early_error(&lock).0, "state_conflict");
+        assert_eq!(classify_publish_early_error(&unknown).0, "publish_failed");
+        assert_eq!(
+            classify_publish_early_error(&registry).0,
+            "registry_unreachable"
+        );
     }
 
     #[test]

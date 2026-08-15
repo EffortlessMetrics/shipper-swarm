@@ -187,14 +187,16 @@ fn loopback_shipper_cmd() -> Command {
 fn assert_publish_early_error_json(
     output: &std::process::Output,
     expected_category: &str,
+    state_dir: &Path,
 ) -> serde_json::Value {
     assert_eq!(output.status.code(), Some(1), "early publish failure exit");
-    assert!(output.stdout.is_empty(), "JSON errors keep stdout empty");
-    let stderr = String::from_utf8(output.stderr.clone()).expect("stderr utf8");
     assert!(
-        !stderr.contains("EARLY_ERROR_SECRET"),
-        "secret leaked: {stderr}"
+        output.stdout.is_empty(),
+        "JSON errors keep stdout empty; got: {}",
+        String::from_utf8_lossy(&output.stdout)
     );
+    let stderr = String::from_utf8(output.stderr.clone()).expect("stderr utf8");
+    assert_secret_absent_from_output_and_state(output, state_dir);
     let report: serde_json::Value =
         serde_json::from_str(&stderr).expect("stderr should be one JSON error envelope");
     assert_eq!(
@@ -217,6 +219,41 @@ fn assert_publish_early_error_json(
     );
     assert_eq!(report["evidence"], serde_json::json!([]));
     report
+}
+
+fn assert_secret_absent_from_output_and_state(output: &std::process::Output, state_dir: &Path) {
+    for (surface, bytes) in [("stdout", &output.stdout), ("stderr", &output.stderr)] {
+        let rendered = String::from_utf8_lossy(bytes);
+        assert!(
+            !rendered.contains("EARLY_ERROR_SECRET"),
+            "secret leaked in {surface}: {rendered}"
+        );
+    }
+    if !state_dir.exists() {
+        return;
+    }
+    let mut pending = vec![state_dir.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        for entry in fs::read_dir(&path).expect("read state directory") {
+            let entry = entry.expect("state entry");
+            let entry_path = entry.path();
+            if entry_path.is_dir() {
+                pending.push(entry_path);
+                continue;
+            }
+            let Some(name) = entry_path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if matches!(name, "state.json" | "events.jsonl" | "receipt.json") {
+                let contents = fs::read(&entry_path).expect("read retained evidence");
+                assert!(
+                    !String::from_utf8_lossy(&contents).contains("EARLY_ERROR_SECRET"),
+                    "secret leaked in {}",
+                    entry_path.display()
+                );
+            }
+        }
+    }
 }
 
 /// Build env vars needed for fake cargo, returning (new_path, real_cargo, fake_cargo).
@@ -519,11 +556,17 @@ fn publish_missing_and_invalid_manifests_emit_typed_json_errors() {
     let malformed = td.path().join("malformed.toml");
     write_file(&malformed, "[workspace\n");
 
-    for manifest in [td.path().join("missing.toml"), malformed] {
+    for (case, manifest) in [
+        ("missing", td.path().join("missing.toml")),
+        ("malformed", malformed),
+    ] {
+        let state_dir = td.path().join(format!("state-{case}"));
         let output = shipper_cmd()
             .timeout(Duration::from_secs(20))
             .arg("--manifest-path")
             .arg(manifest)
+            .arg("--state-dir")
+            .arg(&state_dir)
             .arg("--format")
             .arg("json")
             .arg("publish")
@@ -531,22 +574,25 @@ fn publish_missing_and_invalid_manifests_emit_typed_json_errors() {
             .assert()
             .get_output()
             .clone();
-        let report = assert_publish_early_error_json(&output, "invalid_manifest");
+        let report = assert_publish_early_error_json(&output, "invalid_manifest", &state_dir);
         assert_eq!(
             report["next_action"]["kind"].as_str(),
             Some("resolve_blockers")
         );
+        assert!(!state_dir.exists(), "plan errors must not create state");
     }
-    assert!(!td.path().join(".shipper").exists());
 }
 
 #[test]
 fn publish_manifest_error_human_output_matches_typed_posture() {
     let td = tempdir().expect("tempdir");
+    let state_dir = td.path().join("state-human");
     let output = shipper_cmd()
         .timeout(Duration::from_secs(20))
         .arg("--manifest-path")
         .arg(td.path().join("missing.toml"))
+        .arg("--state-dir")
+        .arg(&state_dir)
         .arg("publish")
         .env("CARGO_REGISTRY_TOKEN", "EARLY_ERROR_SECRET")
         .assert()
@@ -554,7 +600,8 @@ fn publish_manifest_error_human_output_matches_typed_posture() {
         .get_output()
         .clone();
     assert!(output.stdout.is_empty());
-    let stderr = String::from_utf8(output.stderr).expect("stderr utf8");
+    assert_secret_absent_from_output_and_state(&output, &state_dir);
+    let stderr = String::from_utf8(output.stderr.clone()).expect("stderr utf8");
     assert!(stderr.contains("Error:"), "{stderr}");
     assert!(
         stderr.contains("Result: failed — the publish plan could not be built"),
@@ -572,19 +619,22 @@ fn publish_manifest_error_human_output_matches_typed_posture() {
         stderr.contains("Evidence: none from a completed receipt"),
         "{stderr}"
     );
-    assert!(!stderr.contains("EARLY_ERROR_SECRET"), "{stderr}");
+    assert!(!state_dir.exists(), "plan errors must not create state");
 }
 
 #[test]
 fn publish_non_git_workspace_emits_typed_json_error() {
     let td = tempdir().expect("tempdir");
     create_single_crate_workspace(td.path());
+    let state_dir = td.path().join("state-non-git");
     let output = loopback_shipper_cmd()
         .timeout(Duration::from_secs(20))
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--api-base")
         .arg("http://127.0.0.1:9")
+        .arg("--state-dir")
+        .arg(&state_dir)
         .arg("--quiet")
         .arg("--format")
         .arg("json")
@@ -593,14 +643,15 @@ fn publish_non_git_workspace_emits_typed_json_error() {
         .assert()
         .get_output()
         .clone();
-    assert_publish_early_error_json(&output, "workspace_not_ready");
-    assert!(!td.path().join(".shipper/receipt.json").exists());
+    assert_publish_early_error_json(&output, "workspace_not_ready", &state_dir);
+    assert!(!state_dir.join("receipt.json").exists());
 }
 
 #[test]
 fn publish_unreachable_registry_emits_typed_json_error() {
     let td = tempdir().expect("tempdir");
     create_single_crate_workspace(td.path());
+    let state_dir = td.path().join("state-unreachable");
     let output = loopback_shipper_cmd()
         .timeout(Duration::from_secs(20))
         .arg("--manifest-path")
@@ -611,6 +662,8 @@ fn publish_unreachable_registry_emits_typed_json_error() {
         .arg("--skip-ownership-check")
         .arg("--verify-timeout")
         .arg("0ms")
+        .arg("--state-dir")
+        .arg(&state_dir)
         .arg("--quiet")
         .arg("--format")
         .arg("json")
@@ -619,12 +672,70 @@ fn publish_unreachable_registry_emits_typed_json_error() {
         .assert()
         .get_output()
         .clone();
-    let report = assert_publish_early_error_json(&output, "registry_unreachable");
+    let report = assert_publish_early_error_json(&output, "registry_unreachable", &state_dir);
     assert_eq!(
         report["next_action"]["kind"].as_str(),
         Some("stop_and_investigate")
     );
-    assert!(!td.path().join(".shipper/receipt.json").exists());
+    assert!(!state_dir.join("receipt.json").exists());
+}
+
+#[test]
+fn publish_multi_registry_json_error_is_one_clean_envelope() {
+    let td = tempdir().expect("tempdir");
+    create_single_crate_workspace(td.path());
+    let state_dir = td.path().join("state-multi-registry");
+    let config = td.path().join("multi-registry.toml");
+    write_file(
+        &config,
+        r#"
+[[registries.registries]]
+name = "alpha"
+api_base = "http://127.0.0.1:9"
+index_base = "http://127.0.0.1:9"
+
+[[registries.registries]]
+name = "beta"
+api_base = "https://example.invalid"
+index_base = "https://example.invalid"
+
+[rehearsal]
+registry = "alpha"
+allow_loopback = true
+"#,
+    );
+    let output = loopback_shipper_cmd()
+        .timeout(Duration::from_secs(20))
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--config")
+        .arg(&config)
+        .arg("--registries")
+        .arg("alpha,beta")
+        .arg("--skip-ownership-check")
+        .arg("--verify-timeout")
+        .arg("0ms")
+        .arg("--max-attempts")
+        .arg("1")
+        .arg("--base-delay")
+        .arg("0ms")
+        .arg("--max-delay")
+        .arg("0ms")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("--format")
+        .arg("json")
+        .arg("publish")
+        .env("CARGO_REGISTRY_TOKEN", "EARLY_ERROR_SECRET")
+        .assert()
+        .get_output()
+        .clone();
+    let report = assert_publish_early_error_json(&output, "workspace_not_ready", &state_dir);
+    assert_eq!(
+        report["next_action"]["kind"].as_str(),
+        Some("resolve_blockers")
+    );
+    assert!(!state_dir.join("receipt.json").exists());
 }
 
 #[test]
@@ -648,6 +759,7 @@ fn completed_partial_publish_keeps_completed_json_contract_and_exit_two() {
         .arg("--format")
         .arg("json")
         .arg("publish")
+        .env("CARGO_REGISTRY_TOKEN", "EARLY_ERROR_SECRET")
         .assert()
         .get_output()
         .clone();
@@ -666,6 +778,7 @@ fn completed_partial_publish_keeps_completed_json_contract_and_exit_two() {
     assert!(state_dir.join("state.json").exists());
     assert!(state_dir.join("events.jsonl").exists());
     assert!(state_dir.join("receipt.json").exists());
+    assert_secret_absent_from_output_and_state(&output, &state_dir);
 }
 
 #[test]
