@@ -1054,6 +1054,20 @@ fn mark_publish_early_error(
     format: &str,
     classification: (&'static str, &'static str, ActionKind),
 ) -> anyhow::Error {
+    mark_publish_early_error_with_next_action(
+        error,
+        format,
+        classification,
+        "resolve the reported failure before deciding whether to run publish again",
+    )
+}
+
+fn mark_publish_early_error_with_next_action(
+    error: anyhow::Error,
+    format: &str,
+    classification: (&'static str, &'static str, ActionKind),
+    next_action_reason: &str,
+) -> anyhow::Error {
     let rendered_error = shipper_output_sanitizer::redact_sensitive(&format_error(&error))
         .trim_end()
         .to_string();
@@ -1064,10 +1078,7 @@ fn mark_publish_early_error(
         category,
         summary,
         rendered_error,
-        next_action: OperatorAction::posture(
-            action,
-            "resolve the reported failure before deciding whether to run publish again",
-        ),
+        next_action: OperatorAction::posture(action, next_action_reason),
     }
     .into()
 }
@@ -1377,8 +1388,15 @@ pub fn run() -> Result<std::process::ExitCode> {
 
             if let Err(error) = engine::prevalidate_publish_registry_tokens(&planned, &opts) {
                 let classification = classify_publish_early_error(&error);
-                let error = error.context(publish_failure_hint(&opts.state_dir));
-                return Err(mark_publish_early_error(error, &cli.format, classification));
+                let error = error.context(
+                    "publish token prevalidation failed before execution; configure a token for every selected registry, then rerun publish",
+                );
+                return Err(mark_publish_early_error_with_next_action(
+                    error,
+                    &cli.format,
+                    classification,
+                    "configure a token for every selected registry, then rerun publish",
+                ));
             }
 
             let mut worst_outcome: Option<ExecutionResult> = None;

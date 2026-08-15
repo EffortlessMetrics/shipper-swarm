@@ -948,6 +948,16 @@ index_base = "{beta}"
         stderr.contains("strict ownership requested but no token found"),
         "{stderr}"
     );
+    assert!(
+        stderr.contains("configure a token for every selected registry, then rerun publish"),
+        "{stderr}"
+    );
+    for nonexistent_evidence_hint in ["events.jsonl", "state.json", "shipper resume"] {
+        assert!(
+            !stderr.contains(nonexistent_evidence_hint),
+            "prevalidation must not recommend nonexistent evidence: {stderr}"
+        );
+    }
     assert!(output.stdout.is_empty(), "publish failure stdout");
     assert!(
         !state_dir.exists(),
