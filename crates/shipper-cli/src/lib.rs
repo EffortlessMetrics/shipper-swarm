@@ -958,8 +958,131 @@ pub fn format_error(error: &anyhow::Error) -> String {
     format!("Error: {error:?}")
 }
 
+#[derive(Debug)]
+struct PublishEarlyError {
+    format: String,
+    category: &'static str,
+    summary: &'static str,
+    rendered_error: String,
+    next_action: OperatorAction,
+}
+
+impl std::fmt::Display for PublishEarlyError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.summary)
+    }
+}
+
+impl std::error::Error for PublishEarlyError {}
+
+#[derive(Serialize)]
+struct PublishEarlyErrorReport<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    status: &'static str,
+    category: &'a str,
+    summary: &'a str,
+    safe_to_rerun: PublishEarlySafeRerun,
+    next_action: &'a OperatorAction,
+    evidence: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct PublishEarlySafeRerun {
+    value: Option<bool>,
+    reason: &'static str,
+}
+
+fn mark_publish_early_error(error: anyhow::Error, format: &str) -> anyhow::Error {
+    let rendered_error = shipper_output_sanitizer::redact_sensitive(&format_error(&error));
+    let normalized = rendered_error.to_ascii_lowercase();
+    let (category, summary, action) = if normalized.contains("manifest")
+        || normalized.contains("cargo metadata")
+        || normalized.contains("release plan")
+    {
+        (
+            "invalid_manifest",
+            "the publish plan could not be built",
+            ActionKind::ResolveBlockers,
+        )
+    } else if normalized.contains("dirty") || normalized.contains("git repository") {
+        (
+            "workspace_not_ready",
+            "the workspace is not ready for publication",
+            ActionKind::ResolveBlockers,
+        )
+    } else if normalized.contains("ownership")
+        || normalized.contains("token")
+        || normalized.contains("authoriz")
+    {
+        (
+            "authentication_required",
+            "publish authorization could not be proven",
+            ActionKind::ResolveBlockers,
+        )
+    } else if normalized.contains("registry")
+        || normalized.contains("connect")
+        || normalized.contains("http")
+    {
+        (
+            "registry_unreachable",
+            "registry availability could not be proven",
+            ActionKind::StopAndInvestigate,
+        )
+    } else {
+        (
+            "publish_failed",
+            "publish stopped before a receipt was finalized",
+            ActionKind::StopAndInvestigate,
+        )
+    };
+
+    PublishEarlyError {
+        format: format.to_string(),
+        category,
+        summary,
+        rendered_error,
+        next_action: OperatorAction::posture(
+            action,
+            "resolve the reported failure before deciding whether to run publish again",
+        ),
+    }
+    .into()
+}
+
 /// Render a top-level error to stderr via [`format_error`].
 pub fn report_error(error: &anyhow::Error) {
+    if let Some(publish_error) = error.downcast_ref::<PublishEarlyError>() {
+        let safe_to_rerun = PublishEarlySafeRerun {
+            value: None,
+            reason: "no completed receipt exists to prove a safe rerun",
+        };
+        if publish_error.format == "json" {
+            let report = PublishEarlyErrorReport {
+                schema_version: "shipper.publish.error.v1",
+                command: "publish",
+                status: "failed",
+                category: publish_error.category,
+                summary: publish_error.summary,
+                safe_to_rerun,
+                next_action: &publish_error.next_action,
+                evidence: Vec::new(),
+            };
+            match serde_json::to_string_pretty(&report) {
+                Ok(json) => eprintln!("{json}"),
+                Err(_) => eprintln!("{}", publish_error.rendered_error),
+            }
+            return;
+        }
+
+        eprintln!("{}", publish_error.rendered_error);
+        eprintln!();
+        eprintln!("Result: failed — {}", publish_error.summary);
+        eprintln!("Safe to rerun: unknown — {}", safe_to_rerun.reason);
+        eprintln!("Next: {}", publish_error.next_action.reason);
+        eprintln!("Evidence: none from a completed receipt");
+        return;
+    }
     eprintln!("{}", format_error(error));
 }
 
@@ -1051,9 +1174,15 @@ pub fn run() -> Result<std::process::ExitCode> {
             )
         }
         Err(err) => {
-            return Err(err).with_context(|| {
-                plan_failure_hint(&spec.manifest_path, &cli.packages, command_name)
-            });
+            let error = err.context(plan_failure_hint(
+                &spec.manifest_path,
+                &cli.packages,
+                command_name,
+            ));
+            if matches!(cli.cmd.as_ref(), Some(Commands::Publish)) {
+                return Err(mark_publish_early_error(error, &cli.format));
+            }
+            return Err(error);
         }
     };
 
@@ -1271,7 +1400,8 @@ pub fn run() -> Result<std::process::ExitCode> {
                 reporter.install_progress(progress, package_positions);
 
                 let receipt = engine::run_publish(&current_planned, &current_opts, &mut reporter)
-                    .with_context(|| publish_failure_hint(&current_opts.state_dir))?;
+                    .with_context(|| publish_failure_hint(&current_opts.state_dir))
+                    .map_err(|error| mark_publish_early_error(error, &cli.format))?;
 
                 if let Some(progress) = reporter.take_progress() {
                     progress.finish();
@@ -5593,6 +5723,19 @@ mod tests {
             !first_line.contains("outer context: mid context"),
             "cause chain collapsed to single line (`{{e:#}}` regression); got:\n{rendered}"
         );
+    }
+
+    #[test]
+    fn publish_early_error_redacts_secret_bearing_cause() {
+        let error = anyhow::anyhow!("CARGO_REGISTRY_TOKEN=EARLY_ERROR_SECRET")
+            .context("publish authorization failed");
+        let marked = mark_publish_early_error(error, "json");
+        let publish_error = marked
+            .downcast_ref::<PublishEarlyError>()
+            .expect("publish marker");
+        assert_eq!(publish_error.category, "authentication_required");
+        assert!(publish_error.rendered_error.contains("[REDACTED]"));
+        assert!(!publish_error.rendered_error.contains("EARLY_ERROR_SECRET"));
     }
 
     #[test]
