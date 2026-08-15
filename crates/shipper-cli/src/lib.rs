@@ -5437,7 +5437,7 @@ fn run_config_with_loopback(cmd: ConfigCommands, allow_loopback: bool) -> Result
                     path.display()
                 );
             }
-            let config = ShipperConfig::load_from_file(&path)
+            let config = ShipperConfig::load_from_file_without_value_validation(&path)
                 .with_context(|| format!("Failed to load config file: {}", path.display()))?;
             config
                 .validate_with_loopback(allow_loopback)

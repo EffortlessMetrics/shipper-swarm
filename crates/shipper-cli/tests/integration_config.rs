@@ -246,6 +246,46 @@ fn two_configured_loopback_registries_require_explicit_flag() {
 }
 
 #[test]
+fn config_validate_honors_explicit_loopback_flag() {
+    let td = tempdir().expect("tempdir");
+    let config = td.path().join("two-loopback.toml");
+    write_two_loopback_registries(&config);
+
+    let denied = shipper_cmd()
+        .timeout(Duration::from_secs(20))
+        .arg("config")
+        .arg("validate")
+        .arg("--path")
+        .arg(&config)
+        .env("ISSUE_312_REGISTRY_TOKEN", CONFIG_SECRET)
+        .assert()
+        .get_output()
+        .clone();
+    assert_eq!(denied.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&denied.stderr)
+            .contains("plain http is reserved for an explicit loopback")
+    );
+    assert_secret_absent_and_no_execution_state(&denied, td.path(), &td.path().join("state"));
+
+    let allowed = shipper_cmd()
+        .timeout(Duration::from_secs(20))
+        .arg("--allow-loopback")
+        .arg("config")
+        .arg("validate")
+        .arg("--path")
+        .arg(&config)
+        .env("ISSUE_312_REGISTRY_TOKEN", CONFIG_SECRET)
+        .assert()
+        .get_output()
+        .clone();
+    assert_eq!(allowed.status.code(), Some(0));
+    assert!(allowed.stderr.is_empty());
+    assert!(String::from_utf8_lossy(&allowed.stdout).contains("Configuration file is valid"));
+    assert_secret_absent_and_no_execution_state(&allowed, td.path(), &td.path().join("state"));
+}
+
+#[test]
 fn allow_loopback_does_not_authorize_other_unsafe_destinations() {
     let td = tempdir().expect("tempdir");
     create_workspace(td.path());
