@@ -120,7 +120,8 @@ struct Cli {
     #[arg(long, global = true)]
     skip_ownership_check: bool,
 
-    /// Fail preflight if ownership checks fail or if no token is available.
+    /// Require a registry token before strict-ownership preflight or publish.
+    /// Preflight also fails when ownership verification fails.
     ///
     /// Note: crates.io token scopes may not allow querying owners; this is best-effort.
     #[arg(long, global = true)]

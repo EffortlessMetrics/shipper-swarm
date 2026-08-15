@@ -830,6 +830,64 @@ fn publish_manifest_error_human_output_matches_typed_posture() {
 }
 
 #[test]
+fn publish_strict_ownership_without_token_stops_before_both_schedulers() {
+    const SECRET: &str = "UNSELECTED_REGISTRY_SECRET";
+
+    let td = tempdir().expect("tempdir");
+    create_single_crate_workspace(td.path());
+    let cargo_home = td.path().join("empty-cargo-home");
+    fs::create_dir_all(&cargo_home).expect("create isolated cargo home");
+
+    for parallel in [false, true] {
+        let registry = spawn_bounded_registry(Vec::new(), 0);
+        let state_dir = td.path().join(if parallel {
+            "strict-parallel-state"
+        } else {
+            "strict-sequential-state"
+        });
+        let mut command = loopback_shipper_cmd();
+        command
+            .timeout(Duration::from_secs(20))
+            .arg("--manifest-path")
+            .arg(td.path().join("Cargo.toml"))
+            .arg("--api-base")
+            .arg(&registry.base_url)
+            .arg("--allow-dirty")
+            .arg("--strict-ownership")
+            .arg("--state-dir")
+            .arg(&state_dir);
+        if parallel {
+            command.arg("--parallel");
+        }
+        let output = command
+            .arg("publish")
+            .env("CARGO_HOME", &cargo_home)
+            .env_remove("CARGO_REGISTRY_TOKEN")
+            .env_remove("CARGO_REGISTRIES_CRATES_IO_TOKEN")
+            .env("CARGO_REGISTRIES_UNUSED_TOKEN", SECRET)
+            .assert()
+            .code(1)
+            .get_output()
+            .clone();
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("strict ownership requested but no token found"),
+            "{stderr}"
+        );
+        assert!(output.stdout.is_empty(), "publish failure stdout");
+        assert!(
+            !state_dir.exists(),
+            "strict gate must precede all {parallel:?} scheduler artifacts"
+        );
+        assert_sentinel_absent_from_output_and_state(&output, &state_dir, SECRET);
+        registry
+            .finish(Duration::from_secs(2))
+            .expect("strict gate must make zero registry requests");
+    }
+}
+
+#[test]
 fn publish_non_git_workspace_emits_typed_json_error() {
     let td = tempdir().expect("tempdir");
     create_single_crate_workspace(td.path());

@@ -175,13 +175,13 @@ Controls retry behavior for failed publish operations.
 allow_dirty = false
 # Skip owners/permissions preflight (not recommended)
 skip_ownership_check = false
-# Fail preflight if ownership checks fail (recommended for production)
+# Require a token for strict ownership; preflight also fails failed verification
 strict_ownership = false
 ```
 
 - **allow_dirty**: Allow publishing even with uncommitted changes. Not recommended for production.
 - **skip_ownership_check**: Skip checking if you have permission to publish to the registry. Not recommended for production.
-- **strict_ownership**: Fail preflight immediately if ownership checks fail or if no token is available. Recommended for production.
+- **strict_ownership**: Require a registry token before preflight or publish begins. Preflight also fails when ownership verification fails; publish enforces the no-token gate before creating execution state but does not repeat preflight's registry ownership query. Recommended for production.
 
 ### Parallel
 
@@ -309,7 +309,7 @@ jitter = 0.5
 allow_dirty = false
 # Skip owners/permissions preflight (not recommended)
 skip_ownership_check = false
-# Fail preflight if ownership checks fail (recommended)
+# Require a token for strict ownership; preflight also fails failed verification
 strict_ownership = false
 
 [parallel]

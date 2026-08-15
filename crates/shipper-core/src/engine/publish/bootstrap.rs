@@ -4,7 +4,10 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 
-use crate::engine::{Reporter, init_registry_client, init_state, rehearsal};
+use crate::engine::{
+    Reporter, enforce_strict_ownership_for_registry, init_registry_client, init_state,
+    policy_effects, rehearsal,
+};
 use crate::git;
 use crate::lock;
 use crate::plan::PlannedWorkspace;
@@ -51,6 +54,8 @@ pub(in crate::engine) fn prepare_publish_run(
 ) -> Result<PublishBootstrap> {
     let workspace_root = &ws.workspace_root;
     let state_dir = resolve_state_dir(workspace_root, &opts.state_dir);
+    let effects = policy_effects(opts);
+    enforce_strict_ownership_for_registry(&ws.plan.registry.name, &effects)?;
 
     // #97 PR 3: rehearsal hard gate. Only fires when a rehearsal registry
     // is configured; opt-in until rehearsal phase-2 is stable.
