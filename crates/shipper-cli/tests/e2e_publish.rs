@@ -1128,11 +1128,16 @@ fn run_completed_partial_publish(format: Option<&str>) -> Result<CompletedPartia
 }
 
 fn human_outcome_value<'a>(stdout: &'a str, label: &str) -> Result<&'a str> {
-    stdout
+    let values = stdout
         .lines()
-        .find_map(|line| line.strip_prefix(label))
+        .filter_map(|line| line.strip_prefix(label))
         .map(str::trim)
-        .ok_or_else(|| anyhow!("missing human outcome line {label:?} in:\n{stdout}"))
+        .collect::<Vec<_>>();
+    match values.as_slice() {
+        [value] => Ok(value),
+        [] => bail!("missing human outcome line {label:?} in:\n{stdout}"),
+        _ => bail!("duplicate human outcome lines for {label:?}: {values:?} in:\n{stdout}"),
+    }
 }
 
 fn normalize_state_identity(value: &str, state_dir: &Path) -> String {
@@ -1165,9 +1170,28 @@ fn completed_partial_publish_human_and_json_have_semantic_parity() -> Result<()>
     ensure!(report["outcome"]["safe_to_rerun"]["value"] == false);
     ensure!(report["outcome"]["next_action"]["kind"] == "resume");
     ensure!(report["outcome"]["next_action"]["command"].is_null());
+    ensure!(report["pending"] == 1);
+    ensure!(report["published"] == 0);
+    ensure!(report["failed"] == 0);
+    ensure!(report["ambiguous"] == 0);
+    ensure!(report["uploaded"] == 0);
+    ensure!(report["skipped"] == 0);
+    ensure!(report["packages"].as_array().map(Vec::len) == Some(1));
+    ensure!(report["packages"][0]["state"] == "pending");
 
     ensure!(human_result == "partial failure");
-    ensure!(human_safe.starts_with("no —"), "{human_safe}");
+    let (human_safe_value, human_safe_reason) = human_safe
+        .split_once(" — ")
+        .ok_or_else(|| anyhow!("malformed human safe-to-rerun line: {human_safe}"))?;
+    ensure!(human_safe_value == "no");
+    let json_safe_reason = report["outcome"]["safe_to_rerun"]["reason"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing typed safe-to-rerun reason"))?;
+    ensure!(
+        normalize_state_identity(human_safe_reason, &human.state_dir)
+            == normalize_state_identity(json_safe_reason, &json.state_dir),
+        "human={human_safe_reason:?} json={json_safe_reason:?}"
+    );
     let next_reason = report["outcome"]["next_action"]["reason"]
         .as_str()
         .ok_or_else(|| anyhow!("missing typed next-action reason"))?;
@@ -1180,36 +1204,47 @@ fn completed_partial_publish_human_and_json_have_semantic_parity() -> Result<()>
     let json_evidence = report["outcome"]["evidence"]
         .as_array()
         .ok_or_else(|| anyhow!("missing typed evidence"))?;
-    for evidence in json_evidence {
-        let evidence = evidence
-            .as_str()
-            .ok_or_else(|| anyhow!("non-string typed evidence"))?;
-        ensure!(evidence.contains(json.state_dir.to_string_lossy().as_ref()));
-        let artifact = Path::new(evidence)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| anyhow!("typed evidence has no artifact name: {evidence}"))?;
-        ensure!(
-            human_evidence.contains(human.state_dir.to_string_lossy().as_ref())
-                && human_evidence.contains(artifact),
-            "missing human evidence role {artifact}"
-        );
-    }
+    let json_evidence = json_evidence
+        .iter()
+        .map(|evidence| {
+            evidence
+                .as_str()
+                .ok_or_else(|| anyhow!("non-string typed evidence"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let human_evidence = human_evidence.split(", ").collect::<Vec<_>>();
+    let expected_artifacts = ["state.json", "events.jsonl", "receipt.json"];
+    let expected_human_evidence = expected_artifacts
+        .iter()
+        .map(|artifact| human.state_dir.join(artifact).display().to_string())
+        .collect::<Vec<_>>();
+    let expected_json_evidence = expected_artifacts
+        .iter()
+        .map(|artifact| json.state_dir.join(artifact).display().to_string())
+        .collect::<Vec<_>>();
+    ensure!(human_evidence == expected_human_evidence);
+    ensure!(json_evidence == expected_json_evidence);
+    let normalized_human_evidence = human_evidence
+        .iter()
+        .map(|evidence| normalize_state_identity(evidence, &human.state_dir))
+        .collect::<Vec<_>>();
+    let normalized_json_evidence = json_evidence
+        .iter()
+        .map(|evidence| normalize_state_identity(evidence, &json.state_dir))
+        .collect::<Vec<_>>();
+    ensure!(normalized_human_evidence == normalized_json_evidence);
 
-    let package_state = report["packages"][0]["state"]
-        .as_str()
-        .ok_or_else(|| anyhow!("missing completed-partial package state"))?;
     assert_registry_completion_artifacts(
         &human.state_dir,
         "crates-io",
         "partial_failure",
-        package_state,
+        "pending",
     );
     assert_registry_completion_artifacts(
         &json.state_dir,
         "crates-io",
         "partial_failure",
-        package_state,
+        "pending",
     );
     assert_secret_absent_from_output_and_state(&human.output, &human.state_dir);
     assert_secret_absent_from_output_and_state(&json.output, &json.state_dir);
