@@ -1169,7 +1169,13 @@ fn completed_partial_publish_human_and_json_have_semantic_parity() -> Result<()>
     ensure!(report["safe_to_rerun"] == false);
     ensure!(report["outcome"]["safe_to_rerun"]["value"] == false);
     ensure!(report["outcome"]["next_action"]["kind"] == "resume");
-    ensure!(report["outcome"]["next_action"]["command"].is_null());
+    let next_action = report["outcome"]["next_action"]
+        .as_object()
+        .ok_or_else(|| anyhow!("missing typed next action"))?;
+    ensure!(
+        !next_action.contains_key("command"),
+        "commandless posture must omit command: {next_action:?}"
+    );
     ensure!(report["pending"] == 1);
     ensure!(report["published"] == 0);
     ensure!(report["failed"] == 0);
