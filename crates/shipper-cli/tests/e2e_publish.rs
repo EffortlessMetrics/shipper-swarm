@@ -250,7 +250,8 @@ fn single_crate_publish_creates_state_and_receipt() {
 
     let state_dir = td.path().join(".shipper");
 
-    loopback_shipper_cmd()
+    let output = loopback_shipper_cmd()
+        .timeout(Duration::from_secs(20))
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--api-base")
@@ -270,7 +271,21 @@ fn single_crate_publish_creates_state_and_receipt() {
         .env("SHIPPER_CARGO_BIN", &fake_cargo)
         .env("SHIPPER_FAKE_PUBLISH_EXIT", "0")
         .assert()
-        .success();
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(output).expect("publish stdout utf8");
+    assert!(stdout.contains("Result: success"), "{stdout}");
+    assert!(
+        stdout.contains("Safe to rerun: yes — all packages reached a successful terminal state"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("Next: publication is complete; retain the receipt and event evidence"),
+        "{stdout}"
+    );
 
     // Verify state.json exists and has plan_id
     let state_path = state_dir.join("state.json");
@@ -324,8 +339,10 @@ fn publish_json_format_writes_command_envelope_to_stdout() {
 
     let registry = spawn_registry(vec![404, 200], 2);
     let state_dir = td.path().join(".shipper");
+    let state_dir_arg = Path::new(".shipper");
 
     let output = loopback_shipper_cmd()
+        .timeout(Duration::from_secs(20))
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--api-base")
@@ -338,7 +355,7 @@ fn publish_json_format_writes_command_envelope_to_stdout() {
         .arg("--max-attempts")
         .arg("1")
         .arg("--state-dir")
-        .arg(&state_dir)
+        .arg(state_dir_arg)
         .arg("--format")
         .arg("json")
         .arg("publish")
@@ -367,6 +384,37 @@ fn publish_json_format_writes_command_envelope_to_stdout() {
         "completed publish envelope should expose safe rerun posture"
     );
     assert_eq!(report["registry"].as_str(), Some("crates-io"));
+    assert_eq!(
+        report["state_dir"].as_str(),
+        Some(state_dir_arg.to_string_lossy().as_ref()),
+        "legacy state_dir must preserve the configured relative value"
+    );
+    assert_eq!(report["outcome"]["status"].as_str(), Some("success"));
+    assert_eq!(
+        report["outcome"]["safe_to_rerun"]["value"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        report["safe_to_rerun"], report["outcome"]["safe_to_rerun"]["value"],
+        "legacy and typed rerun fields must share one computed value"
+    );
+    assert_eq!(
+        report["outcome"]["next_action"]["kind"].as_str(),
+        Some("none_complete")
+    );
+    let evidence = report["outcome"]["evidence"]
+        .as_array()
+        .expect("typed evidence array");
+    let evidence = evidence
+        .iter()
+        .map(|path| path.as_str().expect("evidence path").to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        evidence,
+        ["state.json", "events.jsonl", "receipt.json"]
+            .map(|name| state_dir.join(name).to_string_lossy().into_owned()),
+        "typed evidence must name the workspace-resolved state, events, and receipt files"
+    );
     assert!(report["plan_id"].is_string(), "plan_id should be present");
     assert_eq!(report["published"].as_u64(), Some(1));
     assert_eq!(report["pending"].as_u64(), Some(0));
@@ -387,6 +435,17 @@ fn publish_json_format_writes_command_envelope_to_stdout() {
         Some(true),
         "state artifact should exist"
     );
+    for (artifact, file) in [
+        ("state", "state.json"),
+        ("events", "events.jsonl"),
+        ("receipt", "receipt.json"),
+    ] {
+        assert_eq!(
+            report["artifacts"][artifact]["path"].as_str(),
+            Some(state_dir_arg.join(file).to_string_lossy().as_ref()),
+            "legacy {artifact} artifact path must preserve the configured relative state directory"
+        );
+    }
     assert_eq!(
         report["artifacts"]["events"]["exists"].as_bool(),
         Some(true),
@@ -956,6 +1015,7 @@ fn publish_mixed_existing_and_missing_failure_records_failed_package() {
     let publish_log = td.path().join("publish.log");
 
     loopback_shipper_cmd()
+        .timeout(Duration::from_secs(20))
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
         .arg("--api-base")

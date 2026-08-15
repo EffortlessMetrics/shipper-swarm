@@ -127,11 +127,22 @@ branch without parsing output:
 | Code | Meaning | What CI should do |
 |---:|---|---|
 | `0` | Every package reached a successful terminal state (published or already present) | proceed |
-| `2` | At least one package did not — the run finalized a receipt | `shipper resume` after fixing the cause |
+| `2` | At least one package did not — the run finalized a receipt | follow the typed `outcome.next_action`; resume only when it says `resume` |
 | `1` | The run failed before finalizing a receipt (auth, plan, lock, config) | fix the cause, rerun |
 
-Exit `2` means a receipt exists and resuming is the intended recovery, *not*
-that the invocation was rejected.
+Exit `2` means a receipt exists and operator attention is required, *not* that
+the invocation was rejected or that a blind retry is safe. In
+`shipper.publish.v1`, the additive `outcome` field derives one next-action
+posture from the completed receipt: terminal success is `none_complete`,
+retryable unfinished work is `resume`, permanent failure is
+`resolve_blockers`, an uploaded package awaiting visibility is
+`wait_for_registry`, and an ambiguous outcome whose registry truth remains
+unknown is `reconcile` without a fabricated command. Human output renders
+`Result`, `Safe to rerun`, `Next`, and `Evidence` from that same typed outcome.
+
+Exit-1 failures that occur before receipt finalization retain the existing
+human error path. They do not emit a partial `shipper.publish.v1` document;
+typed early-error JSON is tracked separately by #275.
 
 Note that `2` covers "all packages failed" as well as "some failed":
 finalization classifies every non-all-successful receipt as

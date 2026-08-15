@@ -41,9 +41,9 @@ use shipper_core::engine::{self, Reporter};
 use shipper_core::plan;
 use shipper_core::runtime::execution::pkg_key;
 use shipper_core::types::{
-    EventType, ExecutionResult, ExecutionState, Finishability, PackageState, PlannedPackage,
-    PreflightPackage, PreflightReport, PublishEvent, Registry, ReleasePlan, ReleaseSpec,
-    RuntimeOptions,
+    ErrorClass, EventType, ExecutionResult, ExecutionState, Finishability, PackageState,
+    PlannedPackage, PreflightPackage, PreflightReport, PublishEvent, Registry, ReleasePlan,
+    ReleaseSpec, RuntimeOptions,
 };
 
 mod doctor;
@@ -3378,6 +3378,7 @@ struct PublishJsonReport<'a> {
     command: &'static str,
     execution_result: &'a ExecutionResult,
     safe_to_rerun: bool,
+    outcome: PublishOperatorOutcome,
     registry: String,
     plan_id: &'a str,
     state_dir: String,
@@ -3413,6 +3414,7 @@ struct ResumeJsonReport<'a> {
     receipt: &'a shipper_core::types::Receipt,
 }
 
+#[derive(Default)]
 struct CommandJsonPackageCounts {
     published: usize,
     pending: usize,
@@ -3421,6 +3423,25 @@ struct CommandJsonPackageCounts {
     uploaded: usize,
     skipped: usize,
     next_package: Option<String>,
+    retryable_failures: usize,
+    permanent_failures: usize,
+    ambiguous_failures: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct PublishOperatorOutcome {
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure_class: Option<&'static str>,
+    safe_to_rerun: PublishSafeRerun,
+    next_action: OperatorAction,
+    evidence: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct PublishSafeRerun {
+    value: bool,
+    reason: String,
 }
 
 #[derive(Serialize)]
@@ -3468,8 +3489,12 @@ fn print_publish_output(
     state_dir: &Path,
     format: &str,
 ) -> Result<()> {
+    let counts = command_package_counts(receipt);
+    let evidence_state_dir = publish_evidence_state_dir(workspace_root, state_dir);
+    let outcome =
+        build_publish_operator_outcome(&receipt.execution_result, &counts, &evidence_state_dir);
     if format == "json" {
-        let report = build_publish_json_report(receipt, state_dir)?;
+        let report = build_publish_json_report(receipt, state_dir, &evidence_state_dir, outcome)?;
         let json = serde_json::to_string_pretty(&report)
             .context("failed to serialize publish JSON envelope")?;
         println!("{}", json);
@@ -3477,7 +3502,16 @@ fn print_publish_output(
     }
 
     print_receipt(receipt, workspace_root, state_dir, format);
+    print_publish_operator_outcome(&outcome);
     Ok(())
+}
+
+fn publish_evidence_state_dir(workspace_root: &Path, state_dir: &Path) -> PathBuf {
+    if state_dir.is_absolute() {
+        state_dir.to_path_buf()
+    } else {
+        workspace_root.join(state_dir)
+    }
 }
 
 fn print_resume_output(
@@ -3501,18 +3535,20 @@ fn print_resume_output(
 fn build_publish_json_report<'a>(
     receipt: &'a shipper_core::types::Receipt,
     state_dir: &Path,
+    evidence_state_dir: &Path,
+    outcome: PublishOperatorOutcome,
 ) -> Result<PublishJsonReport<'a>> {
-    let reconciled = reconciled_packages(state_dir)?;
+    let reconciled = reconciled_packages(evidence_state_dir)?;
     let packages = command_package_reports(receipt, &reconciled);
     let counts = command_package_counts(receipt);
-    let safe_to_rerun =
-        counts.pending == 0 && counts.failed == 0 && counts.ambiguous == 0 && counts.uploaded == 0;
+    let safe_to_rerun = outcome.safe_to_rerun.value;
 
     Ok(PublishJsonReport {
         schema_version: "shipper.publish.v1",
         command: "publish",
         execution_result: &receipt.execution_result,
         safe_to_rerun,
+        outcome,
         registry: receipt.registry.name.clone(),
         plan_id: &receipt.plan_id,
         state_dir: state_dir.display().to_string(),
@@ -3523,7 +3559,7 @@ fn build_publish_json_report<'a>(
         uploaded: counts.uploaded,
         skipped: counts.skipped,
         packages,
-        artifacts: command_json_artifacts(state_dir),
+        artifacts: command_json_artifacts_with_lookup(state_dir, evidence_state_dir),
         receipt,
     })
 }
@@ -3567,6 +3603,9 @@ fn command_package_counts(receipt: &shipper_core::types::Receipt) -> CommandJson
         uploaded: 0,
         skipped: 0,
         next_package: None,
+        retryable_failures: 0,
+        permanent_failures: 0,
+        ambiguous_failures: 0,
     };
 
     for package in &receipt.packages {
@@ -3589,8 +3628,13 @@ fn command_package_counts(receipt: &shipper_core::types::Receipt) -> CommandJson
             PackageState::Skipped { .. } => {
                 counts.skipped += 1;
             }
-            PackageState::Failed { .. } => {
+            PackageState::Failed { class, .. } => {
                 counts.failed += 1;
+                match class {
+                    ErrorClass::Retryable => counts.retryable_failures += 1,
+                    ErrorClass::Permanent => counts.permanent_failures += 1,
+                    ErrorClass::Ambiguous => counts.ambiguous_failures += 1,
+                }
                 counts
                     .next_package
                     .get_or_insert_with(|| package.name.clone());
@@ -3605,6 +3649,137 @@ fn command_package_counts(receipt: &shipper_core::types::Receipt) -> CommandJson
     }
 
     counts
+}
+
+fn build_publish_operator_outcome(
+    result: &ExecutionResult,
+    counts: &CommandJsonPackageCounts,
+    state_dir: &Path,
+) -> PublishOperatorOutcome {
+    let safe_to_rerun =
+        counts.pending == 0 && counts.failed == 0 && counts.ambiguous == 0 && counts.uploaded == 0;
+    let evidence = publish_outcome_evidence(state_dir);
+
+    let (failure_class, next_action, reason) = if counts.ambiguous > 0
+        || counts.ambiguous_failures > 0
+    {
+        (
+            Some("ambiguous"),
+            OperatorAction::posture(
+                ActionKind::Reconcile,
+                "registry truth remains unknown; inspect reconciliation and event evidence before any retry",
+            ),
+            "registry truth remains unknown for at least one package",
+        )
+    } else if counts.uploaded > 0 {
+        (
+            Some("ambiguous"),
+            OperatorAction::posture(
+                ActionKind::WaitForRegistry,
+                "an uploaded package has not reached verified registry visibility; inspect events and wait for registry truth",
+            ),
+            "at least one upload has not reached a verified terminal state",
+        )
+    } else if counts.permanent_failures > 0 {
+        (
+            Some("permanent"),
+            OperatorAction::posture(
+                ActionKind::ResolveBlockers,
+                "resolve the permanent publish failure recorded in the receipt before continuing",
+            ),
+            "a permanent failure must be resolved before more publication work",
+        )
+    } else if counts.retryable_failures > 0 || counts.pending > 0 {
+        (
+            counts.retryable_failures.gt(&0).then_some("retryable"),
+            OperatorAction::posture(
+                ActionKind::Resume,
+                format!(
+                    "resume from the durable state at {} using the same workspace, manifest, configuration, and registry selection",
+                    state_dir.display()
+                ),
+            ),
+            "unfinished work must continue through the durable resume path",
+        )
+    } else if matches!(result, ExecutionResult::Success) {
+        (
+            None,
+            OperatorAction::posture(
+                ActionKind::NoneComplete,
+                "publication is complete; retain the receipt and event evidence",
+            ),
+            "all packages reached a successful terminal state",
+        )
+    } else {
+        (
+            None,
+            OperatorAction::posture(
+                ActionKind::StopAndInvestigate,
+                "the aggregate result and package states disagree; inspect the retained evidence",
+            ),
+            "the completed receipt does not prove a safe rerun",
+        )
+    };
+
+    PublishOperatorOutcome {
+        status: execution_result_name(result),
+        failure_class,
+        safe_to_rerun: PublishSafeRerun {
+            value: safe_to_rerun,
+            reason: reason.to_string(),
+        },
+        next_action,
+        evidence,
+    }
+}
+
+fn execution_result_name(result: &ExecutionResult) -> &'static str {
+    match result {
+        ExecutionResult::Success => "success",
+        ExecutionResult::PartialFailure => "partial_failure",
+        ExecutionResult::CompleteFailure => "complete_failure",
+    }
+}
+
+fn publish_outcome_evidence(state_dir: &Path) -> Vec<String> {
+    let mut evidence = vec![
+        state_dir
+            .join(shipper_core::state::execution_state::STATE_FILE)
+            .display()
+            .to_string(),
+        state_dir
+            .join(shipper_core::state::events::EVENTS_FILE)
+            .display()
+            .to_string(),
+        state_dir
+            .join(shipper_core::state::execution_state::RECEIPT_FILE)
+            .display()
+            .to_string(),
+    ];
+    let reconciliation = state_dir.join(shipper_core::state::execution_state::RECONCILIATION_FILE);
+    if reconciliation.exists() {
+        evidence.push(reconciliation.display().to_string());
+    }
+    evidence
+}
+
+fn print_publish_operator_outcome(outcome: &PublishOperatorOutcome) {
+    println!();
+    println!("Result: {}", outcome.status.replace('_', " "));
+    println!(
+        "Safe to rerun: {} — {}",
+        if outcome.safe_to_rerun.value {
+            "yes"
+        } else {
+            "no"
+        },
+        outcome.safe_to_rerun.reason
+    );
+    match outcome.next_action.command_line() {
+        Some(command) => println!("Next: {command} — {}", outcome.next_action.reason),
+        None => println!("Next: {}", outcome.next_action.reason),
+    }
+    println!("Evidence: {}", outcome.evidence.join(", "));
 }
 
 fn command_package_reports(
@@ -3625,19 +3800,36 @@ fn command_package_reports(
 }
 
 fn command_json_artifacts(state_dir: &Path) -> CommandJsonArtifacts {
+    command_json_artifacts_with_lookup(state_dir, state_dir)
+}
+
+fn command_json_artifacts_with_lookup(
+    display_state_dir: &Path,
+    lookup_state_dir: &Path,
+) -> CommandJsonArtifacts {
     CommandJsonArtifacts {
-        state: json_artifact(state_dir.join(shipper_core::state::execution_state::STATE_FILE)),
-        events: json_artifact(state_dir.join(shipper_core::state::events::EVENTS_FILE)),
-        receipt: json_artifact(state_dir.join(shipper_core::state::execution_state::RECEIPT_FILE)),
-        reconciliation: json_artifact(
-            state_dir.join(shipper_core::state::execution_state::RECONCILIATION_FILE),
+        state: json_artifact_with_lookup(
+            display_state_dir.join(shipper_core::state::execution_state::STATE_FILE),
+            lookup_state_dir.join(shipper_core::state::execution_state::STATE_FILE),
+        ),
+        events: json_artifact_with_lookup(
+            display_state_dir.join(shipper_core::state::events::EVENTS_FILE),
+            lookup_state_dir.join(shipper_core::state::events::EVENTS_FILE),
+        ),
+        receipt: json_artifact_with_lookup(
+            display_state_dir.join(shipper_core::state::execution_state::RECEIPT_FILE),
+            lookup_state_dir.join(shipper_core::state::execution_state::RECEIPT_FILE),
+        ),
+        reconciliation: json_artifact_with_lookup(
+            display_state_dir.join(shipper_core::state::execution_state::RECONCILIATION_FILE),
+            lookup_state_dir.join(shipper_core::state::execution_state::RECONCILIATION_FILE),
         ),
     }
 }
 
-fn json_artifact(path: PathBuf) -> CommandJsonArtifact {
+fn json_artifact_with_lookup(path: PathBuf, lookup_path: PathBuf) -> CommandJsonArtifact {
     CommandJsonArtifact {
-        exists: path.exists(),
+        exists: lookup_path.exists(),
         path: path.display().to_string(),
     }
 }
@@ -5202,6 +5394,163 @@ mod tests {
         assert_eq!(
             ExitCode::FAILURE,
             exit_code_for_result(&ExecutionResult::CompleteFailure)
+        );
+    }
+
+    #[test]
+    fn publish_outcome_mapping_fails_closed_and_preserves_rerun_contract() {
+        use ExecutionResult::{CompleteFailure, PartialFailure, Success};
+
+        struct Case {
+            name: &'static str,
+            result: ExecutionResult,
+            counts: CommandJsonPackageCounts,
+            action: ActionKind,
+            safe_to_rerun: bool,
+            failure_class: Option<&'static str>,
+            has_command: bool,
+        }
+
+        let counts = |published,
+                      pending,
+                      failed,
+                      ambiguous,
+                      uploaded,
+                      retryable_failures,
+                      permanent_failures,
+                      ambiguous_failures| CommandJsonPackageCounts {
+            published,
+            pending,
+            failed,
+            ambiguous,
+            uploaded,
+            skipped: 0,
+            next_package: None,
+            retryable_failures,
+            permanent_failures,
+            ambiguous_failures,
+        };
+
+        let cases = [
+            Case {
+                name: "success is terminal",
+                result: Success,
+                counts: counts(1, 0, 0, 0, 0, 0, 0, 0),
+                action: ActionKind::NoneComplete,
+                safe_to_rerun: true,
+                failure_class: None,
+                has_command: false,
+            },
+            Case {
+                name: "pending partial resumes durable state",
+                result: PartialFailure,
+                counts: counts(1, 1, 0, 0, 0, 0, 0, 0),
+                action: ActionKind::Resume,
+                safe_to_rerun: false,
+                failure_class: None,
+                has_command: false,
+            },
+            Case {
+                name: "retryable failure resumes durable state",
+                result: PartialFailure,
+                counts: counts(0, 0, 1, 0, 0, 1, 0, 0),
+                action: ActionKind::Resume,
+                safe_to_rerun: false,
+                failure_class: Some("retryable"),
+                has_command: false,
+            },
+            Case {
+                name: "permanent failure requires repair",
+                result: CompleteFailure,
+                counts: counts(0, 0, 1, 0, 0, 0, 1, 0),
+                action: ActionKind::ResolveBlockers,
+                safe_to_rerun: false,
+                failure_class: Some("permanent"),
+                has_command: false,
+            },
+            Case {
+                name: "ambiguous state requires reconciliation",
+                result: PartialFailure,
+                counts: counts(0, 0, 0, 1, 0, 0, 0, 0),
+                action: ActionKind::Reconcile,
+                safe_to_rerun: false,
+                failure_class: Some("ambiguous"),
+                has_command: false,
+            },
+            Case {
+                name: "ambiguous failure also requires reconciliation",
+                result: PartialFailure,
+                counts: counts(0, 0, 1, 0, 0, 0, 0, 1),
+                action: ActionKind::Reconcile,
+                safe_to_rerun: false,
+                failure_class: Some("ambiguous"),
+                has_command: false,
+            },
+            Case {
+                name: "uploaded state waits for registry truth",
+                result: PartialFailure,
+                counts: counts(0, 0, 0, 0, 1, 0, 0, 0),
+                action: ActionKind::WaitForRegistry,
+                safe_to_rerun: false,
+                failure_class: Some("ambiguous"),
+                has_command: false,
+            },
+            Case {
+                name: "inconsistent complete result stops",
+                result: CompleteFailure,
+                counts: counts(1, 0, 0, 0, 0, 0, 0, 0),
+                action: ActionKind::StopAndInvestigate,
+                safe_to_rerun: true,
+                failure_class: None,
+                has_command: false,
+            },
+        ];
+
+        for case in cases {
+            let outcome =
+                build_publish_operator_outcome(&case.result, &case.counts, Path::new("run-state"));
+            assert_eq!(outcome.next_action.kind, case.action, "{}", case.name);
+            assert_eq!(
+                outcome.safe_to_rerun.value, case.safe_to_rerun,
+                "{}",
+                case.name
+            );
+            assert_eq!(outcome.failure_class, case.failure_class, "{}", case.name);
+            assert_eq!(
+                outcome.next_action.command_line().is_some(),
+                case.has_command,
+                "{}",
+                case.name
+            );
+        }
+    }
+
+    #[test]
+    fn publish_resume_action_preserves_state_identity_without_fabricating_context() {
+        let counts = CommandJsonPackageCounts {
+            pending: 1,
+            ..CommandJsonPackageCounts::default()
+        };
+        let outcome = build_publish_operator_outcome(
+            &ExecutionResult::PartialFailure,
+            &counts,
+            Path::new("custom-state"),
+        );
+
+        assert!(outcome.next_action.command.is_empty());
+        assert!(outcome.next_action.reason.contains("custom-state"));
+    }
+
+    #[test]
+    fn relative_publish_evidence_is_resolved_against_the_workspace() {
+        let resolved =
+            publish_evidence_state_dir(Path::new("workspace"), Path::new("custom-state"));
+        assert_eq!(resolved, Path::new("workspace").join("custom-state"));
+
+        let absolute = std::env::temp_dir().join("shipper-publish-outcome-evidence");
+        assert_eq!(
+            publish_evidence_state_dir(Path::new("ignored"), &absolute),
+            absolute
         );
     }
 
