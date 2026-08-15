@@ -140,9 +140,16 @@ retryable unfinished work is `resume`, permanent failure is
 unknown is `reconcile` without a fabricated command. Human output renders
 `Result`, `Safe to rerun`, `Next`, and `Evidence` from that same typed outcome.
 
-Exit-1 failures that occur before receipt finalization retain the existing
-human error path. They do not emit a partial `shipper.publish.v1` document;
-typed early-error JSON is tracked separately by #275.
+Exit-1 failures while building the `publish` plan or returned by the publish
+engine before receipt finalization do not emit a partial `shipper.publish.v1`
+document. With `--format json`, those two wrapped boundaries write a
+`shipper.publish.error.v1` envelope to stderr and keep stdout empty. Its stable
+category and summary do not expose the raw cause, `safe_to_rerun.value` is
+`null` because no completed receipt proves that posture, its next action is
+commandless, and its evidence list is empty. Human output retains the redacted
+error chain and renders the same Result, Safe-to-rerun, Next, and Evidence
+posture. Configuration/option validation errors outside those boundaries and
+other commands keep their existing error output.
 
 Note that `2` covers "all packages failed" as well as "some failed":
 finalization classifies every non-all-successful receipt as

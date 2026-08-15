@@ -86,10 +86,15 @@ unfinished work points to `resume`; a permanent failure points to
 and deliberately supplies no retry command. The human renderer reports the
 same Result, rerun posture, next action, and retained evidence paths.
 
-Non-usage execution failures that return before a receipt is finalized still
-use the existing exit-1 error path. Argument-parsing and other usage errors
-continue to exit 2. Typed JSON for pre-receipt execution failures belongs to
-#275 and is not part of `shipper.publish.v1`'s completed-receipt outcome.
+Plan-build failures and errors returned by the publish engine before a receipt
+is finalized still exit 1. For `publish --format json`, those wrapped failures write a
+`shipper.publish.error.v1` envelope to stderr and keep stdout empty. A null
+safe-rerun value means no completed receipt proves whether a rerun is safe; fix
+or investigate the reported category instead of blindly retrying.
+Argument-parsing and other usage errors continue to exit 2 and use Clap's
+usage output. Configuration and option-validation failures outside the wrapped
+plan/engine boundary retain their existing output. Early-error JSON is separate
+from `shipper.publish.v1`'s completed-receipt outcome.
 
 ## Important boundary
 
