@@ -1209,24 +1209,19 @@ pub fn run() -> Result<std::process::ExitCode> {
     };
 
     // Load configuration file
-    let diagnostic_command = matches!(cli.cmd.as_ref(), Some(Commands::Doctor));
     let config = if let Some(ref config_path) = cli.config {
-        // Use custom config file specified via --config
-        let load = if diagnostic_command {
-            ShipperConfig::load_from_file_for_diagnostics(config_path)
-        } else {
-            ShipperConfig::load_from_file(config_path)
-        };
+        // Parse first so the single validation boundary below can apply CLI
+        // trust flags such as --allow-loopback. The parser still rejects file,
+        // TOML, and schema errors before returning a configuration.
+        let load = ShipperConfig::load_from_file_without_value_validation(config_path);
         Some(
             load.with_context(|| format!("Failed to load config from: {}", config_path.display()))?,
         )
     } else {
-        // Try to load .shipper.toml from workspace root
-        let load = if diagnostic_command {
-            ShipperConfig::load_from_workspace_for_diagnostics(&planned.workspace_root)
-        } else {
-            ShipperConfig::load_from_workspace(&planned.workspace_root)
-        };
+        // Try to parse .shipper.toml from the workspace root. Value and
+        // destination validation belongs to the flag-aware boundary below.
+        let load =
+            ShipperConfig::load_from_workspace_without_value_validation(&planned.workspace_root);
         load.with_context(|| "Failed to load config from workspace")?
     };
 

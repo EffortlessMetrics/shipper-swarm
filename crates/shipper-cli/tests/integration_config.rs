@@ -5,6 +5,7 @@
 
 use std::fs;
 use std::path::Path;
+use std::time::Duration;
 
 use assert_cmd::Command;
 use predicates::str::contains;
@@ -42,6 +43,79 @@ edition = "2021"
 "#,
     );
     write_file(&root.join("alpha/src/lib.rs"), "pub fn alpha() {}\n");
+}
+
+const CONFIG_SECRET: &str = "ISSUE_312_CONFIG_SECRET";
+
+fn assert_secret_absent_and_no_execution_state(
+    output: &std::process::Output,
+    workspace: &Path,
+    state_dir: &Path,
+) {
+    for (surface, bytes) in [("stdout", &output.stdout), ("stderr", &output.stderr)] {
+        let rendered = String::from_utf8_lossy(bytes);
+        assert!(
+            !rendered.contains(CONFIG_SECRET),
+            "secret leaked in {surface}: {rendered}"
+        );
+    }
+    assert!(
+        !workspace.join(".shipper").exists(),
+        "config validation must not create default execution state"
+    );
+    assert!(
+        !state_dir.exists(),
+        "config validation must not create explicit execution state"
+    );
+}
+
+fn run_plan_with_config(
+    workspace: &Path,
+    config: &Path,
+    state_dir: &Path,
+    allow_loopback: bool,
+) -> std::process::Output {
+    let mut command = shipper_cmd();
+    command
+        .timeout(Duration::from_secs(20))
+        .arg("--manifest-path")
+        .arg(workspace.join("Cargo.toml"))
+        .arg("--config")
+        .arg(config)
+        .arg("--state-dir")
+        .arg(state_dir)
+        .arg("--registries")
+        .arg("alpha,beta");
+    if allow_loopback {
+        command.arg("--allow-loopback");
+    }
+    command
+        .arg("plan")
+        .env("ISSUE_312_REGISTRY_TOKEN", CONFIG_SECRET)
+        .assert()
+        .get_output()
+        .clone()
+}
+
+fn write_two_loopback_registries(path: &Path) {
+    write_file(
+        path,
+        r#"
+schema_version = "shipper.config.v1"
+
+[[registries.registries]]
+name = "alpha"
+api_base = "http://127.0.0.1:41001"
+index_base = "http://127.0.0.1:41001"
+token = "env:ISSUE_312_REGISTRY_TOKEN"
+
+[[registries.registries]]
+name = "beta"
+api_base = "http://127.0.0.1:41002"
+index_base = "http://127.0.0.1:41002"
+token = "env:ISSUE_312_REGISTRY_TOKEN"
+"#,
+    );
 }
 
 // ── 1. CLI uses default config when no .shipper.toml exists ─────────
@@ -143,6 +217,79 @@ fn config_flag_with_missing_file_fails() {
         .stderr(contains("Failed to load config from"));
 }
 
+#[test]
+fn two_configured_loopback_registries_require_explicit_flag() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+    let config = td.path().join("two-loopback.toml");
+    write_two_loopback_registries(&config);
+
+    let denied_state = td.path().join("state-denied");
+    let denied = run_plan_with_config(td.path(), &config, &denied_state, false);
+    assert_eq!(denied.status.code(), Some(1));
+    let denied_stderr = String::from_utf8_lossy(&denied.stderr);
+    assert!(
+        denied_stderr.contains("plain http is reserved for an explicit loopback"),
+        "{denied_stderr}"
+    );
+    assert_secret_absent_and_no_execution_state(&denied, td.path(), &denied_state);
+
+    let allowed_state = td.path().join("state-allowed");
+    let allowed = run_plan_with_config(td.path(), &config, &allowed_state, true);
+    assert_eq!(allowed.status.code(), Some(0));
+    assert!(allowed.stderr.is_empty(), "plan stderr must stay empty");
+    assert!(
+        String::from_utf8_lossy(&allowed.stdout).contains("alpha@0.1.0"),
+        "plan should complete after flag-aware validation"
+    );
+    assert_secret_absent_and_no_execution_state(&allowed, td.path(), &allowed_state);
+}
+
+#[test]
+fn allow_loopback_does_not_authorize_other_unsafe_destinations() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+
+    for (case, api_base, expected) in [
+        (
+            "plain-public-http",
+            "http://registry.example.com",
+            "must use https",
+        ),
+        (
+            "metadata-address",
+            "https://169.254.169.254",
+            "link-local or metadata-routed",
+        ),
+    ] {
+        let config = td.path().join(format!("{case}.toml"));
+        write_file(
+            &config,
+            &format!(
+                r#"
+schema_version = "shipper.config.v1"
+
+[[registries.registries]]
+name = "alpha"
+api_base = "{api_base}"
+index_base = "{api_base}"
+
+[[registries.registries]]
+name = "beta"
+api_base = "https://registry.example.com"
+index_base = "https://index.registry.example.com"
+"#
+            ),
+        );
+        let state_dir = td.path().join(format!("state-{case}"));
+        let output = run_plan_with_config(td.path(), &config, &state_dir, true);
+        assert_eq!(output.status.code(), Some(1));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(expected), "{case}: {stderr}");
+        assert_secret_absent_and_no_execution_state(&output, td.path(), &state_dir);
+    }
+}
+
 // ── 4. Config values affect CLI behavior ────────────────────────────
 
 #[test]
@@ -188,13 +335,23 @@ fn invalid_toml_in_workspace_config_fails() {
         "this is not valid toml {{{{",
     );
 
-    shipper_cmd()
+    let state_dir = td.path().join("state-malformed");
+    let output = shipper_cmd()
+        .timeout(Duration::from_secs(20))
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
+        .arg("--state-dir")
+        .arg(&state_dir)
         .arg("plan")
+        .env("ISSUE_312_REGISTRY_TOKEN", CONFIG_SECRET)
         .assert()
-        .failure()
-        .stderr(contains("Failed to load config from workspace"));
+        .get_output()
+        .clone();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Failed to load config from workspace")
+    );
+    assert_secret_absent_and_no_execution_state(&output, td.path(), &state_dir);
 }
 
 #[test]
@@ -213,13 +370,21 @@ lines = 0
 "#,
     );
 
-    shipper_cmd()
+    let state_dir = td.path().join("state-invalid-values");
+    let output = shipper_cmd()
+        .timeout(Duration::from_secs(20))
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
+        .arg("--state-dir")
+        .arg(&state_dir)
         .arg("plan")
+        .env("ISSUE_312_REGISTRY_TOKEN", CONFIG_SECRET)
         .assert()
-        .failure()
-        .stderr(contains("validation failed"));
+        .get_output()
+        .clone();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("validation failed"));
+    assert_secret_absent_and_no_execution_state(&output, td.path(), &state_dir);
 }
 
 #[test]

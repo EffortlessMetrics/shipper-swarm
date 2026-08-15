@@ -1,0 +1,6 @@
+kind: fixed
+body: Honor the explicit loopback trust flag when validating configured local registries while keeping unsafe destinations denied by default.
+time: 2026-08-14T23:15:00Z
+custom:
+  Audience: Operators
+  Importance: Detailed

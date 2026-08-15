@@ -616,11 +616,22 @@ impl ShipperConfig {
     /// Load a workspace configuration for diagnostic reporting without
     /// applying value or registry-destination validation.
     pub fn load_from_workspace_for_diagnostics(workspace_root: &Path) -> Result<Option<Self>> {
+        Self::load_from_workspace_without_value_validation(workspace_root)
+    }
+
+    /// Parse a workspace configuration without applying value or registry-
+    /// destination validation.
+    ///
+    /// Callers must apply [`ShipperConfig::validate_with_loopback`] before
+    /// using the returned configuration for execution.
+    pub fn load_from_workspace_without_value_validation(
+        workspace_root: &Path,
+    ) -> Result<Option<Self>> {
         let config_path = workspace_root.join(".shipper.toml");
         if !config_path.exists() {
             return Ok(None);
         }
-        Self::load_from_file_for_diagnostics(&config_path).map(Some)
+        Self::load_from_file_without_value_validation(&config_path).map(Some)
     }
 
     /// Load configuration from a specific file path
@@ -635,6 +646,16 @@ impl ShipperConfig {
     /// without using it as a trusted destination. Callers must validate the
     /// returned configuration before using it for execution.
     pub fn load_from_file_for_diagnostics(path: &Path) -> Result<Self> {
+        Self::load_from_file_without_value_validation(path)
+    }
+
+    /// Parse configuration without applying value or registry-destination
+    /// validation.
+    ///
+    /// TOML decoding and schema-version validation remain fail closed. Callers
+    /// must apply [`ShipperConfig::validate_with_loopback`] before using the
+    /// returned configuration for execution.
+    pub fn load_from_file_without_value_validation(path: &Path) -> Result<Self> {
         Self::load_from_file_with_validation(path, false)
     }
 
