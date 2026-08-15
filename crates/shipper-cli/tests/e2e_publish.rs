@@ -12,7 +12,7 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use assert_cmd::Command;
 use tempfile::tempdir;
 use tiny_http::{Header, Response, Server, StatusCode};
@@ -1087,12 +1087,18 @@ allow_loopback = true
     assert!(!state_dir.join("receipt.json").exists());
 }
 
-#[test]
-fn completed_partial_publish_keeps_completed_json_contract_and_exit_two() {
-    let td = tempdir().expect("tempdir");
+struct CompletedPartialRun {
+    _workspace: tempfile::TempDir,
+    state_dir: std::path::PathBuf,
+    output: std::process::Output,
+}
+
+fn run_completed_partial_publish(format: Option<&str>) -> Result<CompletedPartialRun> {
+    let td = tempdir().context("create completed-partial workspace")?;
     create_single_crate_workspace(td.path());
     let state_dir = td.path().join(".shipper");
-    let output = loopback_shipper_cmd()
+    let mut command = loopback_shipper_cmd();
+    command
         .timeout(Duration::from_secs(20))
         .arg("--manifest-path")
         .arg(td.path().join("Cargo.toml"))
@@ -1104,30 +1110,152 @@ fn completed_partial_publish_keeps_completed_json_contract_and_exit_two() {
         .arg("0")
         .arg("--quiet")
         .arg("--state-dir")
-        .arg(&state_dir)
-        .arg("--format")
-        .arg("json")
+        .arg(&state_dir);
+    if let Some(format) = format {
+        command.arg("--format").arg(format);
+    }
+    let output = command
         .arg("publish")
         .env("CARGO_REGISTRY_TOKEN", "EARLY_ERROR_SECRET")
-        .assert()
-        .get_output()
-        .clone();
-    assert_eq!(output.status.code(), Some(2));
-    assert!(output.stderr.is_empty(), "completed JSON stays off stderr");
-    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("publish JSON");
-    assert_eq!(
-        report["schema_version"].as_str(),
-        Some("shipper.publish.v1")
+        .output()
+        .context("run completed-partial publish fixture")?;
+
+    Ok(CompletedPartialRun {
+        _workspace: td,
+        state_dir,
+        output,
+    })
+}
+
+fn human_outcome_value<'a>(stdout: &'a str, label: &str) -> Result<&'a str> {
+    let values = stdout
+        .lines()
+        .filter_map(|line| line.strip_prefix(label))
+        .map(str::trim)
+        .collect::<Vec<_>>();
+    match values.as_slice() {
+        [value] => Ok(value),
+        [] => bail!("missing human outcome line {label:?} in:\n{stdout}"),
+        _ => bail!("duplicate human outcome lines for {label:?}: {values:?} in:\n{stdout}"),
+    }
+}
+
+fn normalize_state_identity(value: &str, state_dir: &Path) -> String {
+    value.replace(state_dir.to_string_lossy().as_ref(), "<STATE_DIR>")
+}
+
+#[test]
+fn completed_partial_publish_human_and_json_have_semantic_parity() -> Result<()> {
+    let human = run_completed_partial_publish(None)?;
+    let json = run_completed_partial_publish(Some("json"))?;
+    ensure!(human.output.status.code() == Some(2));
+    ensure!(json.output.status.code() == Some(2));
+    ensure!(
+        json.output.stderr.is_empty(),
+        "completed JSON stays off stderr"
     );
-    assert_eq!(report["execution_result"].as_str(), Some("partial_failure"));
-    assert_ne!(
-        report["outcome"]["next_action"]["kind"].as_str(),
-        Some("none_complete")
+
+    let human_stdout = std::str::from_utf8(&human.output.stdout).context("human publish stdout")?;
+    let human_result = human_outcome_value(human_stdout, "Result:")?;
+    let human_safe = human_outcome_value(human_stdout, "Safe to rerun:")?;
+    let human_next = human_outcome_value(human_stdout, "Next:")?;
+    let human_evidence = human_outcome_value(human_stdout, "Evidence:")?;
+
+    let report: serde_json::Value =
+        serde_json::from_slice(&json.output.stdout).context("completed-partial publish JSON")?;
+    ensure!(report["schema_version"] == "shipper.publish.v1");
+    ensure!(report["execution_result"] == "partial_failure");
+    ensure!(report["outcome"]["status"] == "partial_failure");
+    ensure!(report["safe_to_rerun"] == false);
+    ensure!(report["outcome"]["safe_to_rerun"]["value"] == false);
+    ensure!(report["outcome"]["next_action"]["kind"] == "resume");
+    let next_action = report["outcome"]["next_action"]
+        .as_object()
+        .ok_or_else(|| anyhow!("missing typed next action"))?;
+    ensure!(
+        !next_action.contains_key("command"),
+        "commandless posture must omit command: {next_action:?}"
     );
-    assert!(state_dir.join("state.json").exists());
-    assert!(state_dir.join("events.jsonl").exists());
-    assert!(state_dir.join("receipt.json").exists());
-    assert_secret_absent_from_output_and_state(&output, &state_dir);
+    ensure!(report["pending"] == 1);
+    ensure!(report["published"] == 0);
+    ensure!(report["failed"] == 0);
+    ensure!(report["ambiguous"] == 0);
+    ensure!(report["uploaded"] == 0);
+    ensure!(report["skipped"] == 0);
+    ensure!(report["packages"].as_array().map(Vec::len) == Some(1));
+    ensure!(report["packages"][0]["state"] == "pending");
+
+    ensure!(human_result == "partial failure");
+    let (human_safe_value, human_safe_reason) = human_safe
+        .split_once(" — ")
+        .ok_or_else(|| anyhow!("malformed human safe-to-rerun line: {human_safe}"))?;
+    ensure!(human_safe_value == "no");
+    let json_safe_reason = report["outcome"]["safe_to_rerun"]["reason"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing typed safe-to-rerun reason"))?;
+    ensure!(
+        normalize_state_identity(human_safe_reason, &human.state_dir)
+            == normalize_state_identity(json_safe_reason, &json.state_dir),
+        "human={human_safe_reason:?} json={json_safe_reason:?}"
+    );
+    let next_reason = report["outcome"]["next_action"]["reason"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing typed next-action reason"))?;
+    let human_next = normalize_state_identity(human_next, &human.state_dir);
+    let json_next = normalize_state_identity(next_reason, &json.state_dir);
+    ensure!(
+        human_next == json_next,
+        "human={human_next:?} json={json_next:?}"
+    );
+    let json_evidence = report["outcome"]["evidence"]
+        .as_array()
+        .ok_or_else(|| anyhow!("missing typed evidence"))?;
+    let json_evidence = json_evidence
+        .iter()
+        .map(|evidence| {
+            evidence
+                .as_str()
+                .ok_or_else(|| anyhow!("non-string typed evidence"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let human_evidence = human_evidence.split(", ").collect::<Vec<_>>();
+    let expected_artifacts = ["state.json", "events.jsonl", "receipt.json"];
+    let expected_human_evidence = expected_artifacts
+        .iter()
+        .map(|artifact| human.state_dir.join(artifact).display().to_string())
+        .collect::<Vec<_>>();
+    let expected_json_evidence = expected_artifacts
+        .iter()
+        .map(|artifact| json.state_dir.join(artifact).display().to_string())
+        .collect::<Vec<_>>();
+    ensure!(human_evidence == expected_human_evidence);
+    ensure!(json_evidence == expected_json_evidence);
+    let normalized_human_evidence = human_evidence
+        .iter()
+        .map(|evidence| normalize_state_identity(evidence, &human.state_dir))
+        .collect::<Vec<_>>();
+    let normalized_json_evidence = json_evidence
+        .iter()
+        .map(|evidence| normalize_state_identity(evidence, &json.state_dir))
+        .collect::<Vec<_>>();
+    ensure!(normalized_human_evidence == normalized_json_evidence);
+
+    assert_registry_completion_artifacts(
+        &human.state_dir,
+        "crates-io",
+        "partial_failure",
+        "pending",
+    );
+    assert_registry_completion_artifacts(
+        &json.state_dir,
+        "crates-io",
+        "partial_failure",
+        "pending",
+    );
+    assert_secret_absent_from_output_and_state(&human.output, &human.state_dir);
+    assert_secret_absent_from_output_and_state(&json.output, &json.state_dir);
+
+    Ok(())
 }
 
 #[test]
