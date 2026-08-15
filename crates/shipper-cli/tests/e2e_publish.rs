@@ -1141,29 +1141,41 @@ fn registry_diagnostic_client_times_out_after_an_accepted_unanswered_request() {
     let server = Server::http("127.0.0.1:0").expect("server");
     let base_url = format!("http://{}", server.server_addr());
     let (accepted_tx, accepted_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
     let server_thread = thread::spawn(move || {
         let request = server
             .recv_timeout(Duration::from_secs(1))
             .expect("receive unanswered request")
             .expect("diagnostic client must connect");
         accepted_tx.send(()).expect("report accepted request");
-        thread::sleep(Duration::from_secs(1));
+        release_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("test must release the held request");
         drop(request);
     });
 
     let started = Instant::now();
-    let error = send_registry_request(&base_url)
-        .expect_err("accepted request without a response must hit the read deadline");
+    let (client_tx, client_rx) = mpsc::sync_channel(1);
+    let client_thread = thread::spawn(move || {
+        let _ = client_tx.send(send_registry_request(&base_url));
+    });
     accepted_rx
         .recv_timeout(Duration::from_millis(100))
         .expect("server must accept the diagnostic request");
+    let client_result = client_rx.recv_timeout(Duration::from_millis(750));
+    let client_elapsed = started.elapsed();
+    release_tx.send(()).expect("release held request");
     server_thread.join().expect("join unanswered server");
+    client_thread.join().expect("join diagnostic client");
+    let error = client_result
+        .expect("diagnostic client must honor its read deadline")
+        .expect_err("accepted request without a response must hit the read deadline");
     let error = format!("{error:#}");
     assert!(error.contains("read mock registry response"), "{error}");
     assert!(
-        started.elapsed() < Duration::from_secs(2),
+        client_elapsed < Duration::from_millis(750),
         "diagnostic client exceeded its bounded deadline: {:?}",
-        started.elapsed()
+        client_elapsed
     );
 }
 
