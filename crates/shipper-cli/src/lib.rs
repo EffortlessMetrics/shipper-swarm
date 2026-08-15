@@ -3827,11 +3827,6 @@ fn command_json_artifacts_with_lookup(
     }
 }
 
-fn json_artifact(path: PathBuf) -> CommandJsonArtifact {
-    let lookup_path = path.clone();
-    json_artifact_with_lookup(path, lookup_path)
-}
-
 fn json_artifact_with_lookup(path: PathBuf, lookup_path: PathBuf) -> CommandJsonArtifact {
     CommandJsonArtifact {
         exists: lookup_path.exists(),
