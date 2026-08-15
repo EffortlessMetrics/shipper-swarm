@@ -386,8 +386,8 @@ fn publish_json_format_writes_command_envelope_to_stdout() {
     assert_eq!(report["registry"].as_str(), Some("crates-io"));
     assert_eq!(
         report["state_dir"].as_str(),
-        Some(state_dir.to_string_lossy().as_ref()),
-        "relative state directories must resolve against the workspace"
+        Some(state_dir_arg.to_string_lossy().as_ref()),
+        "legacy state_dir must preserve the configured relative value"
     );
     assert_eq!(report["outcome"]["status"].as_str(), Some("success"));
     assert_eq!(
@@ -405,11 +405,15 @@ fn publish_json_format_writes_command_envelope_to_stdout() {
     let evidence = report["outcome"]["evidence"]
         .as_array()
         .expect("typed evidence array");
-    assert!(
-        evidence.iter().all(|path| path
-            .as_str()
-            .is_some_and(|path| path.starts_with(state_dir.to_string_lossy().as_ref()))),
-        "typed evidence should use workspace-resolved paths: {evidence:?}"
+    let evidence = evidence
+        .iter()
+        .map(|path| path.as_str().expect("evidence path").to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        evidence,
+        ["state.json", "events.jsonl", "receipt.json"]
+            .map(|name| state_dir.join(name).to_string_lossy().into_owned()),
+        "typed evidence must name the workspace-resolved state, events, and receipt files"
     );
     assert!(report["plan_id"].is_string(), "plan_id should be present");
     assert_eq!(report["published"].as_u64(), Some(1));
@@ -431,6 +435,17 @@ fn publish_json_format_writes_command_envelope_to_stdout() {
         Some(true),
         "state artifact should exist"
     );
+    for (artifact, file) in [
+        ("state", "state.json"),
+        ("events", "events.jsonl"),
+        ("receipt", "receipt.json"),
+    ] {
+        assert_eq!(
+            report["artifacts"][artifact]["path"].as_str(),
+            Some(state_dir_arg.join(file).to_string_lossy().as_ref()),
+            "legacy {artifact} artifact path must preserve the configured relative state directory"
+        );
+    }
     assert_eq!(
         report["artifacts"]["events"]["exists"].as_bool(),
         Some(true),

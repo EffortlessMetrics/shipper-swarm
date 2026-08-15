@@ -3494,7 +3494,7 @@ fn print_publish_output(
     let outcome =
         build_publish_operator_outcome(&receipt.execution_result, &counts, &evidence_state_dir);
     if format == "json" {
-        let report = build_publish_json_report(receipt, &evidence_state_dir, outcome)?;
+        let report = build_publish_json_report(receipt, state_dir, &evidence_state_dir, outcome)?;
         let json = serde_json::to_string_pretty(&report)
             .context("failed to serialize publish JSON envelope")?;
         println!("{}", json);
@@ -3535,9 +3535,10 @@ fn print_resume_output(
 fn build_publish_json_report<'a>(
     receipt: &'a shipper_core::types::Receipt,
     state_dir: &Path,
+    evidence_state_dir: &Path,
     outcome: PublishOperatorOutcome,
 ) -> Result<PublishJsonReport<'a>> {
-    let reconciled = reconciled_packages(state_dir)?;
+    let reconciled = reconciled_packages(evidence_state_dir)?;
     let packages = command_package_reports(receipt, &reconciled);
     let counts = command_package_counts(receipt);
     let safe_to_rerun = outcome.safe_to_rerun.value;
@@ -3558,7 +3559,7 @@ fn build_publish_json_report<'a>(
         uploaded: counts.uploaded,
         skipped: counts.skipped,
         packages,
-        artifacts: command_json_artifacts(state_dir),
+        artifacts: command_json_artifacts_with_lookup(state_dir, evidence_state_dir),
         receipt,
     })
 }
@@ -3799,19 +3800,41 @@ fn command_package_reports(
 }
 
 fn command_json_artifacts(state_dir: &Path) -> CommandJsonArtifacts {
+    command_json_artifacts_with_lookup(state_dir, state_dir)
+}
+
+fn command_json_artifacts_with_lookup(
+    display_state_dir: &Path,
+    lookup_state_dir: &Path,
+) -> CommandJsonArtifacts {
     CommandJsonArtifacts {
-        state: json_artifact(state_dir.join(shipper_core::state::execution_state::STATE_FILE)),
-        events: json_artifact(state_dir.join(shipper_core::state::events::EVENTS_FILE)),
-        receipt: json_artifact(state_dir.join(shipper_core::state::execution_state::RECEIPT_FILE)),
-        reconciliation: json_artifact(
-            state_dir.join(shipper_core::state::execution_state::RECONCILIATION_FILE),
+        state: json_artifact_with_lookup(
+            display_state_dir.join(shipper_core::state::execution_state::STATE_FILE),
+            lookup_state_dir.join(shipper_core::state::execution_state::STATE_FILE),
+        ),
+        events: json_artifact_with_lookup(
+            display_state_dir.join(shipper_core::state::events::EVENTS_FILE),
+            lookup_state_dir.join(shipper_core::state::events::EVENTS_FILE),
+        ),
+        receipt: json_artifact_with_lookup(
+            display_state_dir.join(shipper_core::state::execution_state::RECEIPT_FILE),
+            lookup_state_dir.join(shipper_core::state::execution_state::RECEIPT_FILE),
+        ),
+        reconciliation: json_artifact_with_lookup(
+            display_state_dir.join(shipper_core::state::execution_state::RECONCILIATION_FILE),
+            lookup_state_dir.join(shipper_core::state::execution_state::RECONCILIATION_FILE),
         ),
     }
 }
 
 fn json_artifact(path: PathBuf) -> CommandJsonArtifact {
+    let lookup_path = path.clone();
+    json_artifact_with_lookup(path, lookup_path)
+}
+
+fn json_artifact_with_lookup(path: PathBuf, lookup_path: PathBuf) -> CommandJsonArtifact {
     CommandJsonArtifact {
-        exists: path.exists(),
+        exists: lookup_path.exists(),
         path: path.display().to_string(),
     }
 }
