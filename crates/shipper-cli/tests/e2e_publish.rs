@@ -6,6 +6,7 @@
 
 use std::fs;
 use std::path::Path;
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
 
@@ -174,6 +175,89 @@ fn spawn_registry(statuses: Vec<u16>, expected_requests: usize) -> TestRegistry 
     TestRegistry { base_url, handle }
 }
 
+struct BoundedTestRegistry {
+    base_url: String,
+    server: Arc<Server>,
+    handle: thread::JoinHandle<usize>,
+    completed: mpsc::Receiver<usize>,
+    expected_requests: usize,
+}
+
+impl BoundedTestRegistry {
+    fn finish(self, timeout: Duration) -> Result<(), String> {
+        let observed = match self.completed.recv_timeout(timeout) {
+            Ok(observed) => observed,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                self.server.unblock();
+                let observed = self
+                    .handle
+                    .join()
+                    .map_err(|_| "mock registry thread panicked after deadline".to_string())?;
+                return Err(format!(
+                    "mock registry deadline elapsed: expected {} requests, observed {observed}",
+                    self.expected_requests
+                ));
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err("mock registry completion channel disconnected".to_string());
+            }
+        };
+        let joined = self
+            .handle
+            .join()
+            .map_err(|_| "mock registry thread panicked".to_string())?;
+        if joined != observed {
+            return Err(format!(
+                "mock registry completion mismatch: channel reported {observed}, thread returned {joined}"
+            ));
+        }
+        if observed != self.expected_requests {
+            return Err(format!(
+                "mock registry request mismatch: expected {}, observed {observed}",
+                self.expected_requests
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn spawn_bounded_registry(statuses: Vec<u16>, expected_requests: usize) -> BoundedTestRegistry {
+    let server = Arc::new(Server::http("127.0.0.1:0").expect("server"));
+    let base_url = format!("http://{}", server.server_addr());
+    let worker_server = Arc::clone(&server);
+    let (completed_tx, completed) = mpsc::sync_channel(1);
+    let handle = thread::spawn(move || {
+        let mut observed = 0;
+        for idx in 0..expected_requests {
+            let req = match worker_server.recv_timeout(Duration::from_secs(30)) {
+                Ok(Some(request)) => request,
+                _ => break,
+            };
+            observed += 1;
+            let status = statuses
+                .get(idx)
+                .copied()
+                .or_else(|| statuses.last().copied())
+                .unwrap_or(404);
+            let response = Response::from_string("{}")
+                .with_status_code(StatusCode(status))
+                .with_header(
+                    Header::from_bytes("Content-Type", "application/json").expect("header"),
+                );
+            req.respond(response).expect("respond");
+        }
+        let _ = completed_tx.send(observed);
+        observed
+    });
+    BoundedTestRegistry {
+        base_url,
+        server,
+        handle,
+        completed,
+        expected_requests,
+    }
+}
+
 fn shipper_cmd() -> Command {
     Command::new(assert_cmd::cargo::cargo_bin!("shipper-cli"))
 }
@@ -222,10 +306,18 @@ fn assert_publish_early_error_json(
 }
 
 fn assert_secret_absent_from_output_and_state(output: &std::process::Output, state_dir: &Path) {
+    assert_sentinel_absent_from_output_and_state(output, state_dir, "EARLY_ERROR_SECRET");
+}
+
+fn assert_sentinel_absent_from_output_and_state(
+    output: &std::process::Output,
+    state_dir: &Path,
+    sentinel: &str,
+) {
     for (surface, bytes) in [("stdout", &output.stdout), ("stderr", &output.stderr)] {
         let rendered = String::from_utf8_lossy(bytes);
         assert!(
-            !rendered.contains("EARLY_ERROR_SECRET"),
+            !rendered.contains(sentinel),
             "secret leaked in {surface}: {rendered}"
         );
     }
@@ -247,13 +339,81 @@ fn assert_secret_absent_from_output_and_state(output: &std::process::Output, sta
             if matches!(name, "state.json" | "events.jsonl" | "receipt.json") {
                 let contents = fs::read(&entry_path).expect("read retained evidence");
                 assert!(
-                    !String::from_utf8_lossy(&contents).contains("EARLY_ERROR_SECRET"),
+                    !String::from_utf8_lossy(&contents).contains(sentinel),
                     "secret leaked in {}",
                     entry_path.display()
                 );
             }
         }
     }
+}
+
+fn assert_registry_completion_artifacts(
+    registry_state: &Path,
+    registry: &str,
+    expected_result: &str,
+    expected_state: &str,
+) {
+    let state_path = registry_state.join("state.json");
+    let events_path = registry_state.join("events.jsonl");
+    let receipt_path = registry_state.join("receipt.json");
+    for artifact in [&state_path, &events_path, &receipt_path] {
+        assert!(
+            artifact.exists(),
+            "{registry} must retain {}",
+            artifact.display()
+        );
+    }
+
+    let state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&state_path).expect("read registry state"))
+            .expect("parse registry state");
+    let receipt: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&receipt_path).expect("read registry receipt"))
+            .expect("parse registry receipt");
+
+    assert_eq!(state["registry"]["name"].as_str(), Some(registry));
+    assert_eq!(receipt["registry"]["name"].as_str(), Some(registry));
+    assert_eq!(state["plan_id"], receipt["plan_id"]);
+    assert_eq!(
+        state["packages"]["demo@0.1.0"]["state"]["state"].as_str(),
+        Some(expected_state),
+        "{registry} state package result"
+    );
+    assert_eq!(receipt["packages"].as_array().map(Vec::len), Some(1));
+    assert_eq!(receipt["packages"][0]["name"].as_str(), Some("demo"));
+    assert_eq!(receipt["packages"][0]["version"].as_str(), Some("0.1.0"));
+    assert_eq!(
+        receipt["packages"][0]["state"]["state"].as_str(),
+        Some(expected_state),
+        "{registry} receipt package result"
+    );
+    assert_eq!(
+        receipt["execution_result"].as_str(),
+        Some(expected_result),
+        "{registry} receipt result"
+    );
+    assert_eq!(
+        receipt["event_log_path"].as_str(),
+        Some(events_path.to_string_lossy().as_ref()),
+        "{registry} receipt must identify its authoritative event log"
+    );
+
+    let finished: Vec<serde_json::Value> = fs::read_to_string(&events_path)
+        .expect("read registry events")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("parse registry event"))
+        .filter(|event: &serde_json::Value| {
+            event["event_type"]["type"].as_str() == Some("execution_finished")
+        })
+        .collect();
+    assert_eq!(finished.len(), 1, "{registry} execution-finished count");
+    assert_eq!(finished[0]["package"].as_str(), Some("all"));
+    assert_eq!(
+        finished[0]["event_type"]["result"].as_str(),
+        Some(expected_result),
+        "{registry} authoritative event result"
+    );
 }
 
 /// Build env vars needed for fake cargo, returning (new_path, real_cargo, fake_cargo).
@@ -779,6 +939,120 @@ fn completed_partial_publish_keeps_completed_json_contract_and_exit_two() {
     assert!(state_dir.join("events.jsonl").exists());
     assert!(state_dir.join("receipt.json").exists());
     assert_secret_absent_from_output_and_state(&output, &state_dir);
+}
+
+#[test]
+fn multi_registry_later_success_does_not_mask_earlier_partial_result() {
+    const SECRET: &str = "MULTI_REGISTRY_OUTCOME_SECRET";
+
+    let td = tempdir().expect("tempdir");
+    create_single_crate_workspace(td.path());
+    let (new_path, real_cargo, fake_cargo) = setup_fake_cargo(td.path());
+    let alpha = spawn_bounded_registry(vec![404], 1);
+    let beta = spawn_bounded_registry(vec![200], 1);
+    let config = td.path().join("multi-registry.toml");
+    write_file(
+        &config,
+        &format!(
+            r#"
+schema_version = "shipper.config.v1"
+
+[[registries.registries]]
+name = "alpha"
+api_base = "{alpha}"
+index_base = "{alpha}"
+
+[[registries.registries]]
+name = "beta"
+api_base = "{beta}"
+index_base = "{beta}"
+"#,
+            alpha = alpha.base_url,
+            beta = beta.base_url,
+        ),
+    );
+
+    let state_dir = td.path().join("state-multi-registry-outcome");
+    let output = loopback_shipper_cmd()
+        .timeout(Duration::from_secs(20))
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--config")
+        .arg(&config)
+        .arg("--registries")
+        .arg("alpha,beta")
+        .arg("--allow-dirty")
+        .arg("--skip-ownership-check")
+        .arg("--verify-timeout")
+        .arg("0ms")
+        .arg("--verify-poll")
+        .arg("0ms")
+        .arg("--max-attempts")
+        .arg("0")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("publish")
+        .env("PATH", &new_path)
+        .env("REAL_CARGO", &real_cargo)
+        .env("SHIPPER_CARGO_BIN", &fake_cargo)
+        .env("CARGO_REGISTRY_TOKEN", SECRET)
+        .assert()
+        .get_output()
+        .clone();
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "the later successful registry must not mask alpha's partial result"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let alpha_heading = stdout
+        .find("Publishing to registry: alpha")
+        .expect("alpha heading");
+    let alpha_result = stdout
+        .find("Result: partial failure")
+        .expect("alpha partial result");
+    let beta_heading = stdout
+        .find("Publishing to registry: beta")
+        .expect("beta heading");
+    let beta_result = stdout
+        .rfind("Result: success")
+        .expect("beta success result");
+    assert!(
+        alpha_heading < alpha_result && alpha_result < beta_heading && beta_heading < beta_result,
+        "registry headings and results must retain dispatcher order: {stdout}"
+    );
+
+    for (registry, expected_result, expected_state) in [
+        ("alpha", "partial_failure", "pending"),
+        ("beta", "success", "skipped"),
+    ] {
+        let registry_state = state_dir.join(registry);
+        assert_registry_completion_artifacts(
+            &registry_state,
+            registry,
+            expected_result,
+            expected_state,
+        );
+    }
+
+    assert_sentinel_absent_from_output_and_state(&output, &state_dir, SECRET);
+    alpha
+        .finish(Duration::from_secs(2))
+        .expect("alpha registry completion");
+    beta.finish(Duration::from_secs(2))
+        .expect("beta registry completion");
+}
+
+#[test]
+fn bounded_registry_reports_a_missing_request_before_its_server_timeout() {
+    let registry = spawn_bounded_registry(vec![200], 1);
+    let error = registry
+        .finish(Duration::from_millis(50))
+        .expect_err("missing request must fail the completion receipt");
+    assert!(error.contains("deadline elapsed"), "{error}");
+    assert!(error.contains("expected 1 requests"), "{error}");
+    assert!(error.contains("observed 0"), "{error}");
 }
 
 #[test]
