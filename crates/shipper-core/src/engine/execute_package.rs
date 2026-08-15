@@ -559,7 +559,7 @@ fn write_reconciliation_report_best_effort(
     ws: &PlannedWorkspace,
     events_path: &Path,
     reporter: &Arc<SendReporter>,
-) {
+) -> bool {
     if let Err(err) = crate::state::reconciliation::write_report_from_events(
         state_dir,
         &ws.plan.plan_id,
@@ -567,7 +567,9 @@ fn write_reconciliation_report_best_effort(
         events_path,
     ) {
         reporter.warn(&format!("failed to write reconciliation report: {err}"));
+        return false;
     }
+    true
 }
 
 /// Sequential publishing uses the same finite per-package ceiling as the
@@ -808,7 +810,8 @@ pub(crate) fn publish_package_with_timeout(
                 ) {
                     return PackagePublishResult { result: Err(e) };
                 }
-                write_reconciliation_report_best_effort(state_dir, ws, events_path, reporter);
+                let _ =
+                    write_reconciliation_report_best_effort(state_dir, ws, events_path, reporter);
                 reporter.info(&format!(
                     "{}@{}: reconciliation outcome: Published; action: mark published and continue without republish (evidence: {})",
                     p.name,
@@ -854,7 +857,8 @@ pub(crate) fn publish_package_with_timeout(
                 ) {
                     return PackagePublishResult { result: Err(e) };
                 }
-                write_reconciliation_report_best_effort(state_dir, ws, events_path, reporter);
+                let _ =
+                    write_reconciliation_report_best_effort(state_dir, ws, events_path, reporter);
                 reporter.info(&format!(
                     "{}@{}: reconciliation outcome: NotPublished; action: retry under publish policy (evidence: {})",
                     p.name,
@@ -876,7 +880,8 @@ pub(crate) fn publish_package_with_timeout(
                 ) {
                     return PackagePublishResult { result: Err(e) };
                 }
-                write_reconciliation_report_best_effort(state_dir, ws, events_path, reporter);
+                let reconciliation_written =
+                    write_reconciliation_report_best_effort(state_dir, ws, events_path, reporter);
                 reporter.error(&format!(
                     "{}@{}: reconciliation outcome: StillUnknown; action: stop before blind retry; operator action required (evidence: {}): {}",
                     p.name,
@@ -895,12 +900,14 @@ pub(crate) fn publish_package_with_timeout(
                     },
                 );
                 return PackagePublishResult {
-                    result: Err(anyhow::anyhow!(
-                        "{}@{}: resume reconciliation still inconclusive; operator action required. Prior reason: {}",
-                        p.name,
-                        p.version,
-                        reason
-                    )),
+                    result: Err(crate::engine::PublishStillUnknownError {
+                        message: format!(
+                            "{}@{}: resume reconciliation still inconclusive; operator action required. Prior reason: {}",
+                            p.name, p.version, reason
+                        ),
+                        reconciliation_written,
+                    }
+                    .into()),
                 };
             }
         }
@@ -1347,7 +1354,7 @@ pub(crate) fn publish_package_with_timeout(
                             ) {
                                 return PackagePublishResult { result: Err(e) };
                             }
-                            write_reconciliation_report_best_effort(
+                            let _ = write_reconciliation_report_best_effort(
                                 state_dir,
                                 ws,
                                 events_path,
@@ -1371,7 +1378,7 @@ pub(crate) fn publish_package_with_timeout(
                                 }
                                 log.clear();
                             }
-                            write_reconciliation_report_best_effort(
+                            let _ = write_reconciliation_report_best_effort(
                                 state_dir,
                                 ws,
                                 events_path,
@@ -1403,7 +1410,7 @@ pub(crate) fn publish_package_with_timeout(
                             ) {
                                 return PackagePublishResult { result: Err(e) };
                             }
-                            write_reconciliation_report_best_effort(
+                            let reconciliation_written = write_reconciliation_report_best_effort(
                                 state_dir,
                                 ws,
                                 events_path,
@@ -1431,12 +1438,14 @@ pub(crate) fn publish_package_with_timeout(
                             );
 
                             return PackagePublishResult {
-                                result: Err(anyhow::anyhow!(
-                                    "{}@{}: reconciliation inconclusive: {}",
-                                    p.name,
-                                    p.version,
-                                    reason
-                                )),
+                                result: Err(crate::engine::PublishStillUnknownError {
+                                    message: format!(
+                                        "{}@{}: reconciliation inconclusive: {}",
+                                        p.name, p.version, reason
+                                    ),
+                                    reconciliation_written,
+                                }
+                                .into()),
                             };
                         }
                     }

@@ -51,6 +51,26 @@ pub use preflight::PreflightRunOptions;
 #[cfg(test)]
 use test_readiness::verify_published;
 
+/// Typed identity for a publish attempt whose registry reconciliation remained
+/// inconclusive after durable evidence was written.
+///
+/// This is public only so the separate CLI adapter can preserve the safe-stop
+/// posture without parsing error prose. It is not a completed receipt.
+#[doc(hidden)]
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub struct PublishStillUnknownError {
+    message: String,
+    reconciliation_written: bool,
+}
+
+impl PublishStillUnknownError {
+    #[doc(hidden)]
+    pub fn reconciliation_written(&self) -> bool {
+        self.reconciliation_written
+    }
+}
+
 pub trait Reporter {
     fn info(&mut self, msg: &str);
     fn warn(&mut self, msg: &str);

@@ -1347,7 +1347,13 @@ fn ambiguous_still_unknown_publish_human_and_json_have_safe_error_parity() -> Re
     ensure!(report["category"] == "ambiguous");
     ensure!(report["safe_to_rerun"]["value"] == false);
     ensure!(report["next_action"]["kind"] == "reconcile");
-    ensure!(report["next_action"]["command"].is_null());
+    let next_action = report["next_action"]
+        .as_object()
+        .ok_or_else(|| anyhow!("missing JSON next action"))?;
+    ensure!(
+        !next_action.contains_key("command"),
+        "commandless action must omit command: {next_action:?}"
+    );
     ensure!(report["next_action"]["requires_confirmation"] == false);
 
     let summary = report["summary"]

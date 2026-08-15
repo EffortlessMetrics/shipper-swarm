@@ -1068,39 +1068,22 @@ fn mark_publish_early_error(
     )
 }
 
-fn publish_event_count(state_dir: &Path) -> usize {
+fn still_unknown_evidence(state_dir: &Path, reconciliation_written: bool) -> Vec<String> {
     let events_path = shipper_core::state::events::events_path(state_dir);
-    shipper_core::state::events::EventLog::read_from_file(&events_path)
-        .map(|events| events.all_events().len())
-        .unwrap_or(0)
-}
-
-fn still_unknown_evidence_since(state_dir: &Path, prior_event_count: usize) -> Option<Vec<String>> {
-    let events_path = shipper_core::state::events::events_path(state_dir);
-    let events = shipper_core::state::events::EventLog::read_from_file(&events_path).ok()?;
-    let appended_events = events.all_events().get(prior_event_count..)?;
-    let has_still_unknown = appended_events.iter().any(|event| {
-        matches!(
-            &event.event_type,
-            EventType::PublishReconciled {
-                outcome: shipper_core::types::ReconciliationOutcome::StillUnknown { .. }
-            }
-        )
-    });
-    if !has_still_unknown {
-        return None;
-    }
-
-    let evidence = [
+    let mut paths = vec![
         state_dir.join(shipper_core::state::execution_state::STATE_FILE),
         events_path,
-        shipper_core::state::execution_state::reconciliation_path(state_dir),
-    ]
-    .into_iter()
-    .filter(|path| path.exists())
-    .map(|path| path.display().to_string())
-    .collect::<Vec<_>>();
-    (!evidence.is_empty()).then_some(evidence)
+    ];
+    if reconciliation_written {
+        paths.push(shipper_core::state::execution_state::reconciliation_path(
+            state_dir,
+        ));
+    }
+    paths
+        .into_iter()
+        .filter(|path| path.exists())
+        .map(|path| path.display().to_string())
+        .collect()
 }
 
 fn mark_publish_engine_error(
@@ -1108,9 +1091,8 @@ fn mark_publish_engine_error(
     format: &str,
     configured_state_dir: &Path,
     evidence_state_dir: &Path,
-    prior_event_count: usize,
 ) -> anyhow::Error {
-    let Some(evidence) = still_unknown_evidence_since(evidence_state_dir, prior_event_count) else {
+    let Some(still_unknown) = error.downcast_ref::<engine::PublishStillUnknownError>() else {
         let classification = classify_publish_early_error(&error);
         return mark_publish_early_error(
             error.context(publish_failure_hint(configured_state_dir)),
@@ -1118,6 +1100,8 @@ fn mark_publish_engine_error(
             classification,
         );
     };
+    let evidence =
+        still_unknown_evidence(evidence_state_dir, still_unknown.reconciliation_written());
     let error = error.context(
         "publish stopped because registry truth remains unknown; inspect the retained reconciliation evidence before any retry",
     );
@@ -1539,7 +1523,6 @@ pub fn run() -> Result<std::process::ExitCode> {
                     &current_planned.workspace_root,
                     &current_opts.state_dir,
                 );
-                let prior_event_count = publish_event_count(&evidence_state_dir);
 
                 let receipt =
                     match engine::run_publish(&current_planned, &current_opts, &mut reporter) {
@@ -1550,7 +1533,6 @@ pub fn run() -> Result<std::process::ExitCode> {
                                 &cli.format,
                                 &current_opts.state_dir,
                                 &evidence_state_dir,
-                                prior_event_count,
                             ));
                         }
                     };
@@ -5762,46 +5744,24 @@ mod tests {
     }
 
     #[test]
-    fn still_unknown_evidence_requires_an_event_appended_by_this_invocation() -> Result<()> {
-        let td = tempdir().context("create event-cursor fixture")?;
-        let state_dir = td.path();
-        let state_path = state_dir.join(shipper_core::state::execution_state::STATE_FILE);
-        let events_path = shipper_core::state::events::events_path(state_dir);
-        let reconciliation_path =
-            shipper_core::state::execution_state::reconciliation_path(state_dir);
-        fs::write(&state_path, "{}").context("write state marker")?;
-        fs::write(&reconciliation_path, "{}").context("write reconciliation marker")?;
+    fn generic_engine_error_does_not_borrow_stale_reconciliation_evidence() -> Result<()> {
+        let td = tempdir().context("create stale-evidence fixture")?;
+        for artifact in ["state.json", "events.jsonl", "reconciliation.json"] {
+            fs::write(td.path().join(artifact), "{}").context("write stale evidence marker")?;
+        }
 
-        let mut events = shipper_core::state::events::EventLog::new();
-        events.record(PublishEvent {
-            timestamp: Utc::now(),
-            event_type: EventType::PublishReconciled {
-                outcome: shipper_core::types::ReconciliationOutcome::StillUnknown {
-                    attempts: 1,
-                    elapsed_ms: 0,
-                    reason: "registry unavailable".to_string(),
-                },
-            },
-            package: "demo@0.1.0".to_string(),
-        });
-        events
-            .write_to_file(&events_path)
-            .context("write event cursor fixture")?;
-
-        let current = still_unknown_evidence_since(state_dir, 0)
-            .context("current invocation must expose evidence")?;
-        anyhow::ensure!(
-            current
-                == vec![
-                    state_path.display().to_string(),
-                    events_path.display().to_string(),
-                    reconciliation_path.display().to_string(),
-                ]
+        let marked = mark_publish_engine_error(
+            anyhow::anyhow!("unrelated engine failure"),
+            "json",
+            Path::new("configured-state"),
+            td.path(),
         );
-        anyhow::ensure!(
-            still_unknown_evidence_since(state_dir, 1).is_none(),
-            "a prior StillUnknown event must not classify a later engine error"
-        );
+        let publish_error = marked
+            .downcast_ref::<PublishEarlyError>()
+            .context("generic publish error marker")?;
+        anyhow::ensure!(publish_error.category == "publish_failed");
+        anyhow::ensure!(publish_error.safe_to_rerun.value.is_none());
+        anyhow::ensure!(publish_error.evidence.is_empty());
         Ok(())
     }
 
