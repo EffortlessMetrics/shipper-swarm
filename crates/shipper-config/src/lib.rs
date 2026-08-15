@@ -581,8 +581,10 @@ fn default_output_lines() -> usize {
     50
 }
 
+const CONFIG_SCHEMA_VERSION: &str = "shipper.config.v1";
+
 fn default_schema_version() -> String {
-    "shipper.config.v1".to_string()
+    CONFIG_SCHEMA_VERSION.to_string()
 }
 
 fn default_lock_timeout() -> Duration {
@@ -666,13 +668,15 @@ impl ShipperConfig {
         let config: ShipperConfig = toml::from_str(&content)
             .with_context(|| format!("Failed to parse config file: {}", path.display()))?;
 
-        // Validate schema version
-        if let Err(e) = shipper_types::schema::validate_schema_version(
-            &config.schema_version,
-            "shipper.config.v1",
-            "config",
-        ) {
-            bail!("{} in file: {}", e, path.display());
+        // Config decoding is not forward-compatible by default: a future
+        // schema may assign different meaning to fields this binary ignores.
+        if config.schema_version != CONFIG_SCHEMA_VERSION {
+            bail!(
+                "unsupported config schema version '{}'; expected {} in file: {}",
+                config.schema_version,
+                CONFIG_SCHEMA_VERSION,
+                path.display()
+            );
         }
 
         // Validate configuration values (output, retry, lock, readiness,

@@ -246,6 +246,40 @@ fn two_configured_loopback_registries_require_explicit_flag() {
 }
 
 #[test]
+fn scoped_registry_trust_cannot_be_combined_with_all_registries() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+    let config = td.path().join("two-loopback.toml");
+    write_two_loopback_registries(&config);
+    let state_dir = td.path().join("state-conflicting-selectors");
+
+    let output = shipper_cmd()
+        .timeout(Duration::from_secs(20))
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--config")
+        .arg(&config)
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("--registry")
+        .arg("alpha")
+        .arg("--all-registries")
+        .arg("--allow-loopback")
+        .arg("plan")
+        .env("ISSUE_312_REGISTRY_TOKEN", CONFIG_SECRET)
+        .assert()
+        .get_output()
+        .clone();
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("cannot be used with"), "{stderr}");
+    assert!(stderr.contains("--registry"), "{stderr}");
+    assert!(stderr.contains("--all-registries"), "{stderr}");
+    assert_secret_absent_and_no_execution_state(&output, td.path(), &state_dir);
+}
+
+#[test]
 fn config_validate_honors_explicit_loopback_flag() {
     let td = tempdir().expect("tempdir");
     let config = td.path().join("two-loopback.toml");
@@ -286,18 +320,52 @@ fn config_validate_honors_explicit_loopback_flag() {
 }
 
 #[test]
+fn parse_only_cli_boundary_rejects_unsupported_schema() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+    let config = td.path().join("unsupported-schema.toml");
+    write_file(
+        &config,
+        r#"
+schema_version = "shipper.config.v2"
+"#,
+    );
+    let state_dir = td.path().join("state-unsupported-schema");
+    let output = run_plan_with_config(td.path(), &config, &state_dir, true);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unsupported"), "{stderr}");
+    assert!(stderr.contains("shipper.config.v2"), "{stderr}");
+    assert_secret_absent_and_no_execution_state(&output, td.path(), &state_dir);
+}
+
+#[test]
 fn allow_loopback_does_not_authorize_other_unsafe_destinations() {
     let td = tempdir().expect("tempdir");
     create_workspace(td.path());
 
-    for (case, api_base, expected) in [
+    for (case, alpha_base, beta_base, expected) in [
         (
-            "plain-public-http",
+            "plain-public-http-first",
+            "http://registry.example.com",
+            "https://registry.example.com",
+            "must use https",
+        ),
+        (
+            "plain-public-http-second",
+            "https://registry.example.com",
             "http://registry.example.com",
             "must use https",
         ),
         (
-            "metadata-address",
+            "metadata-address-first",
+            "https://169.254.169.254",
+            "https://registry.example.com",
+            "link-local or metadata-routed",
+        ),
+        (
+            "metadata-address-second",
+            "https://registry.example.com",
             "https://169.254.169.254",
             "link-local or metadata-routed",
         ),
@@ -311,13 +379,13 @@ schema_version = "shipper.config.v1"
 
 [[registries.registries]]
 name = "alpha"
-api_base = "{api_base}"
-index_base = "{api_base}"
+api_base = "{alpha_base}"
+index_base = "{alpha_base}"
 
 [[registries.registries]]
 name = "beta"
-api_base = "https://registry.example.com"
-index_base = "https://index.registry.example.com"
+api_base = "{beta_base}"
+index_base = "{beta_base}"
 "#
             ),
         );

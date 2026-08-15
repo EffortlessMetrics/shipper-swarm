@@ -88,7 +88,7 @@ struct Cli {
     manifest_path: PathBuf,
 
     /// Cargo registry name (default: crates-io)
-    #[arg(long, global = true)]
+    #[arg(long, global = true, conflicts_with = "all_registries")]
     registry: Option<String>,
 
     /// Registry API base URL (default: <https://crates.io>)
