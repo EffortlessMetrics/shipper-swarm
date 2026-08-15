@@ -6,11 +6,11 @@
 
 use std::fs;
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::Path;
 use std::sync::{Arc, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use assert_cmd::Command;
@@ -275,7 +275,20 @@ fn send_registry_request(base_url: &str) -> Result<()> {
     let address = base_url
         .strip_prefix("http://")
         .context("mock registry URL must use http")?;
-    let mut stream = TcpStream::connect(address).context("connect to mock registry")?;
+    let socket = address
+        .to_socket_addrs()
+        .context("resolve mock registry address")?
+        .next()
+        .context("mock registry address must resolve")?;
+    let io_timeout = Duration::from_millis(500);
+    let mut stream = TcpStream::connect_timeout(&socket, io_timeout)
+        .context("connect to mock registry within deadline")?;
+    stream
+        .set_read_timeout(Some(io_timeout))
+        .context("set mock registry read deadline")?;
+    stream
+        .set_write_timeout(Some(io_timeout))
+        .context("set mock registry write deadline")?;
     stream
         .write_all(b"GET /api/v1/crates/demo/0.1.0 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
         .context("write mock registry request")?;
@@ -1121,6 +1134,37 @@ fn bounded_registry_reports_an_extra_request_after_its_expected_count() {
     assert!(error.contains("request mismatch"), "{error}");
     assert!(error.contains("expected 1"), "{error}");
     assert!(error.contains("observed 2"), "{error}");
+}
+
+#[test]
+fn registry_diagnostic_client_times_out_after_an_accepted_unanswered_request() {
+    let server = Server::http("127.0.0.1:0").expect("server");
+    let base_url = format!("http://{}", server.server_addr());
+    let (accepted_tx, accepted_rx) = mpsc::sync_channel(1);
+    let server_thread = thread::spawn(move || {
+        let request = server
+            .recv_timeout(Duration::from_secs(1))
+            .expect("receive unanswered request")
+            .expect("diagnostic client must connect");
+        accepted_tx.send(()).expect("report accepted request");
+        thread::sleep(Duration::from_secs(1));
+        drop(request);
+    });
+
+    let started = Instant::now();
+    let error = send_registry_request(&base_url)
+        .expect_err("accepted request without a response must hit the read deadline");
+    accepted_rx
+        .recv_timeout(Duration::from_millis(100))
+        .expect("server must accept the diagnostic request");
+    server_thread.join().expect("join unanswered server");
+    let error = format!("{error:#}");
+    assert!(error.contains("read mock registry response"), "{error}");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "diagnostic client exceeded its bounded deadline: {:?}",
+        started.elapsed()
+    );
 }
 
 #[test]
