@@ -830,6 +830,148 @@ fn publish_manifest_error_human_output_matches_typed_posture() {
 }
 
 #[test]
+fn publish_strict_ownership_without_token_stops_before_both_schedulers() {
+    const SECRET: &str = "UNSELECTED_REGISTRY_SECRET";
+
+    let td = tempdir().expect("tempdir");
+    create_single_crate_workspace(td.path());
+    let cargo_home = td.path().join("empty-cargo-home");
+    fs::create_dir_all(&cargo_home).expect("create isolated cargo home");
+
+    for parallel in [false, true] {
+        let registry = spawn_bounded_registry(Vec::new(), 0);
+        let state_dir = td.path().join(if parallel {
+            "strict-parallel-state"
+        } else {
+            "strict-sequential-state"
+        });
+        let mut command = loopback_shipper_cmd();
+        command
+            .timeout(Duration::from_secs(20))
+            .arg("--manifest-path")
+            .arg(td.path().join("Cargo.toml"))
+            .arg("--api-base")
+            .arg(&registry.base_url)
+            .arg("--allow-dirty")
+            .arg("--strict-ownership")
+            .arg("--state-dir")
+            .arg(&state_dir);
+        if parallel {
+            command.arg("--parallel");
+        }
+        let output = command
+            .arg("publish")
+            .env("CARGO_HOME", &cargo_home)
+            .env_remove("CARGO_REGISTRY_TOKEN")
+            .env_remove("CARGO_REGISTRIES_CRATES_IO_TOKEN")
+            .env("CARGO_REGISTRIES_UNUSED_TOKEN", SECRET)
+            .assert()
+            .code(1)
+            .get_output()
+            .clone();
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("strict ownership requested but no token found"),
+            "{stderr}"
+        );
+        assert!(output.stdout.is_empty(), "publish failure stdout");
+        assert!(
+            !state_dir.exists(),
+            "strict gate must precede all {parallel:?} scheduler artifacts"
+        );
+        assert_sentinel_absent_from_output_and_state(&output, &state_dir, SECRET);
+        registry
+            .finish(Duration::from_secs(2))
+            .expect("strict gate must make zero registry requests");
+    }
+}
+
+#[test]
+fn multi_registry_strict_ownership_prevalidates_every_token_before_alpha_runs() {
+    const ALPHA_TOKEN: &str = "ALPHA_TOKEN_MUST_NOT_LEAK";
+
+    let td = tempdir().expect("tempdir");
+    create_single_crate_workspace(td.path());
+    let cargo_home = td.path().join("empty-multi-registry-cargo-home");
+    fs::create_dir_all(&cargo_home).expect("create isolated cargo home");
+    let alpha = spawn_bounded_registry(Vec::new(), 0);
+    let beta = spawn_bounded_registry(Vec::new(), 0);
+    let config = td.path().join("strict-multi-registry.toml");
+    write_file(
+        &config,
+        &format!(
+            r#"
+schema_version = "shipper.config.v1"
+
+[[registries.registries]]
+name = "alpha"
+api_base = "{alpha}"
+index_base = "{alpha}"
+
+[[registries.registries]]
+name = "beta"
+api_base = "{beta}"
+index_base = "{beta}"
+"#,
+            alpha = alpha.base_url,
+            beta = beta.base_url,
+        ),
+    );
+    let state_dir = td.path().join("strict-multi-registry-state");
+
+    let output = loopback_shipper_cmd()
+        .timeout(Duration::from_secs(20))
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--config")
+        .arg(&config)
+        .arg("--registries")
+        .arg("alpha,beta")
+        .arg("--allow-dirty")
+        .arg("--strict-ownership")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("publish")
+        .env("CARGO_HOME", &cargo_home)
+        .env_remove("CARGO_REGISTRY_TOKEN")
+        .env_remove("CARGO_REGISTRIES_CRATES_IO_TOKEN")
+        .env("CARGO_REGISTRIES_ALPHA_TOKEN", ALPHA_TOKEN)
+        .env_remove("CARGO_REGISTRIES_BETA_TOKEN")
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("strict ownership requested but no token found"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("configure a token for every selected registry, then rerun publish"),
+        "{stderr}"
+    );
+    for nonexistent_evidence_hint in ["events.jsonl", "state.json", "shipper resume"] {
+        assert!(
+            !stderr.contains(nonexistent_evidence_hint),
+            "prevalidation must not recommend nonexistent evidence: {stderr}"
+        );
+    }
+    assert!(output.stdout.is_empty(), "publish failure stdout");
+    assert!(
+        !state_dir.exists(),
+        "no selected registry may create state before all tokens validate"
+    );
+    assert_sentinel_absent_from_output_and_state(&output, &state_dir, ALPHA_TOKEN);
+    alpha
+        .finish(Duration::from_secs(2))
+        .expect("alpha must not receive a request");
+    beta.finish(Duration::from_secs(2))
+        .expect("beta must not receive a request");
+}
+
+#[test]
 fn publish_non_git_workspace_emits_typed_json_error() {
     let td = tempdir().expect("tempdir");
     create_single_crate_workspace(td.path());

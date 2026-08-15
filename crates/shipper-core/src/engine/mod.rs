@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 use chrono::Utc;
 
 use crate::cargo;
+use crate::ops::auth;
 use crate::plan::PlannedWorkspace;
 use crate::registry::{RegistryClient, RegistryPolicy};
 #[cfg(test)]
@@ -90,6 +91,49 @@ pub trait Reporter {
 
 pub(crate) fn policy_effects(opts: &RuntimeOptions) -> crate::runtime::policy::PolicyEffects {
     crate::runtime::policy::policy_effects(opts)
+}
+
+pub(in crate::engine) fn require_strict_ownership_token(
+    effects: &crate::runtime::policy::PolicyEffects,
+    token: Option<&str>,
+) -> Result<()> {
+    if effects.strict_ownership && token.is_none_or(str::is_empty) {
+        bail!(
+            "strict ownership requested but no token found (set CARGO_REGISTRY_TOKEN or run cargo login)"
+        );
+    }
+    Ok(())
+}
+
+pub(in crate::engine) fn enforce_strict_ownership_for_registry(
+    registry_name: &str,
+    effects: &crate::runtime::policy::PolicyEffects,
+) -> Result<()> {
+    if !effects.strict_ownership {
+        return Ok(());
+    }
+    let token = auth::resolve_token(registry_name)?;
+    require_strict_ownership_token(effects, token.as_deref())
+}
+
+/// Validate strict-ownership token presence for every registry selected for a
+/// publish command before any registry-specific execution begins.
+///
+/// This is exposed for the CLI adapter's atomic multi-registry boundary. The
+/// publish bootstrap invokes it again defensively before engine side effects.
+#[doc(hidden)]
+pub fn prevalidate_publish_registry_tokens(
+    ws: &PlannedWorkspace,
+    opts: &RuntimeOptions,
+) -> Result<()> {
+    let effects = policy_effects(opts);
+    if opts.registries.is_empty() {
+        return enforce_strict_ownership_for_registry(&ws.plan.registry.name, &effects);
+    }
+    for registry in &opts.registries {
+        enforce_strict_ownership_for_registry(&registry.name, &effects)?;
+    }
+    Ok(())
 }
 
 fn init_registry_client(
@@ -1452,6 +1496,101 @@ mod tests {
                 assert!(
                     format!("{err:#}").contains("strict ownership requested but no token found")
                 );
+            },
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn run_publish_rejects_missing_strict_token_before_state_for_both_schedulers() {
+        let td = tempdir().expect("tempdir");
+        let ws = planned_workspace(td.path(), "http://127.0.0.1:9".to_string());
+        temp_env::with_vars(
+            [
+                (
+                    "CARGO_HOME",
+                    Some(td.path().join("cargo-home").display().to_string()),
+                ),
+                ("CARGO_REGISTRY_TOKEN", None::<String>),
+                ("CARGO_REGISTRIES_CRATES_IO_TOKEN", None::<String>),
+            ],
+            || {
+                for parallel in [false, true] {
+                    let state_dir = td.path().join(if parallel {
+                        "parallel-state"
+                    } else {
+                        "sequential-state"
+                    });
+                    let mut opts = default_opts(state_dir.clone());
+                    opts.strict_ownership = true;
+                    opts.skip_ownership_check = false;
+                    opts.parallel.enabled = parallel;
+
+                    let mut reporter = CollectingReporter::default();
+                    let error = run_publish(&ws, &opts, &mut reporter).expect_err("must fail");
+                    assert!(
+                        format!("{error:#}")
+                            .contains("strict ownership requested but no token found")
+                    );
+                    assert!(
+                        !state_dir.exists(),
+                        "strict token gate must run before {parallel:?} scheduler state"
+                    );
+                    assert!(reporter.infos.is_empty());
+                    assert!(reporter.warns.is_empty());
+                    assert!(reporter.errors.is_empty());
+                }
+            },
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn strict_token_gate_preserves_token_policy_and_skip_opposites() {
+        let td = tempdir().expect("tempdir");
+        temp_env::with_vars(
+            [
+                (
+                    "CARGO_HOME",
+                    Some(td.path().join("cargo-home").display().to_string()),
+                ),
+                ("CARGO_REGISTRY_TOKEN", Some("test-token".to_string())),
+                ("CARGO_REGISTRIES_CRATES_IO_TOKEN", None::<String>),
+            ],
+            || {
+                let mut opts = default_opts(PathBuf::from(".shipper"));
+                opts.strict_ownership = true;
+                let effects = policy_effects(&opts);
+                assert!(require_strict_ownership_token(&effects, Some("test-token")).is_ok());
+            },
+        );
+
+        temp_env::with_vars(
+            [
+                (
+                    "CARGO_HOME",
+                    Some(td.path().join("empty-cargo-home").display().to_string()),
+                ),
+                ("CARGO_REGISTRY_TOKEN", None::<String>),
+                ("CARGO_REGISTRIES_CRATES_IO_TOKEN", None::<String>),
+            ],
+            || {
+                for policy in [
+                    crate::types::PublishPolicy::Balanced,
+                    crate::types::PublishPolicy::Fast,
+                ] {
+                    let mut opts = default_opts(PathBuf::from(".shipper"));
+                    opts.policy = policy;
+                    opts.strict_ownership = true;
+                    let effects = policy_effects(&opts);
+                    assert!(!effects.strict_ownership);
+                    assert!(require_strict_ownership_token(&effects, None).is_ok());
+                }
+
+                let mut skip_only = default_opts(PathBuf::from(".shipper"));
+                skip_only.skip_ownership_check = true;
+                skip_only.strict_ownership = false;
+                assert!(require_strict_ownership_token(&policy_effects(&skip_only), None).is_ok());
             },
         );
     }

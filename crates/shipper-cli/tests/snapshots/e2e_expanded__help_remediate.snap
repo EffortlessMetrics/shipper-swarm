@@ -72,7 +72,7 @@ Options:
           Skip owners/permissions preflight
 
       --strict-ownership
-          Fail preflight if ownership checks fail or if no token is available.
+          Require a registry token during strict-ownership preflight and before publish execution. Preflight also fails when ownership verification fails.
 
           Note: crates.io token scopes may not allow querying owners; this is best-effort.
 
