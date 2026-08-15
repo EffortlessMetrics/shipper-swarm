@@ -1053,7 +1053,9 @@ fn mark_publish_early_error(
     format: &str,
     classification: (&'static str, &'static str, ActionKind),
 ) -> anyhow::Error {
-    let rendered_error = shipper_output_sanitizer::redact_sensitive(&format_error(&error));
+    let rendered_error = shipper_output_sanitizer::redact_sensitive(&format_error(&error))
+        .trim_end()
+        .to_string();
     let (category, summary, action) = classification;
 
     PublishEarlyError {
