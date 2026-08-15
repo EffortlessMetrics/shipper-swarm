@@ -3580,6 +3580,7 @@ struct ResumeJsonReport<'a> {
     command: &'static str,
     execution_result: &'a ExecutionResult,
     safe_to_resume: bool,
+    outcome: ResumeOperatorOutcome,
     registry: String,
     plan_id: &'a str,
     state_dir: String,
@@ -3621,6 +3622,22 @@ struct PublishOperatorOutcome {
 
 #[derive(Debug, Serialize)]
 struct PublishSafeRerun {
+    value: bool,
+    reason: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ResumeOperatorOutcome {
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure_class: Option<&'static str>,
+    safe_to_resume: ResumeSafeToResume,
+    next_action: OperatorAction,
+    evidence: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ResumeSafeToResume {
     value: bool,
     reason: String,
 }
@@ -3701,8 +3718,12 @@ fn print_resume_output(
     state_dir: &Path,
     format: &str,
 ) -> Result<()> {
+    let counts = command_package_counts(receipt);
+    let evidence_state_dir = publish_evidence_state_dir(workspace_root, state_dir);
+    let outcome =
+        build_resume_operator_outcome(&receipt.execution_result, &counts, &evidence_state_dir);
     if format == "json" {
-        let report = build_resume_json_report(receipt, state_dir)?;
+        let report = build_resume_json_report(receipt, state_dir, &evidence_state_dir, outcome)?;
         let json = serde_json::to_string_pretty(&report)
             .context("failed to serialize resume JSON envelope")?;
         println!("{}", json);
@@ -3710,6 +3731,7 @@ fn print_resume_output(
     }
 
     print_receipt(receipt, workspace_root, state_dir, format);
+    print_resume_operator_outcome(&outcome);
     Ok(())
 }
 
@@ -3748,17 +3770,20 @@ fn build_publish_json_report<'a>(
 fn build_resume_json_report<'a>(
     receipt: &'a shipper_core::types::Receipt,
     state_dir: &Path,
+    evidence_state_dir: &Path,
+    outcome: ResumeOperatorOutcome,
 ) -> Result<ResumeJsonReport<'a>> {
-    let reconciled = reconciled_packages(state_dir)?;
+    let reconciled = reconciled_packages(evidence_state_dir)?;
     let packages = command_package_reports(receipt, &reconciled);
     let counts = command_package_counts(receipt);
-    let safe_to_resume = counts.failed == 0 && counts.ambiguous == 0;
+    let safe_to_resume = legacy_safe_to_resume(&counts);
 
     Ok(ResumeJsonReport {
         schema_version: "shipper.resume.v1",
         command: "resume",
         execution_result: &receipt.execution_result,
         safe_to_resume,
+        outcome,
         registry: receipt.registry.name.clone(),
         plan_id: &receipt.plan_id,
         state_dir: state_dir.display().to_string(),
@@ -3770,9 +3795,13 @@ fn build_resume_json_report<'a>(
         skipped: counts.skipped,
         next_package: counts.next_package,
         packages,
-        artifacts: command_json_artifacts(state_dir),
+        artifacts: command_json_artifacts_with_lookup(state_dir, evidence_state_dir),
         receipt,
     })
+}
+
+fn legacy_safe_to_resume(counts: &CommandJsonPackageCounts) -> bool {
+    counts.failed == 0 && counts.ambiguous == 0
 }
 
 fn command_package_counts(receipt: &shipper_core::types::Receipt) -> CommandJsonPackageCounts {
@@ -3914,6 +3943,92 @@ fn build_publish_operator_outcome(
     }
 }
 
+fn build_resume_operator_outcome(
+    result: &ExecutionResult,
+    counts: &CommandJsonPackageCounts,
+    state_dir: &Path,
+) -> ResumeOperatorOutcome {
+    let evidence = publish_outcome_evidence(state_dir);
+
+    let (failure_class, safe_to_resume, next_action, reason) = if counts.ambiguous > 0
+        || counts.ambiguous_failures > 0
+    {
+        (
+            Some("ambiguous"),
+            false,
+            OperatorAction::posture(
+                ActionKind::Reconcile,
+                "registry truth remains unknown; inspect reconciliation and event evidence before resuming",
+            ),
+            "registry truth remains unknown for at least one package",
+        )
+    } else if counts.uploaded > 0 {
+        (
+            Some("ambiguous"),
+            false,
+            OperatorAction::posture(
+                ActionKind::WaitForRegistry,
+                "an uploaded package has not reached verified registry visibility; inspect events and wait for registry truth",
+            ),
+            "at least one upload has not reached a verified terminal state",
+        )
+    } else if counts.permanent_failures > 0 {
+        (
+            Some("permanent"),
+            false,
+            OperatorAction::posture(
+                ActionKind::ResolveBlockers,
+                "resolve the permanent failure recorded in the receipt before resuming",
+            ),
+            "a permanent failure must be resolved before resume is safe",
+        )
+    } else if counts.retryable_failures > 0 || counts.pending > 0 {
+        (
+            counts.retryable_failures.gt(&0).then_some("retryable"),
+            true,
+            OperatorAction::posture(
+                ActionKind::Resume,
+                format!(
+                    "resume from the durable state at {} using the same workspace, manifest, configuration, and registry selection",
+                    state_dir.display()
+                ),
+            ),
+            "durable state identifies unfinished work that can continue through resume",
+        )
+    } else if matches!(result, ExecutionResult::Success) {
+        (
+            None,
+            true,
+            OperatorAction::posture(
+                ActionKind::NoneComplete,
+                "resume completed the publish run; retain the receipt and event evidence",
+            ),
+            "all packages reached a successful terminal state",
+        )
+    } else {
+        (
+            None,
+            false,
+            OperatorAction::posture(
+                ActionKind::StopAndInvestigate,
+                "the aggregate result and package states disagree; inspect the retained evidence",
+            ),
+            "the completed receipt does not prove that resume is safe",
+        )
+    };
+
+    ResumeOperatorOutcome {
+        status: execution_result_name(result),
+        failure_class,
+        safe_to_resume: ResumeSafeToResume {
+            value: safe_to_resume,
+            reason: reason.to_string(),
+        },
+        next_action,
+        evidence,
+    }
+}
+
 fn execution_result_name(result: &ExecutionResult) -> &'static str {
     match result {
         ExecutionResult::Success => "success",
@@ -3963,6 +4078,25 @@ fn print_publish_operator_outcome(outcome: &PublishOperatorOutcome) {
     println!("Evidence: {}", outcome.evidence.join(", "));
 }
 
+fn print_resume_operator_outcome(outcome: &ResumeOperatorOutcome) {
+    println!();
+    println!("Result: {}", outcome.status.replace('_', " "));
+    println!(
+        "Safe to resume: {} — {}",
+        if outcome.safe_to_resume.value {
+            "yes"
+        } else {
+            "no"
+        },
+        outcome.safe_to_resume.reason
+    );
+    match outcome.next_action.command_line() {
+        Some(command) => println!("Next: {command} — {}", outcome.next_action.reason),
+        None => println!("Next: {}", outcome.next_action.reason),
+    }
+    println!("Evidence: {}", outcome.evidence.join(", "));
+}
+
 fn command_package_reports(
     receipt: &shipper_core::types::Receipt,
     reconciled: &BTreeSet<(String, String)>,
@@ -3978,10 +4112,6 @@ fn command_package_reports(
             reconciled: reconciled.contains(&(package.name.clone(), package.version.clone())),
         })
         .collect()
-}
-
-fn command_json_artifacts(state_dir: &Path) -> CommandJsonArtifacts {
-    command_json_artifacts_with_lookup(state_dir, state_dir)
 }
 
 fn command_json_artifacts_with_lookup(
@@ -5720,6 +5850,165 @@ mod tests {
 
         assert!(outcome.next_action.command.is_empty());
         assert!(outcome.next_action.reason.contains("custom-state"));
+    }
+
+    #[test]
+    fn resume_outcome_mapping_fails_closed_and_preserves_resume_contract() -> Result<()> {
+        use ExecutionResult::{CompleteFailure, PartialFailure, Success};
+
+        struct Case {
+            name: &'static str,
+            result: ExecutionResult,
+            counts: CommandJsonPackageCounts,
+            action: ActionKind,
+            safe_to_resume: bool,
+            failure_class: Option<&'static str>,
+        }
+
+        let counts = |pending,
+                      failed,
+                      ambiguous,
+                      uploaded,
+                      retryable_failures,
+                      permanent_failures,
+                      ambiguous_failures| CommandJsonPackageCounts {
+            pending,
+            failed,
+            ambiguous,
+            uploaded,
+            retryable_failures,
+            permanent_failures,
+            ambiguous_failures,
+            ..CommandJsonPackageCounts::default()
+        };
+
+        let cases = [
+            Case {
+                name: "success is terminal",
+                result: Success,
+                counts: counts(0, 0, 0, 0, 0, 0, 0),
+                action: ActionKind::NoneComplete,
+                safe_to_resume: true,
+                failure_class: None,
+            },
+            Case {
+                name: "pending state resumes",
+                result: PartialFailure,
+                counts: counts(1, 0, 0, 0, 0, 0, 0),
+                action: ActionKind::Resume,
+                safe_to_resume: true,
+                failure_class: None,
+            },
+            Case {
+                name: "retryable failure resumes",
+                result: PartialFailure,
+                counts: counts(0, 1, 0, 0, 1, 0, 0),
+                action: ActionKind::Resume,
+                safe_to_resume: true,
+                failure_class: Some("retryable"),
+            },
+            Case {
+                name: "permanent failure requires repair",
+                result: CompleteFailure,
+                counts: counts(0, 1, 0, 0, 0, 1, 0),
+                action: ActionKind::ResolveBlockers,
+                safe_to_resume: false,
+                failure_class: Some("permanent"),
+            },
+            Case {
+                name: "ambiguous package requires reconciliation",
+                result: PartialFailure,
+                counts: counts(0, 0, 1, 0, 0, 0, 0),
+                action: ActionKind::Reconcile,
+                safe_to_resume: false,
+                failure_class: Some("ambiguous"),
+            },
+            Case {
+                name: "ambiguous failure requires reconciliation",
+                result: PartialFailure,
+                counts: counts(0, 1, 0, 0, 0, 0, 1),
+                action: ActionKind::Reconcile,
+                safe_to_resume: false,
+                failure_class: Some("ambiguous"),
+            },
+            Case {
+                name: "uploaded package waits for registry truth",
+                result: PartialFailure,
+                counts: counts(0, 0, 0, 1, 0, 0, 0),
+                action: ActionKind::WaitForRegistry,
+                safe_to_resume: false,
+                failure_class: Some("ambiguous"),
+            },
+            Case {
+                name: "result and terminal states disagree",
+                result: CompleteFailure,
+                counts: counts(0, 0, 0, 0, 0, 0, 0),
+                action: ActionKind::StopAndInvestigate,
+                safe_to_resume: false,
+                failure_class: None,
+            },
+        ];
+
+        for case in cases {
+            let outcome = build_resume_operator_outcome(
+                &case.result,
+                &case.counts,
+                Path::new("custom-state"),
+            );
+            anyhow::ensure!(
+                outcome.next_action.kind == case.action,
+                "{}: unexpected action",
+                case.name
+            );
+            anyhow::ensure!(
+                outcome.safe_to_resume.value == case.safe_to_resume,
+                "{}: unexpected resume posture",
+                case.name
+            );
+            anyhow::ensure!(
+                outcome.failure_class == case.failure_class,
+                "{}: unexpected failure class",
+                case.name
+            );
+            anyhow::ensure!(
+                outcome.next_action.command.is_empty(),
+                "{}: resume outcome fabricated a command",
+                case.name
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn resume_legacy_and_typed_safety_preserve_intentional_compatibility_divergence() -> Result<()>
+    {
+        let retryable = CommandJsonPackageCounts {
+            failed: 1,
+            retryable_failures: 1,
+            ..CommandJsonPackageCounts::default()
+        };
+        let retryable_outcome = build_resume_operator_outcome(
+            &ExecutionResult::PartialFailure,
+            &retryable,
+            Path::new("state"),
+        );
+        anyhow::ensure!(!legacy_safe_to_resume(&retryable));
+        anyhow::ensure!(retryable_outcome.safe_to_resume.value);
+
+        let uploaded = CommandJsonPackageCounts {
+            uploaded: 1,
+            ..CommandJsonPackageCounts::default()
+        };
+        let uploaded_outcome = build_resume_operator_outcome(
+            &ExecutionResult::PartialFailure,
+            &uploaded,
+            Path::new("state"),
+        );
+        anyhow::ensure!(legacy_safe_to_resume(&uploaded));
+        anyhow::ensure!(!uploaded_outcome.safe_to_resume.value);
+
+        Ok(())
     }
 
     #[test]

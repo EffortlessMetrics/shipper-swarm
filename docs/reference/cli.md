@@ -87,6 +87,13 @@ evidence for each targeted registry.
 - `--force-resume` — resume even if the computed plan differs from the state file (advanced; can cause duplicate publish attempts if misused)
 - `--resume-from <crate>` — start from a specific crate
 
+Completed resume output ends with one typed operator outcome. Human output
+renders `Result`, `Safe to resume`, `Next`, and retained `Evidence`; JSON adds
+the same object at `shipper.resume.v1.outcome` while preserving the existing
+top-level fields. Ambiguous registry truth stops for reconciliation, uploaded
+work waits for registry visibility, permanent failures require repair, and
+only durable pending or retryable work recommends resume.
+
 ### Parallel
 
 - `--parallel`, `--max-concurrent <N>` — parallelize within dependency levels
