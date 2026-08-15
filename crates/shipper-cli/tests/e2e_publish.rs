@@ -222,10 +222,18 @@ fn assert_publish_early_error_json(
 }
 
 fn assert_secret_absent_from_output_and_state(output: &std::process::Output, state_dir: &Path) {
+    assert_sentinel_absent_from_output_and_state(output, state_dir, "EARLY_ERROR_SECRET");
+}
+
+fn assert_sentinel_absent_from_output_and_state(
+    output: &std::process::Output,
+    state_dir: &Path,
+    sentinel: &str,
+) {
     for (surface, bytes) in [("stdout", &output.stdout), ("stderr", &output.stderr)] {
         let rendered = String::from_utf8_lossy(bytes);
         assert!(
-            !rendered.contains("EARLY_ERROR_SECRET"),
+            !rendered.contains(sentinel),
             "secret leaked in {surface}: {rendered}"
         );
     }
@@ -247,7 +255,7 @@ fn assert_secret_absent_from_output_and_state(output: &std::process::Output, sta
             if matches!(name, "state.json" | "events.jsonl" | "receipt.json") {
                 let contents = fs::read(&entry_path).expect("read retained evidence");
                 assert!(
-                    !String::from_utf8_lossy(&contents).contains("EARLY_ERROR_SECRET"),
+                    !String::from_utf8_lossy(&contents).contains(sentinel),
                     "secret leaked in {}",
                     entry_path.display()
                 );
@@ -779,6 +787,126 @@ fn completed_partial_publish_keeps_completed_json_contract_and_exit_two() {
     assert!(state_dir.join("events.jsonl").exists());
     assert!(state_dir.join("receipt.json").exists());
     assert_secret_absent_from_output_and_state(&output, &state_dir);
+}
+
+#[test]
+fn multi_registry_later_success_does_not_mask_earlier_partial_result() {
+    const SECRET: &str = "MULTI_REGISTRY_OUTCOME_SECRET";
+
+    let td = tempdir().expect("tempdir");
+    create_single_crate_workspace(td.path());
+    let (new_path, real_cargo, fake_cargo) = setup_fake_cargo(td.path());
+    let alpha = spawn_registry(vec![404], 1);
+    let beta = spawn_registry(vec![200], 1);
+    let config = td.path().join("multi-registry.toml");
+    write_file(
+        &config,
+        &format!(
+            r#"
+schema_version = "shipper.config.v1"
+
+[[registries.registries]]
+name = "alpha"
+api_base = "{alpha}"
+index_base = "{alpha}"
+
+[[registries.registries]]
+name = "beta"
+api_base = "{beta}"
+index_base = "{beta}"
+"#,
+            alpha = alpha.base_url,
+            beta = beta.base_url,
+        ),
+    );
+
+    let state_dir = td.path().join("state-multi-registry-outcome");
+    let output = loopback_shipper_cmd()
+        .timeout(Duration::from_secs(20))
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--config")
+        .arg(&config)
+        .arg("--registries")
+        .arg("alpha,beta")
+        .arg("--allow-dirty")
+        .arg("--skip-ownership-check")
+        .arg("--verify-timeout")
+        .arg("0ms")
+        .arg("--verify-poll")
+        .arg("0ms")
+        .arg("--max-attempts")
+        .arg("0")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("publish")
+        .env("PATH", &new_path)
+        .env("REAL_CARGO", &real_cargo)
+        .env("SHIPPER_CARGO_BIN", &fake_cargo)
+        .env("CARGO_REGISTRY_TOKEN", SECRET)
+        .assert()
+        .get_output()
+        .clone();
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "the later successful registry must not mask alpha's partial result"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let alpha_heading = stdout
+        .find("Publishing to registry: alpha")
+        .expect("alpha heading");
+    let alpha_result = stdout
+        .find("Result: partial failure")
+        .expect("alpha partial result");
+    let beta_heading = stdout
+        .find("Publishing to registry: beta")
+        .expect("beta heading");
+    let beta_result = stdout
+        .rfind("Result: success")
+        .expect("beta success result");
+    assert!(
+        alpha_heading < alpha_result && alpha_result < beta_heading && beta_heading < beta_result,
+        "registry headings and results must retain dispatcher order: {stdout}"
+    );
+
+    for (registry, expected_result, expected_state) in [
+        ("alpha", "partial_failure", "pending"),
+        ("beta", "success", "skipped"),
+    ] {
+        let registry_state = state_dir.join(registry);
+        for artifact in ["state.json", "events.jsonl", "receipt.json"] {
+            assert!(
+                registry_state.join(artifact).exists(),
+                "{registry} must retain {artifact}"
+            );
+        }
+
+        let receipt: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(registry_state.join("receipt.json")).expect("read receipt"),
+        )
+        .expect("parse receipt");
+        assert_eq!(
+            receipt["execution_result"].as_str(),
+            Some(expected_result),
+            "{registry} receipt result"
+        );
+        assert_eq!(
+            receipt["packages"][0]["state"]["state"].as_str(),
+            Some(expected_state),
+            "{registry} package state"
+        );
+
+        let events =
+            fs::read_to_string(registry_state.join("events.jsonl")).expect("read registry events");
+        assert!(events.contains(r#""type":"execution_finished""#));
+        assert!(events.contains(expected_result));
+    }
+
+    assert_sentinel_absent_from_output_and_state(&output, &state_dir, SECRET);
+    alpha.join();
+    beta.join();
 }
 
 #[test]
