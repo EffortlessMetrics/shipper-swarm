@@ -5,11 +5,14 @@
 //! failed publishes, and re-running publish when everything is already published.
 
 use std::fs;
+use std::io::{Read, Write};
+use std::net::TcpStream;
 use std::path::Path;
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
 
+use anyhow::{Context, Result, anyhow, bail};
 use assert_cmd::Command;
 use tempfile::tempdir;
 use tiny_http::{Header, Response, Server, StatusCode};
@@ -184,7 +187,7 @@ struct BoundedTestRegistry {
 }
 
 impl BoundedTestRegistry {
-    fn finish(self, timeout: Duration) -> Result<(), String> {
+    fn finish(self, timeout: Duration) -> Result<()> {
         let observed = match self.completed.recv_timeout(timeout) {
             Ok(observed) => observed,
             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -192,30 +195,30 @@ impl BoundedTestRegistry {
                 let observed = self
                     .handle
                     .join()
-                    .map_err(|_| "mock registry thread panicked after deadline".to_string())?;
-                return Err(format!(
+                    .map_err(|_| anyhow!("mock registry thread panicked after deadline"))?;
+                bail!(
                     "mock registry deadline elapsed: expected {} requests, observed {observed}",
                     self.expected_requests
-                ));
+                );
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return Err("mock registry completion channel disconnected".to_string());
+                bail!("mock registry completion channel disconnected");
             }
         };
         let joined = self
             .handle
             .join()
-            .map_err(|_| "mock registry thread panicked".to_string())?;
+            .map_err(|_| anyhow!("mock registry thread panicked"))?;
         if joined != observed {
-            return Err(format!(
+            bail!(
                 "mock registry completion mismatch: channel reported {observed}, thread returned {joined}"
-            ));
+            );
         }
         if observed != self.expected_requests {
-            return Err(format!(
+            bail!(
                 "mock registry request mismatch: expected {}, observed {observed}",
                 self.expected_requests
-            ));
+            );
         }
         Ok(())
     }
@@ -246,6 +249,16 @@ fn spawn_bounded_registry(statuses: Vec<u16>, expected_requests: usize) -> Bound
                 );
             req.respond(response).expect("respond");
         }
+        if let Ok(Some(request)) = worker_server.recv_timeout(Duration::from_millis(500)) {
+            observed += 1;
+            let status = statuses.last().copied().unwrap_or(404);
+            let response = Response::from_string("{}")
+                .with_status_code(StatusCode(status))
+                .with_header(
+                    Header::from_bytes("Content-Type", "application/json").expect("header"),
+                );
+            request.respond(response).expect("respond to extra request");
+        }
         let _ = completed_tx.send(observed);
         observed
     });
@@ -256,6 +269,27 @@ fn spawn_bounded_registry(statuses: Vec<u16>, expected_requests: usize) -> Bound
         completed,
         expected_requests,
     }
+}
+
+fn send_registry_request(base_url: &str) -> Result<()> {
+    let address = base_url
+        .strip_prefix("http://")
+        .context("mock registry URL must use http")?;
+    let mut stream = TcpStream::connect(address).context("connect to mock registry")?;
+    stream
+        .write_all(b"GET /api/v1/crates/demo/0.1.0 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .context("write mock registry request")?;
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .context("read mock registry response")?;
+    if !response.starts_with(b"HTTP/1.1 200") {
+        bail!(
+            "mock registry returned unexpected response: {}",
+            String::from_utf8_lossy(&response)
+        );
+    }
+    Ok(())
 }
 
 fn shipper_cmd() -> Command {
@@ -1006,21 +1040,40 @@ index_base = "{beta}"
         "the later successful registry must not mask alpha's partial result"
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.matches("Publishing to registry: alpha").count(),
+        1,
+        "alpha heading must be unique: {stdout}"
+    );
+    assert_eq!(
+        stdout.matches("Publishing to registry: beta").count(),
+        1,
+        "beta heading must be unique: {stdout}"
+    );
     let alpha_heading = stdout
         .find("Publishing to registry: alpha")
         .expect("alpha heading");
-    let alpha_result = stdout
-        .find("Result: partial failure")
-        .expect("alpha partial result");
     let beta_heading = stdout
         .find("Publishing to registry: beta")
         .expect("beta heading");
-    let beta_result = stdout
-        .rfind("Result: success")
-        .expect("beta success result");
+    assert!(alpha_heading < beta_heading, "registry order: {stdout}");
+    let alpha_section = &stdout[alpha_heading..beta_heading];
+    let beta_section = &stdout[beta_heading..];
     assert!(
-        alpha_heading < alpha_result && alpha_result < beta_heading && beta_heading < beta_result,
-        "registry headings and results must retain dispatcher order: {stdout}"
+        alpha_section.contains("Result: partial failure"),
+        "alpha section must report partial failure: {alpha_section}"
+    );
+    assert!(
+        !alpha_section.contains("Result: success"),
+        "alpha section must not report success: {alpha_section}"
+    );
+    assert!(
+        beta_section.contains("Result: success"),
+        "beta section must report success: {beta_section}"
+    );
+    assert!(
+        !beta_section.contains("Result: partial failure"),
+        "beta section must not report partial failure: {beta_section}"
     );
 
     for (registry, expected_result, expected_state) in [
@@ -1050,9 +1103,24 @@ fn bounded_registry_reports_a_missing_request_before_its_server_timeout() {
     let error = registry
         .finish(Duration::from_millis(50))
         .expect_err("missing request must fail the completion receipt");
+    let error = format!("{error:#}");
     assert!(error.contains("deadline elapsed"), "{error}");
     assert!(error.contains("expected 1 requests"), "{error}");
     assert!(error.contains("observed 0"), "{error}");
+}
+
+#[test]
+fn bounded_registry_reports_an_extra_request_after_its_expected_count() {
+    let registry = spawn_bounded_registry(vec![200], 1);
+    send_registry_request(&registry.base_url).expect("first registry request");
+    send_registry_request(&registry.base_url).expect("extra registry request");
+    let error = registry
+        .finish(Duration::from_secs(1))
+        .expect_err("extra request must fail the completion receipt");
+    let error = format!("{error:#}");
+    assert!(error.contains("request mismatch"), "{error}");
+    assert!(error.contains("expected 1"), "{error}");
+    assert!(error.contains("observed 2"), "{error}");
 }
 
 #[test]
