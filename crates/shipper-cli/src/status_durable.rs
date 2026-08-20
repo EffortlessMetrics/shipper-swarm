@@ -380,7 +380,7 @@ fn package_posture<'a>(states: impl Iterator<Item = &'a PackageState>) -> Packag
 
 fn action_for_posture(
     posture: PackagePosture,
-    configured_state_dir: &Path,
+    _configured_state_dir: &Path,
     terminal: bool,
 ) -> (SafeResumePosture, OperatorAction) {
     match posture {
@@ -405,15 +405,9 @@ fn action_for_posture(
                     "durable state identifies retryable or pending work and all identities match"
                         .to_string(),
             },
-            OperatorAction::command(
+            OperatorAction::posture(
                 ActionKind::Resume,
-                [
-                    "shipper".to_string(),
-                    "--state-dir".to_string(),
-                    configured_state_dir.display().to_string(),
-                    "resume".to_string(),
-                ],
-                "resume through the same configured state directory; resume will revalidate identity before publishing",
+                "resume is safe, but durable status omits a command because the complete manifest, config, registry, and state-directory invocation context is not encoded",
             ),
         ),
         PackagePosture::Complete if terminal => (
@@ -832,12 +826,9 @@ mod tests {
             DurableStatus::Interrupted,
             Some(true),
             ActionKind::Resume,
-            true,
+            false,
         )?;
-        ensure!(
-            interrupted.next_action.command
-                == ["shipper", "--state-dir", ".operator-state", "resume"]
-        );
+        ensure!(interrupted.next_action.command.is_empty());
         assert_posture(
             &classify(
                 &plan,

@@ -418,6 +418,43 @@ fn durable_status_conflicts_with_watch_before_evidence_or_network_access() -> Re
 }
 
 #[test]
+fn durable_status_rejects_multi_registry_selectors_before_evidence_reads() -> Result<()> {
+    let td = tempdir()?;
+    create_simple_workspace(td.path());
+    let state_dir = td.path().join("sentinel-state");
+    write_file(&state_dir.join("events.jsonl"), "not-json\n");
+
+    for selector in [["--registries", "reg-a,reg-b"], ["--all-registries", ""]] {
+        let mut command = loopback_shipper_cmd();
+        command
+            .timeout(Duration::from_secs(20))
+            .current_dir(td.path())
+            .arg("--manifest-path")
+            .arg(td.path().join("Cargo.toml"))
+            .arg("--api-base")
+            .arg("http://127.0.0.1:9")
+            .arg("--state-dir")
+            .arg(&state_dir)
+            .arg(selector[0]);
+        if !selector[1].is_empty() {
+            command.arg(selector[1]);
+        }
+        let output = command.arg("status").arg("--durable").output()?;
+        anyhow::ensure!(output.status.code() == Some(2), "expected Clap exit 2");
+        anyhow::ensure!(output.stdout.is_empty(), "parser failure wrote stdout");
+        anyhow::ensure!(
+            String::from_utf8(output.stderr)?.contains("cannot be used with"),
+            "parser did not report the selector conflict"
+        );
+        anyhow::ensure!(
+            fs::read_to_string(state_dir.join("events.jsonl"))? == "not-json\n",
+            "parser failure touched durable evidence"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn status_rejects_loopback_without_explicit_opt_in() {
     let td = tempdir().expect("tempdir");
     create_simple_workspace(td.path());

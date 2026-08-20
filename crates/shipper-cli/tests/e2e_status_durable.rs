@@ -290,10 +290,7 @@ fn assert_pair(
     ensure!(value["outcome"]["status"] == status);
     ensure!(value["outcome"]["next_action"]["kind"] == action);
     if action == "resume" {
-        ensure!(
-            value["outcome"]["next_action"]["command"]
-                == serde_json::json!(["shipper", "--state-dir", state_name, "resume"])
-        );
+        ensure!(value["outcome"]["next_action"].get("command").is_none());
         ensure!(value["outcome"]["safe_to_resume"]["value"] == true);
         ensure!(human_text.contains("Safe to resume: yes"));
     } else {

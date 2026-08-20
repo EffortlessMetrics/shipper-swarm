@@ -503,7 +503,10 @@ EXAMPLES:
         #[arg(long)]
         watch: bool,
         /// Interpret authoritative local run evidence without querying a registry.
-        #[arg(long, conflicts_with = "watch")]
+        #[arg(
+            long,
+            conflicts_with_all = ["watch", "registries", "all_registries"]
+        )]
         durable: bool,
     },
     /// Print environment and auth diagnostics.

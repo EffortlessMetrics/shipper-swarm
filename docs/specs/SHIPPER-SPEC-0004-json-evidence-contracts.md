@@ -97,12 +97,17 @@ for an intentionally excluded package/registry cross-product.
 Its `shipper.status.durable.v1` envelope derives a fail-closed operator posture
 from authoritative local events plus matching state, receipt, reconciliation,
 and affirmative liveness evidence. It does not query a registry or publish,
-and `publication_performed` is always false. A resume command is present only
-for matching unfinished evidence whose exact local process is proven absent
-and whose package posture is pending or retryable. Missing, corrupt,
-ambiguous, mismatched, live, or inconclusive evidence omits a resume command.
-The configured state-directory spelling is retained in output and commands;
-only evidence reads use the workspace-resolved path. This additive mode does
+and `publication_performed` is always false. Matching unfinished evidence
+whose exact local process is proven absent and whose package posture is
+pending or retryable may report `safe_to_resume: true`, but the action remains
+commandless because this envelope does not encode the complete manifest,
+config, registry, and state-directory invocation context needed for a replayable
+command. Missing, corrupt, ambiguous, mismatched, live, or inconclusive
+evidence also omits a resume command. The configured state-directory spelling
+is retained in output; only evidence reads use the workspace-resolved path.
+Durable mode rejects `--registries` and `--all-registries` at argument parsing
+time rather than inspecting an unrelated registry-specific state directory.
+This additive mode does
 not change `shipper.status.v1`, `shipper.status.watch.v1`, raw event JSONL, or
 direct versioned receipt rendering. When resolved runtime options enable state
 encryption, durable status uses the existing encrypted state and receipt
