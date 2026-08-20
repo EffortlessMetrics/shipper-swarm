@@ -48,6 +48,7 @@ use shipper_core::types::{
 
 mod doctor;
 mod output;
+mod status_durable;
 
 use crate::output::outcome::{ActionKind, OperatorAction};
 use crate::output::progress::ProgressReporter;
@@ -371,6 +372,22 @@ fn hide_args_from_help(command: Command, hidden_ids: &[&str]) -> Command {
     })
 }
 
+fn validate_cli_combinations(cli: &Cli) -> std::result::Result<(), clap::Error> {
+    let durable_status = matches!(&cli.cmd, Some(Commands::Status { durable: true, .. }));
+    if durable_status && (cli.registries.is_some() || cli.all_registries) {
+        let selector = if cli.registries.is_some() {
+            "--registries"
+        } else {
+            "--all-registries"
+        };
+        return Err(cli_command().error(
+            clap::error::ErrorKind::ArgumentConflict,
+            format!("the argument '--durable' cannot be used with '{selector}'"),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Print the deterministic publish plan (dependency-first ordering).
@@ -501,6 +518,9 @@ EXAMPLES:
         /// the last durable event, and the next scheduled wait/retry/poll.
         #[arg(long)]
         watch: bool,
+        /// Interpret authoritative local run evidence without querying a registry.
+        #[arg(long, conflicts_with = "watch")]
+        durable: bool,
     },
     /// Print environment and auth diagnostics.
     #[command(long_about = "\
@@ -1225,6 +1245,10 @@ pub fn run() -> Result<std::process::ExitCode> {
         return Ok(std::process::ExitCode::SUCCESS);
     }
 
+    if let Err(error) = validate_cli_combinations(&cli) {
+        error.exit();
+    }
+
     // Handle Config commands early (they don't need workspace plan)
     if let Some(Commands::Config(config_cmd)) = &cli.cmd {
         run_config_with_loopback(config_cmd.clone(), cli.allow_loopback)?;
@@ -1671,7 +1695,19 @@ pub fn run() -> Result<std::process::ExitCode> {
                 anyhow::bail!("rehearsal did not pass");
             }
         }
-        Commands::Status { watch } => {
+        Commands::Status { watch, durable } => {
+            if durable {
+                let state_dir = absolute_state_dir(&planned, &opts);
+                status_durable::run(
+                    &planned.plan,
+                    &planned.workspace_root,
+                    &opts.state_dir,
+                    &state_dir,
+                    &opts.encryption,
+                    &cli.format,
+                )?;
+                return Ok(std::process::ExitCode::SUCCESS);
+            }
             let target_registries = if opts.registries.is_empty() {
                 vec![planned.plan.registry.clone()]
             } else {
@@ -6409,6 +6445,39 @@ mod tests {
         assert_eq!(cli.format, "json");
     }
 
+    #[test]
+    fn durable_status_validation_rejects_both_multi_registry_selectors() -> Result<()> {
+        for args in [
+            ["shipper", "--registries", "a,b", "status", "--durable"].as_slice(),
+            ["shipper", "--all-registries", "status", "--durable"].as_slice(),
+        ] {
+            let matches = cli_command().try_get_matches_from(args)?;
+            let cli = Cli::from_arg_matches(&matches)?;
+            let error = validate_cli_combinations(&cli).err().ok_or_else(|| {
+                anyhow::anyhow!("multi-registry durable status validated: {args:?}")
+            })?;
+            anyhow::ensure!(
+                error.kind() == clap::error::ErrorKind::ArgumentConflict,
+                "expected argument conflict for {args:?}, got {:?}: {error}",
+                error.kind()
+            );
+        }
+
+        let singular_matches = cli_command().try_get_matches_from([
+            "shipper",
+            "--registry",
+            "private",
+            "status",
+            "--durable",
+        ])?;
+        let singular = Cli::from_arg_matches(&singular_matches)?;
+        anyhow::ensure!(
+            validate_cli_combinations(&singular).is_ok(),
+            "single-registry durable status must remain accepted"
+        );
+        Ok(())
+    }
+
     // #100 — `--preflight-only` on `shipper preflight` must parse into a
     // `fresh_audit=true` signal. This test pins the clap surface: the
     // flag is exposed on the preflight subcommand (and defaults to
@@ -6445,7 +6514,10 @@ mod tests {
     fn status_watch_flag_parses() {
         let cli = Cli::try_parse_from(["shipper", "status", "--watch"]).expect("parse status");
         match cli.cmd {
-            Some(Commands::Status { watch }) => assert!(watch),
+            Some(Commands::Status { watch, durable }) => {
+                assert!(watch);
+                assert!(!durable);
+            }
             other => panic!("expected Status, got {other:?}"),
         }
     }
@@ -6494,7 +6566,13 @@ mod tests {
         assert_eq!(cli.max_attempts, Some(2));
         assert!(cli.parallel);
         assert_eq!(cli.webhook_secret.as_deref(), Some("compatibility-value"));
-        assert!(matches!(cli.cmd, Some(Commands::Status { watch: false })));
+        assert!(matches!(
+            cli.cmd,
+            Some(Commands::Status {
+                watch: false,
+                durable: false
+            })
+        ));
     }
 
     #[test]

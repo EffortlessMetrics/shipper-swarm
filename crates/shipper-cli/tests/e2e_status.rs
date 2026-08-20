@@ -305,6 +305,164 @@ fn run_bounded_status(
 
 // ── status on a simple workspace ─────────────────────────────────────
 
+fn run_bounded_durable_status(
+    root: &Path,
+    registry: BoundedStatusRegistry,
+    format: Option<&str>,
+    secret: &str,
+) -> Result<std::process::Output> {
+    let mut command = loopback_shipper_cmd();
+    command
+        .timeout(Duration::from_secs(20))
+        .env("CARGO_REGISTRY_TOKEN", secret)
+        .current_dir(root)
+        .arg("--manifest-path")
+        .arg(root.join("Cargo.toml"))
+        .arg("--api-base")
+        .arg(&registry.base_url)
+        .arg("--state-dir")
+        .arg(".operator-state");
+    if let Some(format) = format {
+        command.arg("--format").arg(format);
+    }
+    command.arg("status").arg("--durable");
+    let output = command.output().context("run bounded durable status")?;
+    registry.finish(Duration::from_secs(2))?;
+    Ok(output)
+}
+
+#[test]
+fn durable_status_no_evidence_has_human_json_parity_without_registry_access() -> Result<()> {
+    const SECRET: &str = "DURABLE_STATUS_SECRET_SENTINEL";
+    let td = tempdir()?;
+    create_simple_workspace(td.path());
+    let state_dir = td.path().join(".operator-state");
+
+    let human_registry = spawn_bounded_status_registry(Vec::new(), 0)?;
+    let human = run_bounded_durable_status(td.path(), human_registry, None, SECRET)?;
+    anyhow::ensure!(
+        human.status.success(),
+        "human stderr: {}",
+        String::from_utf8_lossy(&human.stderr)
+    );
+    let human_stdout = String::from_utf8(human.stdout).context("human stdout utf8")?;
+    let human_stderr = String::from_utf8(human.stderr).context("human stderr utf8")?;
+    anyhow::ensure!(human_stdout.contains("Durable result: no durable evidence"));
+    anyhow::ensure!(human_stdout.contains("Publication performed: no"));
+    anyhow::ensure!(human_stdout.contains("Safe to resume: unknown"));
+    anyhow::ensure!(human_stdout.contains("Evidence: none"));
+    anyhow::ensure!(!human_stdout.contains("shipper --state-dir"));
+
+    let json_registry = spawn_bounded_status_registry(Vec::new(), 0)?;
+    let json = run_bounded_durable_status(td.path(), json_registry, Some("json"), SECRET)?;
+    anyhow::ensure!(
+        json.status.success(),
+        "json stderr: {}",
+        String::from_utf8_lossy(&json.stderr)
+    );
+    let envelope: serde_json::Value = serde_json::from_slice(&json.stdout)?;
+    anyhow::ensure!(envelope["schema_version"] == "shipper.status.durable.v1");
+    anyhow::ensure!(envelope["state_dir"] == ".operator-state");
+    anyhow::ensure!(envelope["outcome"]["status"] == "no_evidence");
+    anyhow::ensure!(envelope["outcome"]["publication_performed"] == false);
+    anyhow::ensure!(envelope["outcome"]["safe_to_resume"]["value"].is_null());
+    anyhow::ensure!(envelope["outcome"]["next_action"]["kind"] == "status");
+    anyhow::ensure!(envelope["outcome"]["next_action"].get("command").is_none());
+    anyhow::ensure!(
+        human_stdout.contains("no durable run exists to interpret")
+            && envelope["outcome"]["next_action"]["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("no durable run exists to interpret"))
+    );
+
+    let json_stderr = String::from_utf8(json.stderr).context("json stderr utf8")?;
+    for rendered in [
+        &human_stdout,
+        &human_stderr,
+        &json_stderr,
+        &envelope.to_string(),
+    ] {
+        anyhow::ensure!(
+            !rendered.contains(SECRET),
+            "secret leaked from durable status"
+        );
+    }
+    anyhow::ensure!(
+        !state_dir.exists(),
+        "read-only status created durable artifacts"
+    );
+    Ok(())
+}
+
+#[test]
+fn durable_status_conflicts_with_watch_before_evidence_or_network_access() -> Result<()> {
+    let td = tempdir()?;
+    create_simple_workspace(td.path());
+    let output = loopback_shipper_cmd()
+        .timeout(Duration::from_secs(20))
+        .current_dir(td.path())
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--api-base")
+        .arg("http://127.0.0.1:9")
+        .arg("status")
+        .arg("--watch")
+        .arg("--durable")
+        .output()?;
+    anyhow::ensure!(output.status.code() == Some(2), "expected Clap exit 2");
+    anyhow::ensure!(output.stdout.is_empty(), "parser failure wrote stdout");
+    let stderr = String::from_utf8(output.stderr)?;
+    anyhow::ensure!(stderr.contains("cannot be used with"));
+    anyhow::ensure!(!td.path().join(".shipper").exists());
+    Ok(())
+}
+
+#[test]
+fn durable_status_rejects_multi_registry_selectors_before_evidence_reads() -> Result<()> {
+    let td = tempdir()?;
+    create_simple_workspace(td.path());
+    let state_dir = td.path().join("sentinel-state");
+    write_file(&state_dir.join("events.jsonl"), "not-json\n");
+
+    for selector in [["--registries", "reg-a,reg-b"], ["--all-registries", ""]] {
+        let mut command = loopback_shipper_cmd();
+        command
+            .timeout(Duration::from_secs(20))
+            .current_dir(td.path())
+            .arg("--manifest-path")
+            .arg(td.path().join("Cargo.toml"))
+            .arg("--api-base")
+            .arg("http://127.0.0.1:9")
+            .arg("--state-dir")
+            .arg(&state_dir)
+            .arg(selector[0]);
+        if !selector[1].is_empty() {
+            command.arg(selector[1]);
+        }
+        let output = command.arg("status").arg("--durable").output()?;
+        anyhow::ensure!(
+            output.status.code() == Some(2),
+            "{}: expected Clap exit 2, got {:?}; stdout={:?}; stderr={:?}",
+            selector[0],
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        anyhow::ensure!(output.stdout.is_empty(), "parser failure wrote stdout");
+        let stderr = String::from_utf8(output.stderr)?;
+        anyhow::ensure!(
+            stderr.contains("cannot be used with"),
+            "{}: parser did not report the selector conflict; stderr={stderr:?}",
+            selector[0]
+        );
+        anyhow::ensure!(
+            fs::read_to_string(state_dir.join("events.jsonl"))? == "not-json\n",
+            "parser failure touched durable evidence"
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn status_rejects_loopback_without_explicit_opt_in() {
     let td = tempdir().expect("tempdir");
