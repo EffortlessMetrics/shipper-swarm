@@ -4831,7 +4831,7 @@ fn build_status_operator_outcome(registries: &[StatusRegistryReport]) -> StatusO
             StatusOutcomeStatus::AllPublished,
             OperatorAction::posture(
                 ActionKind::NoneComplete,
-                "all selected package versions are visible in every queried registry",
+                "every registry-eligible selected package version is visible in its effective target registry or registries",
             ),
         )
     } else if published == 0 {

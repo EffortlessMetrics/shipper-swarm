@@ -684,10 +684,11 @@ index_base = "{base}"
 
 #[test]
 fn status_multi_registry_reports_registry_specific_plan_identity() -> Result<()> {
+    const EXPECTED_REASON: &str = "every registry-eligible selected package version is visible in its effective target registry or registries";
     let temp = tempdir().context("create multi-registry status workspace")?;
     create_registry_restricted_workspace(temp.path());
-    let crates_io = spawn_bounded_status_registry(vec![200], 1)?;
-    let private = spawn_bounded_status_registry(vec![200, 200], 2)?;
+    let crates_io = spawn_bounded_status_registry(vec![200, 200], 2)?;
+    let private = spawn_bounded_status_registry(vec![200, 200, 200, 200], 4)?;
     let config = temp.path().join("multi-status.toml");
     write_file(
         &config,
@@ -722,10 +723,29 @@ index_base = "{private}"
         .arg("json")
         .arg("status");
     let output = command.output().context("run multi-registry status")?;
+    let mut human_command = loopback_shipper_cmd();
+    human_command
+        .timeout(Duration::from_secs(20))
+        .arg("--manifest-path")
+        .arg(temp.path().join("Cargo.toml"))
+        .arg("--config")
+        .arg(&config)
+        .arg("--registries")
+        .arg("crates-io,private-reg")
+        .arg("status");
+    let human_output = human_command
+        .output()
+        .context("run human multi-registry status")?;
     crates_io.finish(Duration::from_secs(2))?;
     private.finish(Duration::from_secs(2))?;
     anyhow::ensure!(output.status.code() == Some(0), "multi-registry exit");
+    anyhow::ensure!(
+        human_output.status.code() == Some(0),
+        "human multi-registry exit"
+    );
     let stdout = String::from_utf8(output.stdout).context("multi-registry JSON UTF-8")?;
+    let human_stdout =
+        String::from_utf8(human_output.stdout).context("multi-registry human UTF-8")?;
     let json: serde_json::Value =
         serde_json::from_str(&stdout).context("parse multi-registry status JSON")?;
     let crates_packages = json
@@ -745,6 +765,20 @@ index_base = "{private}"
     anyhow::ensure!(
         json.pointer("/registries/0/plan_id") != json.pointer("/registries/1/plan_id"),
         "registry-specific package sets require distinct plan identities"
+    );
+    anyhow::ensure!(
+        json.pointer("/outcome/next_action/reason")
+            .and_then(serde_json::Value::as_str)
+            == Some(EXPECTED_REASON),
+        "exact registry-eligible JSON reason"
+    );
+    anyhow::ensure!(
+        human_stdout
+            .lines()
+            .filter(|line| *line == format!("Next: {EXPECTED_REASON}"))
+            .count()
+            == 1,
+        "exact registry-eligible human reason"
     );
     Ok(())
 }

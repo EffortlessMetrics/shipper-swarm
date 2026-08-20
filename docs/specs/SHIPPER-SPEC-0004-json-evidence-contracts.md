@@ -88,7 +88,9 @@ surface. Non-watch status builds the package set independently for every
 effective registry so Cargo `package.publish` restrictions remain authoritative.
 Each registry report carries the `plan_id` for that exact registry/package
 plan; the compatibility-frozen top-level `plan_id` identifies the first
-effective registry.
+effective registry. The `all_published` reason is scoped to registry-eligible
+selected versions in their effective targets rather than claiming visibility
+for an intentionally excluded package/registry cross-product.
 The remediation command rows are command-owned envelopes with top-level
 planning fields plus `schema_version` and `command`. The remediation artifact
 row is durable dry-run evidence only; neither surface implies guarded live

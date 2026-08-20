@@ -8,4 +8,4 @@ demo@0.1.0: published
 
 Result: all published
 Publication performed: no
-Next: all selected package versions are visible in every queried registry
+Next: every registry-eligible selected package version is visible in its effective target registry or registries

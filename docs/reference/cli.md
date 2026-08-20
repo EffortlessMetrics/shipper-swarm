@@ -139,7 +139,10 @@ Package observations are planned separately for each effective registry, so a
 crate restricted with Cargo's `package.publish` allowlist is queried only for
 registries that may receive it. Each registry row carries its authoritative
 `plan_id`; the legacy top-level `plan_id` identifies the first effective
-registry and remains in its existing field position.
+registry and remains in its existing field position. Consequently,
+`all_published` means every registry-eligible selected version is visible in
+its effective target registry or registries; it does not claim that ineligible
+packages were queried everywhere.
 
 ### The publish / resume exit vocabulary
 
