@@ -606,6 +606,12 @@ fn write_report(report: &DurableStatusReport, format: &str) -> Result<()> {
 
     println!("Durable result: {}", report.outcome.status.human_label());
     println!("Publication performed: no");
+    if let Some(plan_id) = &report.outcome.plan_id {
+        println!("Plan ID: {plan_id}");
+    }
+    if let Some(result) = &report.outcome.execution_result {
+        println!("Execution result: {}", execution_result_label(result));
+    }
     let safety = match report.outcome.safe_to_resume.value {
         Some(true) => "yes",
         Some(false) => "no",
@@ -625,6 +631,14 @@ fn write_report(report: &DurableStatusReport, format: &str) -> Result<()> {
         println!("Evidence: {}", report.outcome.evidence.join(", "));
     }
     Ok(())
+}
+
+fn execution_result_label(result: &ExecutionResult) -> &'static str {
+    match result {
+        ExecutionResult::Success => "success",
+        ExecutionResult::PartialFailure => "partial_failure",
+        ExecutionResult::CompleteFailure => "complete_failure",
+    }
 }
 
 #[cfg(test)]

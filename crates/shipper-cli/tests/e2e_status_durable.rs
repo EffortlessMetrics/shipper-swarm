@@ -269,6 +269,8 @@ fn assert_pair(
     state_name: &str,
     status: &str,
     action: &str,
+    expected_plan_id: &str,
+    expected_execution_result: Option<&str>,
 ) -> Result<()> {
     let before = snapshot(root)?;
     let human = invoke(root, base_url, state_name, false)?;
@@ -289,6 +291,18 @@ fn assert_pair(
     ensure!(value["state_dir"] == state_name);
     ensure!(value["outcome"]["status"] == status);
     ensure!(value["outcome"]["next_action"]["kind"] == action);
+    ensure!(value["outcome"]["plan_id"] == expected_plan_id);
+    ensure!(human_text.contains(&format!("Plan ID: {expected_plan_id}")));
+    match expected_execution_result {
+        Some(result) => {
+            ensure!(value["outcome"]["execution_result"] == result);
+            ensure!(human_text.contains(&format!("Execution result: {result}")));
+        }
+        None => {
+            ensure!(value["outcome"].get("execution_result").is_none());
+            ensure!(!human_text.contains("Execution result:"));
+        }
+    }
     if action == "resume" {
         ensure!(value["outcome"]["next_action"].get("command").is_none());
         ensure!(value["outcome"]["safe_to_resume"]["value"] == true);
@@ -355,6 +369,8 @@ fn durable_status_process_matrix_is_fail_closed_and_side_effect_free() -> Result
         "terminal-state",
         "terminal",
         "none_complete",
+        &plan.plan_id,
+        Some("success"),
     )?;
     ensure!(
         snapshot(td.path())? == before,
@@ -385,7 +401,12 @@ fn durable_status_process_matrix_is_fail_closed_and_side_effect_free() -> Result
     ensure!(encrypted_json.status.success());
     let encrypted_value: serde_json::Value = serde_json::from_slice(&encrypted_json.stdout)?;
     ensure!(encrypted_value["outcome"]["status"] == "terminal");
-    ensure!(String::from_utf8(encrypted_human.stdout)?.contains("Durable result: terminal"));
+    ensure!(encrypted_value["outcome"]["plan_id"] == plan.plan_id);
+    ensure!(encrypted_value["outcome"]["execution_result"] == "success");
+    let encrypted_human = String::from_utf8(encrypted_human.stdout)?;
+    ensure!(encrypted_human.contains("Durable result: terminal"));
+    ensure!(encrypted_human.contains(&format!("Plan ID: {}", plan.plan_id)));
+    ensure!(encrypted_human.contains("Execution result: success"));
     ensure!(
         snapshot(td.path())? == encrypted_before,
         "encrypted status mutated artifacts"
@@ -401,6 +422,8 @@ fn durable_status_process_matrix_is_fail_closed_and_side_effect_free() -> Result
         "resumable-state",
         "interrupted",
         "resume",
+        &plan.plan_id,
+        None,
     )?;
 
     let ambiguous = td.path().join("ambiguous-state");
@@ -430,6 +453,8 @@ fn durable_status_process_matrix_is_fail_closed_and_side_effect_free() -> Result
         "ambiguous-state",
         "ambiguous",
         "reconcile",
+        &plan.plan_id,
+        None,
     )?;
 
     let stale_ambiguous = td.path().join("stale-ambiguous-state");
@@ -446,6 +471,8 @@ fn durable_status_process_matrix_is_fail_closed_and_side_effect_free() -> Result
         "stale-ambiguous-state",
         "evidence_disagreement",
         "stop_and_investigate",
+        &plan.plan_id,
+        None,
     )?;
 
     let mismatch = td.path().join("mismatch-state");
@@ -457,6 +484,8 @@ fn durable_status_process_matrix_is_fail_closed_and_side_effect_free() -> Result
         "mismatch-state",
         "identity_mismatch",
         "stop_and_investigate",
+        "other-plan",
+        None,
     )?;
 
     let disagreement = td.path().join("disagreement-state");
@@ -477,6 +506,8 @@ fn durable_status_process_matrix_is_fail_closed_and_side_effect_free() -> Result
         "disagreement-state",
         "evidence_disagreement",
         "stop_and_investigate",
+        &plan.plan_id,
+        Some("partial_failure"),
     )?;
 
     let live = td.path().join("live-state");
@@ -484,7 +515,15 @@ fn durable_status_process_matrix_is_fail_closed_and_side_effect_free() -> Result
     save_state(&live, &pending_state(&plan, PackageState::Pending))?;
     let live_lock = LockFile::acquire(&live, Some(td.path()))?;
     live_lock.set_plan_id(&plan.plan_id)?;
-    assert_pair(td.path(), &base_url, "live-state", "live", "status")?;
+    assert_pair(
+        td.path(),
+        &base_url,
+        "live-state",
+        "live",
+        "status",
+        &plan.plan_id,
+        None,
+    )?;
     live_lock.release()?;
 
     let corrupt = td.path().join("corrupt-state");
