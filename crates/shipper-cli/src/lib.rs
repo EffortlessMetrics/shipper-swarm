@@ -1698,11 +1698,13 @@ pub fn run() -> Result<std::process::ExitCode> {
                     &opts,
                 )?);
             }
+            let outcome = build_status_operator_outcome(&registry_reports);
             let report = StatusReport {
                 schema_version: "shipper.status.v1",
                 plan_id: planned.plan.plan_id.clone(),
                 workspace_root: planned.workspace_root.display().to_string(),
                 registries: registry_reports,
+                outcome,
             };
             write_status_report(&report, &cli.format)?;
         }
@@ -2885,8 +2887,85 @@ fn plan_outcome_summary(outcome: &PlanOutcomeReport) -> &'static str {
 }
 
 #[cfg(test)]
-mod plan_outcome_tests {
+mod operator_outcome_tests {
     use super::*;
+
+    fn status_registry(exists: &[bool]) -> StatusRegistryReport {
+        StatusRegistryReport {
+            name: "test-registry".to_string(),
+            api_base: "https://registry.example.test".to_string(),
+            index_base: None,
+            packages: exists
+                .iter()
+                .enumerate()
+                .map(|(index, exists)| StatusPackageReport {
+                    name: format!("package-{index}"),
+                    version: "1.0.0".to_string(),
+                    status: if *exists { "published" } else { "missing" },
+                    exists: *exists,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn status_outcome_maps_all_registry_observations_without_vacuous_success() -> Result<()> {
+        struct Case {
+            name: &'static str,
+            registries: Vec<StatusRegistryReport>,
+            status: StatusOutcomeStatus,
+            action: ActionKind,
+        }
+
+        let cases = [
+            Case {
+                name: "all published across registries",
+                registries: vec![status_registry(&[true]), status_registry(&[true, true])],
+                status: StatusOutcomeStatus::AllPublished,
+                action: ActionKind::NoneComplete,
+            },
+            Case {
+                name: "mixed across registries",
+                registries: vec![status_registry(&[true]), status_registry(&[false])],
+                status: StatusOutcomeStatus::PartiallyPublished,
+                action: ActionKind::Preflight,
+            },
+            Case {
+                name: "all missing across registries",
+                registries: vec![status_registry(&[false, false]), status_registry(&[false])],
+                status: StatusOutcomeStatus::NotPublished,
+                action: ActionKind::Preflight,
+            },
+            Case {
+                name: "zero observations",
+                registries: vec![status_registry(&[])],
+                status: StatusOutcomeStatus::NoPublishablePackages,
+                action: ActionKind::Plan,
+            },
+        ];
+
+        for case in cases {
+            let outcome = build_status_operator_outcome(&case.registries);
+            anyhow::ensure!(outcome.status == case.status, "{}: status", case.name);
+            anyhow::ensure!(
+                outcome.next_action.kind == case.action,
+                "{}: action",
+                case.name
+            );
+            anyhow::ensure!(
+                outcome.next_action.command.is_empty(),
+                "{}: action must not fabricate a command",
+                case.name
+            );
+            anyhow::ensure!(
+                !outcome.publication_performed,
+                "{}: read-only status cannot claim publication",
+                case.name
+            );
+        }
+
+        Ok(())
+    }
 
     #[test]
     fn publishable_plan_points_to_context_preserving_preflight() {
@@ -4634,6 +4713,34 @@ struct StatusReport {
     plan_id: String,
     workspace_root: String,
     registries: Vec<StatusRegistryReport>,
+    outcome: StatusOperatorOutcome,
+}
+
+#[derive(Debug, Serialize)]
+struct StatusOperatorOutcome {
+    status: StatusOutcomeStatus,
+    publication_performed: bool,
+    next_action: OperatorAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum StatusOutcomeStatus {
+    AllPublished,
+    PartiallyPublished,
+    NotPublished,
+    NoPublishablePackages,
+}
+
+impl StatusOutcomeStatus {
+    fn human_label(self) -> &'static str {
+        match self {
+            Self::AllPublished => "all published",
+            Self::PartiallyPublished => "partially published",
+            Self::NotPublished => "not published",
+            Self::NoPublishablePackages => "no publishable packages",
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -4685,6 +4792,58 @@ fn build_status_registry_report(
     })
 }
 
+fn build_status_operator_outcome(registries: &[StatusRegistryReport]) -> StatusOperatorOutcome {
+    let observed = registries
+        .iter()
+        .map(|registry| registry.packages.len())
+        .sum::<usize>();
+    let published = registries
+        .iter()
+        .flat_map(|registry| &registry.packages)
+        .filter(|package| package.exists)
+        .count();
+
+    let (status, next_action) = if observed == 0 {
+        (
+            StatusOutcomeStatus::NoPublishablePackages,
+            OperatorAction::posture(
+                ActionKind::Plan,
+                "review the plan and package selection; status observed no publishable packages",
+            ),
+        )
+    } else if published == observed {
+        (
+            StatusOutcomeStatus::AllPublished,
+            OperatorAction::posture(
+                ActionKind::NoneComplete,
+                "all selected package versions are visible in every queried registry",
+            ),
+        )
+    } else if published == 0 {
+        (
+            StatusOutcomeStatus::NotPublished,
+            OperatorAction::posture(
+                ActionKind::Preflight,
+                "run preflight in the same workspace and registry context before publishing",
+            ),
+        )
+    } else {
+        (
+            StatusOutcomeStatus::PartiallyPublished,
+            OperatorAction::posture(
+                ActionKind::Preflight,
+                "some selected package versions are missing; run preflight in the same workspace and registry context before publishing",
+            ),
+        )
+    };
+
+    StatusOperatorOutcome {
+        status,
+        publication_performed: false,
+        next_action,
+    }
+}
+
 fn write_status_report(report: &StatusReport, format: &str) -> Result<()> {
     if format == "json" {
         let json = serde_json::to_string_pretty(report).context("serialize status report")?;
@@ -4709,6 +4868,14 @@ fn write_status_report(report: &StatusReport, format: &str) -> Result<()> {
         for package in &registry.packages {
             println!("{}@{}: {}", package.name, package.version, package.status);
         }
+    }
+
+    println!();
+    println!("Result: {}", report.outcome.status.human_label());
+    println!("Publication performed: no");
+    match report.outcome.next_action.command_line() {
+        Some(command) => println!("Next: {command} — {}", report.outcome.next_action.reason),
+        None => println!("Next: {}", report.outcome.next_action.reason),
     }
 
     Ok(())

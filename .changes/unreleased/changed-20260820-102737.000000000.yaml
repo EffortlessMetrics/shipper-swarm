@@ -1,0 +1,7 @@
+kind: changed
+body: Add a typed, read-only outcome to non-watch status JSON and matching human Result and Next guidance without claiming publication safety or durable evidence.
+time: 2026-08-20T10:27:37Z
+custom:
+  Audience: Operators
+  Importance: Detailed
+  PR: 0

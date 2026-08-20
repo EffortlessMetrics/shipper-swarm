@@ -77,6 +77,14 @@ object derived from the completed receipt. Its typed safe-to-resume posture,
 next action, and evidence references drive the human footer as well. The legacy
 top-level `safe_to_resume` predicate remains compatibility-frozen; consumers
 that need the evidence-based posture should read `outcome.safe_to_resume`.
+The non-watch `shipper.status.v1` envelope retains its registry/package fields
+and adds an `outcome` derived only from the completed registry observations.
+That outcome records whether all, some, none, or zero publishable package
+versions were observed, states `publication_performed: false`, and provides one
+commandless next-action posture. It deliberately omits safe-rerun and durable
+evidence claims because non-watch status does not load authoritative run
+events, state, or receipts. `shipper.status.watch.v1` is a separate unchanged
+surface.
 The remediation command rows are command-owned envelopes with top-level
 planning fields plus `schema_version` and `command`. The remediation artifact
 row is durable dry-run evidence only; neither surface implies guarded live

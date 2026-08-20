@@ -1,7 +1,10 @@
 use std::fs;
 use std::path::Path;
+use std::sync::{Arc, mpsc};
 use std::thread;
+use std::time::Duration;
 
+use anyhow::{Context, Result, anyhow, bail};
 use assert_cmd::Command;
 use predicates::str::contains;
 use tempfile::tempdir;
@@ -61,6 +64,96 @@ fn spawn_registry(statuses: Vec<u16>, expected_requests: usize) -> TestRegistry 
         }
     });
     TestRegistry { base_url, handle }
+}
+
+struct BoundedStatusRegistry {
+    base_url: String,
+    server: Arc<Server>,
+    handle: thread::JoinHandle<usize>,
+    completed: mpsc::Receiver<usize>,
+    expected_requests: usize,
+}
+
+impl BoundedStatusRegistry {
+    fn finish(self, timeout: Duration) -> Result<()> {
+        let observed = match self.completed.recv_timeout(timeout) {
+            Ok(observed) => observed,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                self.server.unblock();
+                let observed = self
+                    .handle
+                    .join()
+                    .map_err(|_| anyhow!("status registry thread panicked after deadline"))?;
+                bail!(
+                    "status registry deadline elapsed: expected {} requests, observed {observed}",
+                    self.expected_requests
+                );
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                bail!("status registry completion channel disconnected");
+            }
+        };
+        let joined = self
+            .handle
+            .join()
+            .map_err(|_| anyhow!("status registry thread panicked"))?;
+        if joined != observed {
+            bail!(
+                "status registry completion mismatch: channel reported {observed}, thread returned {joined}"
+            );
+        }
+        if observed != self.expected_requests {
+            bail!(
+                "status registry request mismatch: expected {}, observed {observed}",
+                self.expected_requests
+            );
+        }
+        Ok(())
+    }
+}
+
+fn spawn_bounded_status_registry(
+    statuses: Vec<u16>,
+    expected_requests: usize,
+) -> Result<BoundedStatusRegistry> {
+    let server =
+        Arc::new(Server::http("127.0.0.1:0").map_err(|_| anyhow!("bind bounded status registry"))?);
+    let base_url = format!("http://{}", server.server_addr());
+    let worker_server = Arc::clone(&server);
+    let (completed_tx, completed) = mpsc::sync_channel(1);
+    let handle = thread::spawn(move || {
+        let mut observed = 0;
+        for idx in 0..expected_requests {
+            let request = match worker_server.recv_timeout(Duration::from_secs(20)) {
+                Ok(Some(request)) => request,
+                _ => break,
+            };
+            observed += 1;
+            let status = statuses
+                .get(idx)
+                .copied()
+                .or_else(|| statuses.last().copied())
+                .unwrap_or(404);
+            let response = Response::from_string("{}").with_status_code(StatusCode(status));
+            if request.respond(response).is_err() {
+                break;
+            }
+        }
+        if let Ok(Some(request)) = worker_server.recv_timeout(Duration::from_millis(250)) {
+            observed += 1;
+            let response = Response::from_string("{}").with_status_code(StatusCode(404));
+            let _ = request.respond(response);
+        }
+        let _ = completed_tx.send(observed);
+        observed
+    });
+    Ok(BoundedStatusRegistry {
+        base_url,
+        server,
+        handle,
+        completed,
+        expected_requests,
+    })
 }
 
 /// Create a simple workspace with a single crate.
@@ -141,6 +234,35 @@ mid-lib = { path = "../mid-lib" }
         &root.join("top-app/src/lib.rs"),
         "pub fn top() { mid_lib::mid(); }\n",
     );
+}
+
+fn run_bounded_status(
+    root: &Path,
+    state_dir: &Path,
+    statuses: Vec<u16>,
+    format: &str,
+    secret: &str,
+) -> Result<std::process::Output> {
+    let expected_requests = statuses.len();
+    let registry = spawn_bounded_status_registry(statuses, expected_requests)?;
+    let mut command = loopback_shipper_cmd();
+    command
+        .timeout(Duration::from_secs(20))
+        .env("CARGO_REGISTRY_TOKEN", secret)
+        .arg("--manifest-path")
+        .arg(root.join("Cargo.toml"))
+        .arg("--api-base")
+        .arg(&registry.base_url)
+        .arg("--state-dir")
+        .arg(state_dir)
+        .arg("--format")
+        .arg(format)
+        .arg("status");
+    let output = command.output();
+    let registry_result = registry.finish(Duration::from_secs(2));
+    let output = output.context("run bounded status process")?;
+    registry_result?;
+    Ok(output)
 }
 
 // ── status on a simple workspace ─────────────────────────────────────
@@ -396,6 +518,212 @@ fn status_json_format_produces_registry_report() {
     );
 
     registry.join();
+}
+
+#[test]
+fn status_completed_outcome_has_human_json_parity_without_side_effect_claims() -> Result<()> {
+    struct Case {
+        name: &'static str,
+        statuses: Vec<u16>,
+        expected_status: &'static str,
+        expected_action: &'static str,
+    }
+
+    let cases = [
+        Case {
+            name: "all-published",
+            statuses: vec![200, 200, 200],
+            expected_status: "all_published",
+            expected_action: "none_complete",
+        },
+        Case {
+            name: "partially-published",
+            statuses: vec![200, 404, 404],
+            expected_status: "partially_published",
+            expected_action: "preflight",
+        },
+        Case {
+            name: "not-published",
+            statuses: vec![404, 404, 404],
+            expected_status: "not_published",
+            expected_action: "preflight",
+        },
+    ];
+
+    for case in cases {
+        let temp = tempdir().context("create status parity workspace")?;
+        create_multi_crate_workspace(temp.path());
+        let secret = format!("status-secret-{}", case.name);
+        let human_state = temp.path().join("human-state");
+        let json_state = temp.path().join("json-state");
+        let human = run_bounded_status(
+            temp.path(),
+            &human_state,
+            case.statuses.clone(),
+            "text",
+            &secret,
+        )?;
+        let json_output =
+            run_bounded_status(temp.path(), &json_state, case.statuses, "json", &secret)?;
+
+        anyhow::ensure!(human.status.code() == Some(0), "{} human exit", case.name);
+        anyhow::ensure!(
+            json_output.status.code() == Some(0),
+            "{} JSON exit",
+            case.name
+        );
+        let human_stdout = String::from_utf8(human.stdout).context("human stdout UTF-8")?;
+        let human_stderr = String::from_utf8(human.stderr).context("human stderr UTF-8")?;
+        let json_stdout = String::from_utf8(json_output.stdout).context("JSON stdout UTF-8")?;
+        let json_stderr = String::from_utf8(json_output.stderr).context("JSON stderr UTF-8")?;
+        for stream in [&human_stdout, &human_stderr, &json_stdout, &json_stderr] {
+            anyhow::ensure!(
+                !stream.contains(&secret),
+                "{} leaked token sentinel",
+                case.name
+            );
+        }
+
+        let json: serde_json::Value =
+            serde_json::from_str(&json_stdout).context("parse status JSON")?;
+        let legacy_schema = json_stdout
+            .find("\"schema_version\"")
+            .context("schema key")?;
+        let legacy_plan = json_stdout.find("\"plan_id\"").context("plan key")?;
+        let legacy_workspace = json_stdout
+            .find("\"workspace_root\"")
+            .context("workspace key")?;
+        let legacy_registries = json_stdout
+            .find("\"registries\"")
+            .context("registries key")?;
+        let additive_outcome = json_stdout.find("\"outcome\"").context("outcome key")?;
+        anyhow::ensure!(
+            legacy_schema < legacy_plan
+                && legacy_plan < legacy_workspace
+                && legacy_workspace < legacy_registries
+                && legacy_registries < additive_outcome,
+            "{} legacy JSON field order",
+            case.name
+        );
+        anyhow::ensure!(
+            json["schema_version"] == "shipper.status.v1",
+            "legacy schema"
+        );
+        anyhow::ensure!(json.get("plan_id").is_some(), "legacy plan_id");
+        anyhow::ensure!(
+            json.get("workspace_root").is_some(),
+            "legacy workspace_root"
+        );
+        anyhow::ensure!(json.get("registries").is_some(), "legacy registries");
+        anyhow::ensure!(
+            json.pointer("/outcome/status")
+                .and_then(serde_json::Value::as_str)
+                == Some(case.expected_status),
+            "{} typed status",
+            case.name
+        );
+        anyhow::ensure!(
+            json.pointer("/outcome/publication_performed")
+                .and_then(serde_json::Value::as_bool)
+                == Some(false),
+            "{} side-effect posture",
+            case.name
+        );
+        anyhow::ensure!(
+            json.pointer("/outcome/next_action/kind")
+                .and_then(serde_json::Value::as_str)
+                == Some(case.expected_action),
+            "{} next action",
+            case.name
+        );
+        anyhow::ensure!(
+            json.pointer("/outcome/next_action/command").is_none(),
+            "{} fabricated command",
+            case.name
+        );
+        anyhow::ensure!(
+            json.pointer("/outcome/safe_to_rerun").is_none(),
+            "safety claim"
+        );
+        anyhow::ensure!(
+            json.pointer("/outcome/evidence").is_none(),
+            "evidence claim"
+        );
+
+        let reason = json
+            .pointer("/outcome/next_action/reason")
+            .and_then(serde_json::Value::as_str)
+            .context("typed next-action reason")?;
+        let expected_result = format!("Result: {}", case.expected_status.replace('_', " "));
+        anyhow::ensure!(
+            human_stdout
+                .lines()
+                .filter(|line| *line == expected_result)
+                .count()
+                == 1,
+            "{} human result identity",
+            case.name
+        );
+        anyhow::ensure!(
+            human_stdout.contains("Publication performed: no"),
+            "{} human side-effect posture",
+            case.name
+        );
+        anyhow::ensure!(
+            human_stdout.contains(&format!("Next: {reason}")),
+            "{} human/JSON reason parity",
+            case.name
+        );
+        anyhow::ensure!(
+            !human_stdout.contains("Safe to rerun:"),
+            "human safety claim"
+        );
+        anyhow::ensure!(!human_stdout.contains("Evidence:"), "human evidence claim");
+        anyhow::ensure!(
+            !human_state.exists(),
+            "{} human state side effect",
+            case.name
+        );
+        anyhow::ensure!(!json_state.exists(), "{} JSON state side effect", case.name);
+        anyhow::ensure!(
+            !temp.path().join(".shipper").exists(),
+            "{} default state side effect",
+            case.name
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn status_query_failure_has_no_completed_outcome_or_side_effects() -> Result<()> {
+    let temp = tempdir().context("create status failure workspace")?;
+    create_simple_workspace(temp.path());
+    let secret = "status-query-secret-sentinel";
+    let state_dir = temp.path().join("query-failure-state");
+    let output = run_bounded_status(temp.path(), &state_dir, vec![500], "json", secret)?;
+    anyhow::ensure!(output.status.code() == Some(1), "query failure exit");
+    let stdout = String::from_utf8(output.stdout).context("failure stdout UTF-8")?;
+    let stderr = String::from_utf8(output.stderr).context("failure stderr UTF-8")?;
+    anyhow::ensure!(stdout.trim().is_empty(), "query failure JSON stdout");
+    anyhow::ensure!(
+        !stdout.contains("Result:"),
+        "completed human outcome on stdout"
+    );
+    anyhow::ensure!(
+        !stderr.contains("Result:"),
+        "completed human outcome on stderr"
+    );
+    anyhow::ensure!(
+        !stdout.contains(secret) && !stderr.contains(secret),
+        "secret sentinel"
+    );
+    anyhow::ensure!(!state_dir.exists(), "query failure state side effect");
+    anyhow::ensure!(
+        !temp.path().join(".shipper").exists(),
+        "default state side effect"
+    );
+    Ok(())
 }
 
 #[test]
