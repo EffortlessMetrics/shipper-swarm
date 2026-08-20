@@ -4,7 +4,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use crate::types::ExecutionResult;
+use crate::types::{ExecutionResult, ExecutionState, ReconciliationReport};
 
 /// Why unfinished evidence could not prove whether its publisher is alive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,4 +44,20 @@ pub enum RunObservation {
 /// Read authoritative events and advisory lock evidence without modifying it.
 pub fn observe_run(state_dir: &Path, workspace_root: Option<&Path>) -> Result<RunObservation> {
     crate::state::run_observation::observe_run(state_dir, workspace_root)
+}
+
+/// Check nonterminal state and reconciliation evidence against authoritative events.
+pub fn unfinished_evidence_consistent(
+    events_path: &Path,
+    state: &ExecutionState,
+    reconciliation: Option<&ReconciliationReport>,
+) -> Result<bool> {
+    Ok(
+        crate::state::consistency::verify_unfinished_consistency(
+            events_path,
+            state,
+            reconciliation,
+        )
+        .is_ok(),
+    )
 }

@@ -10,7 +10,7 @@
 //!
 //! See [issue #93](https://github.com/EffortlessMetrics/shipper/issues/93).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -79,6 +79,57 @@ pub fn verify_events_state_consistency(
         in_events_only,
         in_state_only,
     })
+}
+
+/// Verify a nonterminal state and optional reconciliation report against the
+/// full authoritative event projection without requiring a completed receipt.
+pub(crate) fn verify_unfinished_consistency(
+    events_path: &Path,
+    state: &ExecutionState,
+    reconciliation_report: Option<&ReconciliationReport>,
+) -> Result<()> {
+    let event_log = EventLog::read_from_file(events_path).with_context(|| {
+        format!(
+            "failed to read event log for unfinished consistency check: {}",
+            events_path.display()
+        )
+    })?;
+    let rebuilt_state = rebuild_state_from_events(
+        events_path,
+        StateRebuildOptions::new(state.registry.clone()).with_fallback_plan_id(&state.plan_id),
+    )?;
+    let mut findings = Vec::new();
+    if rebuilt_state.plan_id != state.plan_id {
+        findings.push(format!(
+            "events plan_id {} does not match state plan_id {}",
+            rebuilt_state.plan_id, state.plan_id
+        ));
+    }
+    verify_state_matches_events(
+        state,
+        &rebuilt_state,
+        &trusted_resume_terminal_skips(&event_log),
+        legacy_attempt_metadata(&event_log),
+        &mut findings,
+    );
+    verify_reconciliation_evidence(
+        &event_log,
+        &state.plan_id,
+        reconciliation_report,
+        &mut findings,
+    );
+    if findings.is_empty() {
+        Ok(())
+    } else {
+        bail!(
+            "unfinished release evidence drift detected\n{}",
+            findings
+                .into_iter()
+                .map(|finding| format!("  - {finding}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    }
 }
 
 /// Render a human-readable summary of a drift report. Used by the Reporter
@@ -174,7 +225,12 @@ pub fn verify_finalization_consistency(
         &mut findings,
     );
     verify_receipt_matches_state(state, receipt, &mut findings);
-    verify_reconciliation_evidence(&event_log, receipt, reconciliation_report, &mut findings);
+    verify_reconciliation_evidence(
+        &event_log,
+        &receipt.plan_id,
+        reconciliation_report,
+        &mut findings,
+    );
 
     if findings.is_empty() {
         return Ok(());
@@ -419,16 +475,21 @@ fn verify_receipt_matches_state(
 
 fn verify_reconciliation_evidence(
     event_log: &EventLog,
-    receipt: &Receipt,
+    expected_plan_id: &str,
     reconciliation_report: Option<&ReconciliationReport>,
     findings: &mut Vec<String>,
 ) {
-    let reconciled_packages: BTreeSet<String> = event_log
+    let reconciled_outcomes: BTreeMap<String, _> = event_log
         .all_events()
         .iter()
-        .filter(|event| matches!(event.event_type, EventType::PublishReconciled { .. }))
-        .map(|event| event.package.clone())
+        .filter_map(|event| match &event.event_type {
+            EventType::PublishReconciled { outcome } => {
+                Some((event.package.clone(), outcome.clone()))
+            }
+            _ => None,
+        })
         .collect();
+    let reconciled_packages: BTreeSet<String> = reconciled_outcomes.keys().cloned().collect();
 
     if reconciled_packages.is_empty() {
         if reconciliation_report.is_some() {
@@ -448,10 +509,10 @@ fn verify_reconciliation_evidence(
         return;
     };
 
-    if report.plan_id != receipt.plan_id {
+    if report.plan_id != expected_plan_id {
         findings.push(format!(
-            "reconciliation plan_id {} does not match receipt plan_id {}",
-            report.plan_id, receipt.plan_id
+            "reconciliation plan_id {} does not match expected plan_id {}",
+            report.plan_id, expected_plan_id
         ));
     }
 
@@ -459,6 +520,11 @@ fn verify_reconciliation_evidence(
         .records
         .iter()
         .map(|record| record.package.clone())
+        .collect();
+    let report_outcomes: BTreeMap<_, _> = report
+        .records
+        .iter()
+        .map(|record| (record.package.as_str(), &record.outcome))
         .collect();
 
     for package in reconciled_packages.difference(&report_packages) {
@@ -470,6 +536,15 @@ fn verify_reconciliation_evidence(
         findings.push(format!(
             "{package} reconciliation drift: reconciliation.json has no matching event outcome"
         ));
+    }
+    for (package, event_outcome) in reconciled_outcomes {
+        if let Some(report_outcome) = report_outcomes.get(package.as_str())
+            && **report_outcome != event_outcome
+        {
+            findings.push(format!(
+                "{package} reconciliation drift: event and reconciliation.json outcomes differ"
+            ));
+        }
     }
 }
 
@@ -492,13 +567,13 @@ mod tests {
     use shipper_types::{
         AttemptDetail, EnvironmentFingerprint, ErrorClass, PackageEvidence, PackageProgress,
         PackageReceipt, PublishEvent, ReconciliationEvidenceKind, ReconciliationEvidenceSource,
-        ReconciliationOperatorAction, ReconciliationRecord, ReconciliationReport,
-        ReconciliationTrigger, Registry,
+        ReconciliationOperatorAction, ReconciliationOutcome, ReconciliationRecord,
+        ReconciliationReport, ReconciliationTrigger, Registry,
     };
     use tempfile::tempdir;
 
     use super::*;
-    use crate::state::events::{EVENTS_FILE, EventLog};
+    use crate::state::events::{EVENTS_FILE, EventLog, events_path};
 
     fn pkg_progress(name: &str, version: &str, state: PackageState) -> (String, PackageProgress) {
         let key = format!("{name}@{version}");
@@ -643,6 +718,96 @@ mod tests {
                 operator_action: ReconciliationOperatorAction::MarkPublishedContinue,
             }],
         }
+    }
+
+    #[test]
+    fn unfinished_consistency_requires_matching_state_and_reconciliation_outcomes() -> Result<()> {
+        let td = tempdir()?;
+        let unknown = ReconciliationOutcome::StillUnknown {
+            attempts: 1,
+            elapsed_ms: 10,
+            reason: "unknown".to_string(),
+        };
+        write_events(
+            td.path(),
+            vec![
+                plan_created_event(),
+                PublishEvent {
+                    timestamp: Utc::now(),
+                    event_type: EventType::ExecutionStarted,
+                    package: "all".to_string(),
+                },
+                PublishEvent {
+                    timestamp: Utc::now(),
+                    event_type: EventType::PackageUploaded,
+                    package: "a@1.0.0".to_string(),
+                },
+                PublishEvent {
+                    timestamp: Utc::now(),
+                    event_type: EventType::PublishReconciled {
+                        outcome: unknown.clone(),
+                    },
+                    package: "a@1.0.0".to_string(),
+                },
+            ],
+        );
+        let state = rebuild_state_from_events(
+            &events_path(td.path()),
+            StateRebuildOptions::new(Registry::crates_io()),
+        )?;
+        let mut report = reconciliation_report("a@1.0.0");
+        let record = report
+            .records
+            .get_mut(0)
+            .ok_or_else(|| anyhow::anyhow!("missing reconciliation record"))?;
+        record.outcome = unknown;
+        verify_unfinished_consistency(&events_path(td.path()), &state, Some(&report))?;
+
+        let record = report
+            .records
+            .get_mut(0)
+            .ok_or_else(|| anyhow::anyhow!("missing reconciliation record"))?;
+        record.outcome = ReconciliationOutcome::Published {
+            attempts: 1,
+            elapsed_ms: 10,
+        };
+        anyhow::ensure!(
+            verify_unfinished_consistency(&events_path(td.path()), &state, Some(&report)).is_err(),
+            "mismatched reconciliation outcome should fail consistency"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unfinished_consistency_rejects_uploaded_state_and_report_without_events() -> Result<()> {
+        let td = tempdir()?;
+        write_events(
+            td.path(),
+            vec![
+                plan_created_event(),
+                PublishEvent {
+                    timestamp: Utc::now(),
+                    event_type: EventType::ExecutionStarted,
+                    package: "all".to_string(),
+                },
+            ],
+        );
+        let state = make_state(vec![pkg_progress("a", "1.0.0", PackageState::Uploaded)]);
+        let mut report = reconciliation_report("a@1.0.0");
+        let record = report
+            .records
+            .get_mut(0)
+            .ok_or_else(|| anyhow::anyhow!("missing reconciliation record"))?;
+        record.outcome = ReconciliationOutcome::StillUnknown {
+            attempts: 1,
+            elapsed_ms: 10,
+            reason: "unknown".to_string(),
+        };
+        anyhow::ensure!(
+            verify_unfinished_consistency(&events_path(td.path()), &state, Some(&report)).is_err(),
+            "state and reconciliation evidence absent from events should fail consistency"
+        );
+        Ok(())
     }
 
     #[test]

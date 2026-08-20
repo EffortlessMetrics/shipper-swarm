@@ -195,11 +195,7 @@ fn write_still_unknown(state_dir: &Path, plan: &ReleasePlan) -> Result<()> {
             trigger: ReconciliationTrigger::ResumeAmbiguousState,
             method: None,
             cargo_exit_class: Some(ErrorClass::Ambiguous),
-            outcome: ReconciliationOutcome::StillUnknown {
-                attempts: 1,
-                elapsed_ms: 1,
-                reason: "bounded fixture remains unknown".into(),
-            },
+            outcome: still_unknown_outcome(),
             operator_action: ReconciliationOperatorAction::OperatorActionRequired,
         }],
     };
@@ -207,6 +203,14 @@ fn write_still_unknown(state_dir: &Path, plan: &ReleasePlan) -> Result<()> {
         &state_dir.join(RECONCILIATION_FILE),
         serde_json::to_vec_pretty(&report)?,
     )
+}
+
+fn still_unknown_outcome() -> ReconciliationOutcome {
+    ReconciliationOutcome::StillUnknown {
+        attempts: 1,
+        elapsed_ms: 1,
+        reason: "bounded fixture remains unknown".into(),
+    }
 }
 
 fn write_not_live_lock(state_dir: &Path, root: &Path, plan_id: &str) -> Result<()> {
@@ -403,8 +407,24 @@ fn durable_status_process_matrix_is_fail_closed_and_side_effect_free() -> Result
     )?;
 
     let ambiguous = td.path().join("ambiguous-state");
-    write_events(&ambiguous, &plan.plan_id, [])?;
-    save_state(&ambiguous, &pending_state(&plan, PackageState::Uploaded))?;
+    write_events(
+        &ambiguous,
+        &plan.plan_id,
+        [
+            event(EventType::PackageUploaded, "demo@0.1.0"),
+            event(
+                EventType::PublishReconciled {
+                    outcome: still_unknown_outcome(),
+                },
+                "demo@0.1.0",
+            ),
+        ],
+    )?;
+    let ambiguous_state = rebuild_state_from_events(
+        &events_path(&ambiguous),
+        StateRebuildOptions::new(plan.registry.clone()).with_fallback_plan_id(&plan.plan_id),
+    )?;
+    save_state(&ambiguous, &ambiguous_state)?;
     write_not_live_lock(&ambiguous, td.path(), &plan.plan_id)?;
     write_still_unknown(&ambiguous, &plan)?;
     assert_pair(
@@ -413,6 +433,22 @@ fn durable_status_process_matrix_is_fail_closed_and_side_effect_free() -> Result
         "ambiguous-state",
         "ambiguous",
         "reconcile",
+    )?;
+
+    let stale_ambiguous = td.path().join("stale-ambiguous-state");
+    write_events(&stale_ambiguous, &plan.plan_id, [])?;
+    save_state(
+        &stale_ambiguous,
+        &pending_state(&plan, PackageState::Uploaded),
+    )?;
+    write_not_live_lock(&stale_ambiguous, td.path(), &plan.plan_id)?;
+    write_still_unknown(&stale_ambiguous, &plan)?;
+    assert_pair(
+        td.path(),
+        &base_url,
+        "stale-ambiguous-state",
+        "evidence_disagreement",
+        "stop_and_investigate",
     )?;
 
     let mismatch = td.path().join("mismatch-state");

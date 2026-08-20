@@ -7,7 +7,9 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 
 use crate::output::outcome::{ActionKind, OperatorAction};
-use shipper_core::cli_bridge::{RunLiveness, RunObservation, observe_run};
+use shipper_core::cli_bridge::{
+    RunLiveness, RunObservation, observe_run, unfinished_evidence_consistent,
+};
 use shipper_core::state::consistency::verify_finalization_consistency;
 use shipper_core::state::events::{EVENTS_FILE, events_path};
 use shipper_core::state::execution_state::{
@@ -83,6 +85,7 @@ struct EvidencePacket {
     receipt: Option<Receipt>,
     reconciliation: Option<ReconciliationReport>,
     finalization_consistent: Option<bool>,
+    unfinished_consistent: Option<bool>,
     evidence: Vec<String>,
 }
 
@@ -146,6 +149,14 @@ fn load_evidence(
         ),
         _ => None,
     };
+    let unfinished_consistent = match (&state, &receipt) {
+        (Some(state), None) => Some(unfinished_evidence_consistent(
+            &events_path(resolved_state_dir),
+            state,
+            reconciliation.as_ref(),
+        )?),
+        _ => None,
+    };
     let evidence = [
         (events_path(resolved_state_dir), EVENTS_FILE),
         (resolved_state_dir.join(STATE_FILE), STATE_FILE),
@@ -163,6 +174,7 @@ fn load_evidence(
         receipt,
         reconciliation,
         finalization_consistent,
+        unfinished_consistent,
         evidence,
     })
 }
@@ -268,7 +280,10 @@ fn classify_unfinished(
     configured_state_dir: &Path,
     packet: EvidencePacket,
 ) -> DurableOperatorOutcome {
-    if packet.receipt.is_some() || packet.state.is_none() {
+    if packet.receipt.is_some()
+        || packet.state.is_none()
+        || packet.unfinished_consistent != Some(true)
+    {
         return disagreement(plan_id, None, packet.evidence);
     }
     if contains_ambiguity(&packet) {
@@ -718,6 +733,7 @@ mod tests {
             receipt: None,
             reconciliation: None,
             finalization_consistent: None,
+            unfinished_consistent: Some(true),
             evidence: vec![".operator-state/events.jsonl".into()],
         }
     }
@@ -766,6 +782,21 @@ mod tests {
             DurableStatus::Unknown,
             None,
             ActionKind::InspectEvents,
+            false,
+        )?;
+        let mut stale_ambiguous = packet(
+            RunObservation::Unfinished {
+                plan_id: Some("plan-a".into()),
+                liveness: RunLiveness::NotLive,
+            },
+            Some(PackageState::Uploaded),
+        );
+        stale_ambiguous.unfinished_consistent = Some(false);
+        assert_posture(
+            &classify(&plan, configured, stale_ambiguous),
+            DurableStatus::EvidenceDisagreement,
+            Some(false),
+            ActionKind::StopAndInvestigate,
             false,
         )?;
         assert_posture(
@@ -874,6 +905,7 @@ mod tests {
                     receipt: None,
                     reconciliation: None,
                     finalization_consistent: None,
+                    unfinished_consistent: None,
                     evidence: vec![".operator-state/state.json".into()],
                 },
             ),
@@ -892,6 +924,7 @@ mod tests {
                     receipt: None,
                     reconciliation: None,
                     finalization_consistent: None,
+                    unfinished_consistent: None,
                     evidence: vec![".operator-state/state.json".into()],
                 },
             ),
