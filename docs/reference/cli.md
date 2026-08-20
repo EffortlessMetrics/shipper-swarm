@@ -126,6 +126,24 @@ workspace publishing and recovery.
 | `shipper status` | Mixed registry state read succeeds | `0` |
 | `shipper status` | Registry/query failure | non-zero |
 
+Non-watch `status` is a read-only registry observation. Its additive
+`shipper.status.v1.outcome` reports `all_published`, `partially_published`,
+`not_published`, or `no_publishable_packages`, states that no publication was
+performed, and provides one commandless `none_complete`, `preflight`, or
+`plan` posture. Human output renders the same Result and Next reason after the
+existing plan and package lines. Because this command does not load durable
+run evidence, it does not claim that publish or resume is safe and does not
+invent state, event, or receipt evidence. Registry/query failures keep their
+existing non-zero error path and do not emit a completed outcome.
+Package observations are planned separately for each effective registry, so a
+crate restricted with Cargo's `package.publish` allowlist is queried only for
+registries that may receive it. Each registry row carries its authoritative
+`plan_id`; the legacy top-level `plan_id` identifies the first effective
+registry and remains in its existing field position. Consequently,
+`all_published` means every registry-eligible selected version is visible in
+its effective target registry or registries; it does not claim that ineligible
+packages were queried everywhere.
+
 ### The publish / resume exit vocabulary
 
 `publish` and `resume` distinguish their two failure shapes, so a CI job can

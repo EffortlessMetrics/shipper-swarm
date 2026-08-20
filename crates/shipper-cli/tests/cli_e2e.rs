@@ -556,6 +556,10 @@ fn status_command_snapshot() {
 plan_id: <PLAN_ID>
 
 demo@0.1.0: missing
+
+Result: not published
+Publication performed: no
+Next: run preflight in the same workspace and registry context before publishing
 "#
     );
     registry.join();
