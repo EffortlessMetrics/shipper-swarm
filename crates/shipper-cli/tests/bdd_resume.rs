@@ -194,15 +194,7 @@ struct TestRegistry {
 
 impl TestRegistry {
     fn join(self) {
-        self.stop.store(true, Ordering::Release);
-        self.handle.join().expect("join server");
-        assert_eq!(
-            self.request_count.load(Ordering::Acquire),
-            self.expected_requests,
-            "registry request count mismatch: expected {}, got {}",
-            self.expected_requests,
-            self.request_count.load(Ordering::Acquire)
-        );
+        self.finish().expect("join server");
     }
 
     fn finish(self) -> Result<()> {
@@ -712,8 +704,8 @@ mod resume_plan_id_mismatch {
 
     const SECRET_SENTINEL: &str = "RESUME_MISMATCH_SECRET_SENTINEL";
 
-    fn create_recording_cargo(root: &Path) -> Result<(PathBuf, PathBuf)> {
-        let log = root.join("unexpected-cargo-invocation.log");
+    fn create_recording_publish_cargo(root: &Path) -> Result<(PathBuf, PathBuf)> {
+        let log = root.join("unexpected-publish-cargo-invocation.log");
 
         #[cfg(windows)]
         let executable = {
@@ -778,8 +770,8 @@ mod resume_plan_id_mismatch {
         root: &Path,
         state_dir: &Path,
         api_base: &str,
-        cargo_bin: &Path,
-        cargo_log: &Path,
+        publish_cargo_bin: &Path,
+        publish_cargo_log: &Path,
         format: Option<&str>,
     ) -> Result<std::process::Output> {
         let mut command = loopback_shipper_cmd();
@@ -793,8 +785,8 @@ mod resume_plan_id_mismatch {
             .arg("--state-dir")
             .arg(state_dir)
             .env("CARGO_REGISTRY_TOKEN", SECRET_SENTINEL)
-            .env("SHIPPER_CARGO_BIN", cargo_bin)
-            .env("SHIPPER_FAKE_INVOCATION_LOG", cargo_log);
+            .env("SHIPPER_CARGO_BIN", publish_cargo_bin)
+            .env("SHIPPER_FAKE_INVOCATION_LOG", publish_cargo_log);
         if let Some(format) = format {
             command.arg("--format").arg(format);
         }
@@ -880,29 +872,32 @@ mod resume_plan_id_mismatch {
         )
         .context("write pre-existing event evidence")?;
         let state_before = collect_files(&state_dir)?;
-        let (cargo_bin, cargo_log) = create_recording_cargo(td.path())?;
+        let (publish_cargo_bin, publish_cargo_log) = create_recording_publish_cargo(td.path())?;
 
         let human = run_mismatch(
             td.path(),
             &state_dir,
             &registry.base_url,
-            &cargo_bin,
-            &cargo_log,
+            &publish_cargo_bin,
+            &publish_cargo_log,
             None,
         )?;
         let json = run_mismatch(
             td.path(),
             &state_dir,
             &registry.base_url,
-            &cargo_bin,
-            &cargo_log,
+            &publish_cargo_bin,
+            &publish_cargo_log,
             Some("json"),
         )?;
 
         assert_mismatch_output(&human, "human")?;
         assert_mismatch_output(&json, "JSON-requested")?;
         registry.finish()?;
-        ensure!(!cargo_log.exists(), "resume mismatch invoked Cargo");
+        ensure!(
+            !publish_cargo_log.exists(),
+            "resume mismatch invoked publish Cargo"
+        );
         ensure!(
             collect_files(&state_dir)? == state_before,
             "resume mismatch mutated state/events or created evidence"
