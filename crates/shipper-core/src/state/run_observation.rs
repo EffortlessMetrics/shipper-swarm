@@ -1,5 +1,6 @@
 //! Fail-closed projection of authoritative run events and advisory lock evidence.
 
+use crate::cli_bridge::{RunLiveness, RunObservation, UnknownLivenessReason};
 use crate::lock::{
     LockContents, LockRecord, ProcessIdentity, ProcessScope, lock_path, process_identity,
     process_scope, read_lock_contents,
@@ -8,39 +9,6 @@ use crate::state::events::{EventLog, events_path};
 use crate::types::{EventType, ExecutionResult};
 use anyhow::Result;
 use std::path::Path;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum UnknownLivenessReason {
-    MissingLock,
-    CorruptLock,
-    CrossHost,
-    LegacyLock,
-    MissingPlanIdentity,
-    PlanMismatch,
-    ProcessIdentityMismatch,
-    ProcessProbeUnavailable,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RunLiveness {
-    Live,
-    NotLive,
-    Unknown(UnknownLivenessReason),
-}
-
-/// Current durable run segment. Finished segments cannot carry liveness.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RunObservation {
-    NoEvidence,
-    Unfinished {
-        plan_id: Option<String>,
-        liveness: RunLiveness,
-    },
-    Finished {
-        plan_id: Option<String>,
-        result: ExecutionResult,
-    },
-}
 
 #[derive(Clone)]
 enum ProcessStatus {
@@ -70,10 +38,6 @@ impl ProcessProbe for SystemProcessProbe {
     }
 }
 
-#[expect(
-    dead_code,
-    reason = "issue #329 stages the private core authority before its CLI adapter"
-)]
 pub(crate) fn observe_run(
     state_dir: &Path,
     workspace_root: Option<&Path>,

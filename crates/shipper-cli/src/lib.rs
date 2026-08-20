@@ -48,6 +48,7 @@ use shipper_core::types::{
 
 mod doctor;
 mod output;
+mod status_durable;
 
 use crate::output::outcome::{ActionKind, OperatorAction};
 use crate::output::progress::ProgressReporter;
@@ -501,6 +502,9 @@ EXAMPLES:
         /// the last durable event, and the next scheduled wait/retry/poll.
         #[arg(long)]
         watch: bool,
+        /// Interpret authoritative local run evidence without querying a registry.
+        #[arg(long, conflicts_with = "watch")]
+        durable: bool,
     },
     /// Print environment and auth diagnostics.
     #[command(long_about = "\
@@ -1671,7 +1675,19 @@ pub fn run() -> Result<std::process::ExitCode> {
                 anyhow::bail!("rehearsal did not pass");
             }
         }
-        Commands::Status { watch } => {
+        Commands::Status { watch, durable } => {
+            if durable {
+                let state_dir = absolute_state_dir(&planned, &opts);
+                status_durable::run(
+                    &planned.plan,
+                    &planned.workspace_root,
+                    &opts.state_dir,
+                    &state_dir,
+                    &opts.encryption,
+                    &cli.format,
+                )?;
+                return Ok(std::process::ExitCode::SUCCESS);
+            }
             let target_registries = if opts.registries.is_empty() {
                 vec![planned.plan.registry.clone()]
             } else {
@@ -6445,7 +6461,10 @@ mod tests {
     fn status_watch_flag_parses() {
         let cli = Cli::try_parse_from(["shipper", "status", "--watch"]).expect("parse status");
         match cli.cmd {
-            Some(Commands::Status { watch }) => assert!(watch),
+            Some(Commands::Status { watch, durable }) => {
+                assert!(watch);
+                assert!(!durable);
+            }
             other => panic!("expected Status, got {other:?}"),
         }
     }
@@ -6494,7 +6513,13 @@ mod tests {
         assert_eq!(cli.max_attempts, Some(2));
         assert!(cli.parallel);
         assert_eq!(cli.webhook_secret.as_deref(), Some("compatibility-value"));
-        assert!(matches!(cli.cmd, Some(Commands::Status { watch: false })));
+        assert!(matches!(
+            cli.cmd,
+            Some(Commands::Status {
+                watch: false,
+                durable: false
+            })
+        ));
     }
 
     #[test]
