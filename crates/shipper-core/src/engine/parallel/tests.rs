@@ -6839,6 +6839,11 @@ fn reconcile_bdd_ambiguous_resolves_to_still_unknown() {
             let err = result
                 .result
                 .expect_err("StillUnknown reconciliation must halt with Err");
+            assert!(
+                err.downcast_ref::<crate::engine::PublishStillUnknownError>()
+                    .is_some(),
+                "StillUnknown must retain its typed identity: {err:#}"
+            );
             let msg = err.to_string();
             assert!(
                 msg.contains("reconciliation inconclusive"),

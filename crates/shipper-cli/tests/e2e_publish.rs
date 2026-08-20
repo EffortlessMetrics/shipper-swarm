@@ -1093,6 +1093,62 @@ struct CompletedPartialRun {
     output: std::process::Output,
 }
 
+struct StillUnknownRun {
+    _workspace: tempfile::TempDir,
+    state_dir: std::path::PathBuf,
+    publish_log: std::path::PathBuf,
+    output: std::process::Output,
+}
+
+fn run_ambiguous_still_unknown_publish(format: Option<&str>) -> Result<StillUnknownRun> {
+    let td = tempdir().context("create ambiguous publish workspace")?;
+    create_single_crate_workspace(td.path());
+    let (new_path, real_cargo, fake_cargo) = setup_fake_cargo(td.path());
+    let registry = spawn_bounded_registry(vec![500, 500], 2);
+    let state_dir = td.path().join("state-ambiguous");
+    let publish_log = td.path().join("publish.log");
+
+    let mut command = loopback_shipper_cmd();
+    command
+        .timeout(Duration::from_secs(20))
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--api-base")
+        .arg(&registry.base_url)
+        .arg("--allow-dirty")
+        .arg("--skip-ownership-check")
+        .arg("--no-readiness")
+        .arg("--max-attempts")
+        .arg("1")
+        .arg("--base-delay")
+        .arg("0ms")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("--quiet");
+    if let Some(format) = format {
+        command.arg("--format").arg(format);
+    }
+    let output = command
+        .arg("publish")
+        .env("PATH", &new_path)
+        .env("REAL_CARGO", &real_cargo)
+        .env("SHIPPER_CARGO_BIN", &fake_cargo)
+        .env("SHIPPER_FAKE_PUBLISH_EXIT", "1")
+        .env("SHIPPER_FAKE_PUBLISH_STDERR", "")
+        .env("SHIPPER_FAKE_PUBLISH_LOG", &publish_log)
+        .env("CARGO_REGISTRY_TOKEN", "AMBIGUOUS_OUTCOME_SECRET")
+        .output()
+        .context("run ambiguous StillUnknown publish fixture")?;
+    registry.finish(Duration::from_secs(2))?;
+
+    Ok(StillUnknownRun {
+        _workspace: td,
+        state_dir,
+        publish_log,
+        output,
+    })
+}
+
 fn run_completed_partial_publish(format: Option<&str>) -> Result<CompletedPartialRun> {
     let td = tempdir().context("create completed-partial workspace")?;
     create_single_crate_workspace(td.path());
@@ -1254,6 +1310,142 @@ fn completed_partial_publish_human_and_json_have_semantic_parity() -> Result<()>
     );
     assert_secret_absent_from_output_and_state(&human.output, &human.state_dir);
     assert_secret_absent_from_output_and_state(&json.output, &json.state_dir);
+
+    Ok(())
+}
+
+#[test]
+fn ambiguous_still_unknown_publish_human_and_json_have_safe_error_parity() -> Result<()> {
+    const SECRET: &str = "AMBIGUOUS_OUTCOME_SECRET";
+
+    let human = run_ambiguous_still_unknown_publish(None)?;
+    let json = run_ambiguous_still_unknown_publish(Some("json"))?;
+    ensure!(human.output.status.code() == Some(1));
+    ensure!(json.output.status.code() == Some(1));
+    ensure!(
+        human.output.stdout.is_empty(),
+        "human error stays on stderr"
+    );
+    ensure!(json.output.stdout.is_empty(), "JSON error stays on stderr");
+
+    let human_stderr = std::str::from_utf8(&human.output.stderr).context("human stderr")?;
+    let human_result = human_outcome_value(human_stderr, "Result:")?;
+    let human_safe = human_outcome_value(human_stderr, "Safe to rerun:")?;
+    let human_next = human_outcome_value(human_stderr, "Next:")?;
+    let human_evidence = human_outcome_value(human_stderr, "Evidence:")?;
+
+    let report: serde_json::Value =
+        serde_json::from_slice(&json.output.stderr).with_context(|| {
+            format!(
+                "StillUnknown publish JSON stderr:\n{}",
+                String::from_utf8_lossy(&json.output.stderr)
+            )
+        })?;
+    ensure!(report["schema_version"] == "shipper.publish.error.v1");
+    ensure!(report["command"] == "publish");
+    ensure!(report["status"] == "failed");
+    ensure!(report["category"] == "ambiguous");
+    ensure!(report["safe_to_rerun"]["value"] == false);
+    ensure!(report["next_action"]["kind"] == "reconcile");
+    let next_action = report["next_action"]
+        .as_object()
+        .ok_or_else(|| anyhow!("missing JSON next action"))?;
+    ensure!(
+        !next_action.contains_key("command"),
+        "commandless action must omit command: {next_action:?}"
+    );
+    ensure!(report["next_action"]["requires_confirmation"] == false);
+
+    let summary = report["summary"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing JSON error summary"))?;
+    ensure!(human_result.starts_with("failed "));
+    ensure!(human_result.ends_with(summary));
+    let safe_reason = report["safe_to_rerun"]["reason"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing JSON safe-to-rerun reason"))?;
+    ensure!(human_safe.starts_with("no "));
+    ensure!(human_safe.ends_with(safe_reason));
+    ensure!(
+        human_next
+            == report["next_action"]["reason"]
+                .as_str()
+                .ok_or_else(|| anyhow!("missing JSON next-action reason"))?
+    );
+
+    let json_evidence = report["evidence"]
+        .as_array()
+        .ok_or_else(|| anyhow!("missing JSON evidence"))?
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .ok_or_else(|| anyhow!("non-string JSON evidence"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let human_evidence = human_evidence.split(", ").collect::<Vec<_>>();
+    let artifacts = ["state.json", "events.jsonl", "reconciliation.json"];
+    let expected_human_evidence = artifacts
+        .iter()
+        .map(|artifact| human.state_dir.join(artifact).display().to_string())
+        .collect::<Vec<_>>();
+    let expected_json_evidence = artifacts
+        .iter()
+        .map(|artifact| json.state_dir.join(artifact).display().to_string())
+        .collect::<Vec<_>>();
+    ensure!(human_evidence == expected_human_evidence);
+    ensure!(json_evidence == expected_json_evidence);
+    let normalized_human = human_evidence
+        .iter()
+        .map(|path| normalize_state_identity(path, &human.state_dir))
+        .collect::<Vec<_>>();
+    let normalized_json = json_evidence
+        .iter()
+        .map(|path| normalize_state_identity(path, &json.state_dir))
+        .collect::<Vec<_>>();
+    ensure!(normalized_human == normalized_json);
+
+    for run in [&human, &json] {
+        let state_path = run.state_dir.join("state.json");
+        let events_path = run.state_dir.join("events.jsonl");
+        let reconciliation_path = run.state_dir.join("reconciliation.json");
+        ensure!(state_path.exists());
+        ensure!(events_path.exists());
+        ensure!(reconciliation_path.exists());
+        ensure!(!run.state_dir.join("receipt.json").exists());
+
+        let state: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&state_path).context("read state")?)
+                .context("parse state")?;
+        ensure!(state["packages"]["demo@0.1.0"]["state"]["state"] == "ambiguous");
+        ensure!(state["packages"]["demo@0.1.0"]["attempts"] == 1);
+
+        let events = fs::read_to_string(&events_path).context("read events")?;
+        let still_unknown_count = events.lines().try_fold(0, |count, line| {
+            let event: serde_json::Value = serde_json::from_str(line).context("parse event")?;
+            Ok::<_, anyhow::Error>(
+                count
+                    + usize::from(
+                        event["event_type"]["type"] == "publish_reconciled"
+                            && event["event_type"]["outcome"]["outcome"] == "still_unknown",
+                    ),
+            )
+        })?;
+        ensure!(still_unknown_count == 1);
+
+        let reconciliation: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&reconciliation_path).context("read reconciliation")?,
+        )
+        .context("parse reconciliation")?;
+        ensure!(reconciliation["records"].as_array().map(Vec::len) == Some(1));
+        ensure!(reconciliation["records"][0]["name"] == "demo");
+        ensure!(reconciliation["records"][0]["version"] == "0.1.0");
+        ensure!(reconciliation["records"][0]["outcome"]["outcome"] == "still_unknown");
+
+        ensure!(read_publish_log(&run.publish_log).len() == 1);
+        assert_sentinel_absent_from_output_and_state(&run.output, &run.state_dir, SECRET);
+        let reconciliation_bytes = fs::read(&reconciliation_path).context("scan reconciliation")?;
+        ensure!(!String::from_utf8_lossy(&reconciliation_bytes).contains(SECRET));
+    }
 
     Ok(())
 }

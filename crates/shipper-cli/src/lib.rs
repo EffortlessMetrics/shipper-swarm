@@ -851,6 +851,7 @@ enum ConfigCommands {
 
 struct CliReporter {
     quiet: bool,
+    suppress_errors: bool,
     /// Optional progress handle installed during `publish`/`resume` so
     /// [`CliReporter::retry_wait`] can render a live countdown via the
     /// existing `ProgressReporter::retry_countdown`. When `None`, retries
@@ -861,9 +862,10 @@ struct CliReporter {
 }
 
 impl CliReporter {
-    fn new(quiet: bool) -> Self {
+    fn new(quiet: bool, suppress_errors: bool) -> Self {
         Self {
             quiet,
+            suppress_errors,
             progress: None,
             package_positions: BTreeMap::new(),
         }
@@ -898,7 +900,9 @@ impl Reporter for CliReporter {
     }
 
     fn error(&mut self, msg: &str) {
-        eprintln!("[error] {msg}");
+        if !self.suppress_errors {
+            eprintln!("[error] {msg}");
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -965,7 +969,9 @@ struct PublishEarlyError {
     category: &'static str,
     summary: &'static str,
     rendered_error: String,
+    safe_to_rerun: PublishEarlySafeRerun,
     next_action: OperatorAction,
+    evidence: Vec<String>,
 }
 
 impl std::fmt::Display for PublishEarlyError {
@@ -988,7 +994,7 @@ struct PublishEarlyErrorReport<'a> {
     evidence: Vec<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 struct PublishEarlySafeRerun {
     value: Option<bool>,
     reason: &'static str,
@@ -1062,6 +1068,64 @@ fn mark_publish_early_error(
     )
 }
 
+fn still_unknown_evidence(state_dir: &Path, reconciliation_written: bool) -> Vec<String> {
+    let events_path = shipper_core::state::events::events_path(state_dir);
+    let mut paths = vec![
+        state_dir.join(shipper_core::state::execution_state::STATE_FILE),
+        events_path,
+    ];
+    if reconciliation_written {
+        paths.push(shipper_core::state::execution_state::reconciliation_path(
+            state_dir,
+        ));
+    }
+    paths
+        .into_iter()
+        .filter(|path| path.exists())
+        .map(|path| path.display().to_string())
+        .collect()
+}
+
+fn mark_publish_engine_error(
+    error: anyhow::Error,
+    format: &str,
+    configured_state_dir: &Path,
+    evidence_state_dir: &Path,
+) -> anyhow::Error {
+    let Some(still_unknown) = error.downcast_ref::<engine::PublishStillUnknownError>() else {
+        let classification = classify_publish_early_error(&error);
+        return mark_publish_early_error(
+            error.context(publish_failure_hint(configured_state_dir)),
+            format,
+            classification,
+        );
+    };
+    let evidence =
+        still_unknown_evidence(evidence_state_dir, still_unknown.reconciliation_written());
+    let error = error.context(
+        "publish stopped because registry truth remains unknown; inspect the retained reconciliation evidence before any retry",
+    );
+    let rendered_error = shipper_output_sanitizer::redact_sensitive(&format_error(&error))
+        .trim_end()
+        .to_string();
+    PublishEarlyError {
+        format: format.to_string(),
+        category: "ambiguous",
+        summary: "registry truth remains unknown after an ambiguous publish attempt",
+        rendered_error,
+        safe_to_rerun: PublishEarlySafeRerun {
+            value: Some(false),
+            reason: "persisted reconciliation evidence does not prove that another upload is safe",
+        },
+        next_action: OperatorAction::posture(
+            ActionKind::Reconcile,
+            "inspect the retained reconciliation and event evidence before any retry",
+        ),
+        evidence,
+    }
+    .into()
+}
+
 fn mark_publish_early_error_with_next_action(
     error: anyhow::Error,
     format: &str,
@@ -1078,7 +1142,12 @@ fn mark_publish_early_error_with_next_action(
         category,
         summary,
         rendered_error,
+        safe_to_rerun: PublishEarlySafeRerun {
+            value: None,
+            reason: "no completed receipt exists to prove a safe rerun",
+        },
         next_action: OperatorAction::posture(action, next_action_reason),
+        evidence: Vec::new(),
     }
     .into()
 }
@@ -1086,10 +1155,6 @@ fn mark_publish_early_error_with_next_action(
 /// Render a top-level error to stderr via [`format_error`].
 pub fn report_error(error: &anyhow::Error) {
     if let Some(publish_error) = error.downcast_ref::<PublishEarlyError>() {
-        let safe_to_rerun = PublishEarlySafeRerun {
-            value: None,
-            reason: "no completed receipt exists to prove a safe rerun",
-        };
         if publish_error.format == "json" {
             let report = PublishEarlyErrorReport {
                 schema_version: "shipper.publish.error.v1",
@@ -1097,9 +1162,12 @@ pub fn report_error(error: &anyhow::Error) {
                 status: "failed",
                 category: publish_error.category,
                 summary: publish_error.summary,
-                safe_to_rerun,
+                safe_to_rerun: PublishEarlySafeRerun {
+                    value: publish_error.safe_to_rerun.value,
+                    reason: publish_error.safe_to_rerun.reason,
+                },
                 next_action: &publish_error.next_action,
-                evidence: Vec::new(),
+                evidence: publish_error.evidence.clone(),
             };
             match serde_json::to_string_pretty(&report) {
                 Ok(json) => eprintln!("{json}"),
@@ -1111,9 +1179,21 @@ pub fn report_error(error: &anyhow::Error) {
         eprintln!("{}", publish_error.rendered_error);
         eprintln!();
         eprintln!("Result: failed — {}", publish_error.summary);
-        eprintln!("Safe to rerun: unknown — {}", safe_to_rerun.reason);
+        let safe_to_rerun = match publish_error.safe_to_rerun.value {
+            Some(true) => "yes",
+            Some(false) => "no",
+            None => "unknown",
+        };
+        eprintln!(
+            "Safe to rerun: {safe_to_rerun} — {}",
+            publish_error.safe_to_rerun.reason
+        );
         eprintln!("Next: {}", publish_error.next_action.reason);
-        eprintln!("Evidence: none from a completed receipt");
+        if publish_error.evidence.is_empty() {
+            eprintln!("Evidence: none from a completed receipt");
+        } else {
+            eprintln!("Evidence: {}", publish_error.evidence.join(", "));
+        }
         return;
     }
     eprintln!("{}", format_error(error));
@@ -1361,7 +1441,7 @@ pub fn run() -> Result<std::process::ExitCode> {
 
     let structured_publish =
         matches!(cli.cmd.as_ref(), Some(Commands::Publish)) && cli.format == "json";
-    let mut reporter = CliReporter::new(cli.quiet || structured_publish);
+    let mut reporter = CliReporter::new(cli.quiet || structured_publish, structured_publish);
 
     match cli.cmd.expect("subcommand checked above") {
         Commands::Plan => {
@@ -1439,17 +1519,20 @@ pub fn run() -> Result<std::process::ExitCode> {
                 // countdown via ProgressReporter::retry_countdown.
                 reporter.install_progress(progress, package_positions);
 
+                let evidence_state_dir = publish_evidence_state_dir(
+                    &current_planned.workspace_root,
+                    &current_opts.state_dir,
+                );
+
                 let receipt =
                     match engine::run_publish(&current_planned, &current_opts, &mut reporter) {
                         Ok(receipt) => receipt,
                         Err(error) => {
-                            let classification = classify_publish_early_error(&error);
-                            let error =
-                                error.context(publish_failure_hint(&current_opts.state_dir));
-                            return Err(mark_publish_early_error(
+                            return Err(mark_publish_engine_error(
                                 error,
                                 &cli.format,
-                                classification,
+                                &current_opts.state_dir,
+                                &evidence_state_dir,
                             ));
                         }
                     };
@@ -5660,6 +5743,28 @@ mod tests {
         assert!(matches!(worst_result(Some(Success), &Success), Success));
     }
 
+    #[test]
+    fn generic_engine_error_does_not_borrow_stale_reconciliation_evidence() -> Result<()> {
+        let td = tempdir().context("create stale-evidence fixture")?;
+        for artifact in ["state.json", "events.jsonl", "reconciliation.json"] {
+            fs::write(td.path().join(artifact), "{}").context("write stale evidence marker")?;
+        }
+
+        let marked = mark_publish_engine_error(
+            anyhow::anyhow!("unrelated engine failure"),
+            "json",
+            Path::new("configured-state"),
+            td.path(),
+        );
+        let publish_error = marked
+            .downcast_ref::<PublishEarlyError>()
+            .context("generic publish error marker")?;
+        anyhow::ensure!(publish_error.category == "publish_failed");
+        anyhow::ensure!(publish_error.safe_to_rerun.value.is_none());
+        anyhow::ensure!(publish_error.evidence.is_empty());
+        Ok(())
+    }
+
     #[derive(Default)]
     struct TestReporter {
         infos: Vec<String>,
@@ -6212,7 +6317,7 @@ mod tests {
 
     #[test]
     fn cli_reporter_methods_are_callable() {
-        let mut rep = CliReporter::new(false);
+        let mut rep = CliReporter::new(false, false);
         rep.info("info");
         rep.warn("warn");
         rep.error("error");
@@ -6224,7 +6329,7 @@ mod tests {
         // legacy warn-line + sleep path. Assert it still blocks for the
         // full delay (the engine relies on this).
         use std::time::Instant;
-        let mut rep = CliReporter::new(true); // quiet to suppress stderr
+        let mut rep = CliReporter::new(true, false); // quiet to suppress stderr
         let delay = Duration::from_millis(60);
         let start = Instant::now();
         rep.retry_wait(
@@ -6246,7 +6351,7 @@ mod tests {
     #[test]
     fn cli_reporter_retry_wait_without_progress_warns_and_blocks_for_delay() {
         use std::time::Instant;
-        let mut rep = CliReporter::new(false);
+        let mut rep = CliReporter::new(false, false);
         let delay = Duration::from_millis(40);
         let start = Instant::now();
         rep.retry_wait(
@@ -6267,7 +6372,7 @@ mod tests {
         // through ProgressReporter::retry_countdown — still blocks for the
         // delay, with no panic from the set_status path.
         use std::time::Instant;
-        let mut rep = CliReporter::new(false);
+        let mut rep = CliReporter::new(false, false);
         rep.install_progress(
             crate::output::progress::ProgressReporter::silent(2),
             BTreeMap::from([(String::from("pkg@1.0.0"), 2usize)]),
@@ -6289,7 +6394,7 @@ mod tests {
 
     #[test]
     fn cli_reporter_retry_wait_updates_progress_to_retrying_package() {
-        let mut rep = CliReporter::new(true);
+        let mut rep = CliReporter::new(true, false);
         rep.install_progress(
             crate::output::progress::ProgressReporter::silent(3),
             BTreeMap::from([(String::from("beta@0.2.0"), 2usize)]),
