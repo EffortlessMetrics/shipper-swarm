@@ -179,6 +179,44 @@ edition = "2021"
     write_file(&root.join("alpha/src/lib.rs"), "pub fn alpha() {}\n");
 }
 
+fn create_registry_restricted_workspace(root: &Path) {
+    write_file(
+        &root.join("Cargo.toml"),
+        r#"
+[workspace]
+members = ["public-crate", "private-crate"]
+resolver = "2"
+"#,
+    );
+    write_file(
+        &root.join("public-crate/Cargo.toml"),
+        r#"
+[package]
+name = "public-crate"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write_file(
+        &root.join("public-crate/src/lib.rs"),
+        "pub fn public_crate() {}\n",
+    );
+    write_file(
+        &root.join("private-crate/Cargo.toml"),
+        r#"
+[package]
+name = "private-crate"
+version = "0.1.0"
+edition = "2021"
+publish = ["private-reg"]
+"#,
+    );
+    write_file(
+        &root.join("private-crate/src/lib.rs"),
+        "pub fn private_crate() {}\n",
+    );
+}
+
 /// Create a workspace with multiple crates that have inter-dependencies.
 fn create_multi_crate_workspace(root: &Path) {
     write_file(
@@ -518,6 +556,197 @@ fn status_json_format_produces_registry_report() {
     );
 
     registry.join();
+}
+
+#[test]
+fn status_plans_packages_for_each_effective_registry() -> Result<()> {
+    const SECRET: &str = "STATUS_REGISTRY_PLAN_SECRET";
+    let temp = tempdir().context("create restricted status workspace")?;
+    create_registry_restricted_workspace(temp.path());
+
+    let private = spawn_bounded_status_registry(vec![200, 404], 2)?;
+    let private_config = temp.path().join("private-status.toml");
+    write_file(
+        &private_config,
+        &format!(
+            r#"
+schema_version = "shipper.config.v1"
+
+[registry]
+name = "private-reg"
+api_base = "{base}"
+index_base = "{base}"
+"#,
+            base = private.base_url,
+        ),
+    );
+    let private_state = temp.path().join("private-state");
+    let mut private_command = loopback_shipper_cmd();
+    private_command
+        .timeout(Duration::from_secs(20))
+        .env("CARGO_REGISTRY_TOKEN", SECRET)
+        .arg("--manifest-path")
+        .arg(temp.path().join("Cargo.toml"))
+        .arg("--config")
+        .arg(&private_config)
+        .arg("--state-dir")
+        .arg(&private_state)
+        .arg("--format")
+        .arg("json")
+        .arg("status");
+    let private_output = private_command.output().context("run private-reg status")?;
+    private.finish(Duration::from_secs(2))?;
+    anyhow::ensure!(private_output.status.code() == Some(0), "private-reg exit");
+    let private_stdout = String::from_utf8(private_output.stdout).context("private JSON UTF-8")?;
+    let private_stderr =
+        String::from_utf8(private_output.stderr).context("private stderr UTF-8")?;
+    anyhow::ensure!(!private_stdout.contains(SECRET), "private stdout secret");
+    anyhow::ensure!(!private_stderr.contains(SECRET), "private stderr secret");
+    let private_json: serde_json::Value =
+        serde_json::from_str(&private_stdout).context("parse private status JSON")?;
+    let private_packages = private_json
+        .pointer("/registries/0/packages")
+        .and_then(serde_json::Value::as_array)
+        .context("private registry packages")?;
+    anyhow::ensure!(
+        private_packages.iter().any(|package| {
+            package.get("name").and_then(serde_json::Value::as_str) == Some("private-crate")
+        }),
+        "private-only package must be queried for configured registry"
+    );
+    anyhow::ensure!(
+        private_packages.len() == 2,
+        "private registry package count"
+    );
+    anyhow::ensure!(
+        private_json
+            .pointer("/outcome/status")
+            .and_then(serde_json::Value::as_str)
+            == Some("partially_published"),
+        "private-only missing version must prevent all-published outcome"
+    );
+    anyhow::ensure!(
+        private_json.get("plan_id") == private_json.pointer("/registries/0/plan_id"),
+        "single-registry plan identity"
+    );
+    anyhow::ensure!(!private_state.exists(), "private status state side effect");
+
+    let crates_io = spawn_bounded_status_registry(vec![200], 1)?;
+    let crates_state = temp.path().join("crates-state");
+    let mut crates_command = loopback_shipper_cmd();
+    crates_command
+        .timeout(Duration::from_secs(20))
+        .env("CARGO_REGISTRY_TOKEN", SECRET)
+        .arg("--manifest-path")
+        .arg(temp.path().join("Cargo.toml"))
+        .arg("--api-base")
+        .arg(&crates_io.base_url)
+        .arg("--state-dir")
+        .arg(&crates_state)
+        .arg("--format")
+        .arg("json")
+        .arg("status");
+    let crates_output = crates_command.output().context("run crates-io status")?;
+    crates_io.finish(Duration::from_secs(2))?;
+    anyhow::ensure!(crates_output.status.code() == Some(0), "crates-io exit");
+    let crates_stdout = String::from_utf8(crates_output.stdout).context("crates JSON UTF-8")?;
+    let crates_stderr = String::from_utf8(crates_output.stderr).context("crates stderr UTF-8")?;
+    anyhow::ensure!(!crates_stdout.contains(SECRET), "crates stdout secret");
+    anyhow::ensure!(!crates_stderr.contains(SECRET), "crates stderr secret");
+    let crates_json: serde_json::Value =
+        serde_json::from_str(&crates_stdout).context("parse crates status JSON")?;
+    let crates_packages = crates_json
+        .pointer("/registries/0/packages")
+        .and_then(serde_json::Value::as_array)
+        .context("crates.io registry packages")?;
+    anyhow::ensure!(
+        crates_packages.len() == 1,
+        "crates.io must omit private-only package"
+    );
+    anyhow::ensure!(
+        crates_packages
+            .first()
+            .and_then(|package| package.get("name"))
+            == Some(&serde_json::Value::String("public-crate".to_string())),
+        "crates.io allowed package"
+    );
+    anyhow::ensure!(
+        crates_json
+            .pointer("/outcome/status")
+            .and_then(serde_json::Value::as_str)
+            == Some("all_published"),
+        "allowed crates.io opposite"
+    );
+    anyhow::ensure!(!crates_state.exists(), "crates status state side effect");
+
+    Ok(())
+}
+
+#[test]
+fn status_multi_registry_reports_registry_specific_plan_identity() -> Result<()> {
+    let temp = tempdir().context("create multi-registry status workspace")?;
+    create_registry_restricted_workspace(temp.path());
+    let crates_io = spawn_bounded_status_registry(vec![200], 1)?;
+    let private = spawn_bounded_status_registry(vec![200, 200], 2)?;
+    let config = temp.path().join("multi-status.toml");
+    write_file(
+        &config,
+        &format!(
+            r#"
+schema_version = "shipper.config.v1"
+
+[[registries.registries]]
+name = "crates-io"
+api_base = "{crates_io}"
+index_base = "{crates_io}"
+
+[[registries.registries]]
+name = "private-reg"
+api_base = "{private}"
+index_base = "{private}"
+"#,
+            crates_io = crates_io.base_url,
+            private = private.base_url,
+        ),
+    );
+    let mut command = loopback_shipper_cmd();
+    command
+        .timeout(Duration::from_secs(20))
+        .arg("--manifest-path")
+        .arg(temp.path().join("Cargo.toml"))
+        .arg("--config")
+        .arg(&config)
+        .arg("--registries")
+        .arg("crates-io,private-reg")
+        .arg("--format")
+        .arg("json")
+        .arg("status");
+    let output = command.output().context("run multi-registry status")?;
+    crates_io.finish(Duration::from_secs(2))?;
+    private.finish(Duration::from_secs(2))?;
+    anyhow::ensure!(output.status.code() == Some(0), "multi-registry exit");
+    let stdout = String::from_utf8(output.stdout).context("multi-registry JSON UTF-8")?;
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).context("parse multi-registry status JSON")?;
+    let crates_packages = json
+        .pointer("/registries/0/packages")
+        .and_then(serde_json::Value::as_array)
+        .context("multi-registry crates.io packages")?;
+    let private_packages = json
+        .pointer("/registries/1/packages")
+        .and_then(serde_json::Value::as_array)
+        .context("multi-registry private packages")?;
+    anyhow::ensure!(crates_packages.len() == 1, "crates.io package set");
+    anyhow::ensure!(private_packages.len() == 2, "private registry package set");
+    anyhow::ensure!(
+        json.get("plan_id") == json.pointer("/registries/0/plan_id"),
+        "legacy top-level plan identifies first effective registry"
+    );
+    anyhow::ensure!(
+        json.pointer("/registries/0/plan_id") != json.pointer("/registries/1/plan_id"),
+        "registry-specific package sets require distinct plan identities"
+    );
+    Ok(())
 }
 
 #[test]

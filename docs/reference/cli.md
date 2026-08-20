@@ -135,6 +135,11 @@ existing plan and package lines. Because this command does not load durable
 run evidence, it does not claim that publish or resume is safe and does not
 invent state, event, or receipt evidence. Registry/query failures keep their
 existing non-zero error path and do not emit a completed outcome.
+Package observations are planned separately for each effective registry, so a
+crate restricted with Cargo's `package.publish` allowlist is queried only for
+registries that may receive it. Each registry row carries its authoritative
+`plan_id`; the legacy top-level `plan_id` identifies the first effective
+registry and remains in its existing field position.
 
 ### The publish / resume exit vocabulary
 

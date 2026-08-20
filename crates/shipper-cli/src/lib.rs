@@ -1689,9 +1689,10 @@ pub fn run() -> Result<std::process::ExitCode> {
             }
 
             let mut registry_reports = Vec::new();
+            let mut report_plan_id = None;
             for reg in target_registries {
-                let mut current_planned = planned.clone();
-                current_planned.plan.registry = reg;
+                let current_planned = build_status_plan(&spec, reg)?;
+                report_plan_id.get_or_insert_with(|| current_planned.plan.plan_id.clone());
                 registry_reports.push(build_status_registry_report(
                     &current_planned,
                     &mut reporter,
@@ -1701,7 +1702,7 @@ pub fn run() -> Result<std::process::ExitCode> {
             let outcome = build_status_operator_outcome(&registry_reports);
             let report = StatusReport {
                 schema_version: "shipper.status.v1",
-                plan_id: planned.plan.plan_id.clone(),
+                plan_id: report_plan_id.context("status requires at least one target registry")?,
                 workspace_root: planned.workspace_root.display().to_string(),
                 registries: registry_reports,
                 outcome,
@@ -2905,6 +2906,7 @@ mod operator_outcome_tests {
                     exists: *exists,
                 })
                 .collect(),
+            plan_id: "test-plan".to_string(),
         }
     }
 
@@ -4750,6 +4752,7 @@ struct StatusRegistryReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     index_base: Option<String>,
     packages: Vec<StatusPackageReport>,
+    plan_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -4758,6 +4761,17 @@ struct StatusPackageReport {
     version: String,
     status: &'static str,
     exists: bool,
+}
+
+fn build_status_plan(spec: &ReleaseSpec, registry: Registry) -> Result<plan::PlannedWorkspace> {
+    let registry_name = registry.name.clone();
+    let status_spec = ReleaseSpec {
+        manifest_path: spec.manifest_path.clone(),
+        registry,
+        selected_packages: spec.selected_packages.clone(),
+    };
+    plan::build_plan(&status_spec)
+        .with_context(|| format!("failed to build status plan for registry '{registry_name}'"))
 }
 
 fn build_status_registry_report(
@@ -4789,6 +4803,7 @@ fn build_status_registry_report(
         api_base: ws.plan.registry.api_base.clone(),
         index_base: ws.plan.registry.index_base.clone(),
         packages,
+        plan_id: ws.plan.plan_id.clone(),
     })
 }
 
