@@ -849,6 +849,7 @@ mod resume_plan_id_mismatch {
         let td = tempdir().context("create mismatch workspace")?;
         create_single_crate_workspace(td.path());
         let state_dir = td.path().join(".shipper");
+        let registry = spawn_registry(Vec::new(), 0);
 
         let mock_state = r#"{
             "state_version": "shipper.state.v1",
@@ -869,8 +870,10 @@ mod resume_plan_id_mismatch {
                     "last_updated_at": "2024-01-01T00:00:00Z"
                 }
             }
-        }"#;
-        write_state_json(&state_dir, mock_state);
+        }"#
+        .replace("https://crates.io", &registry.base_url)
+        .replace("https://index.crates.io", &registry.base_url);
+        write_state_json(&state_dir, &mock_state);
         fs::write(
             state_dir.join("events.jsonl"),
             b"{\"fixture\":\"pre-existing-event-evidence\"}\n",
@@ -878,7 +881,6 @@ mod resume_plan_id_mismatch {
         .context("write pre-existing event evidence")?;
         let state_before = collect_files(&state_dir)?;
         let (cargo_bin, cargo_log) = create_recording_cargo(td.path())?;
-        let registry = spawn_registry(Vec::new(), 0);
 
         let human = run_mismatch(
             td.path(),
