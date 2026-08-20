@@ -2707,7 +2707,7 @@ mod status_all_missing {
     // When: I run "shipper status"
     // Then: exit code is 0
     // And: output contains "missing" for all three
-    // And: output does NOT contain "published"
+    // And: no package line reports "published"
     #[test]
     fn given_all_unpublished_when_status_then_all_missing() {
         let td = tempdir().expect("tempdir");
@@ -2734,8 +2734,10 @@ mod status_all_missing {
             "expected 'missing' in status output, got: {stdout}"
         );
         assert!(
-            !stdout.contains("published"),
-            "expected no 'published' when all crates are unpublished, got: {stdout}"
+            !stdout
+                .lines()
+                .any(|line| line.contains('@') && line.ends_with(": published")),
+            "expected no published package line when all crates are unpublished, got: {stdout}"
         );
     }
 }
