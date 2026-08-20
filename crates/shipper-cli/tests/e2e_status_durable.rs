@@ -431,6 +431,21 @@ fn durable_status_process_matrix_is_fail_closed_and_side_effect_free() -> Result
         redacted_diagnostic(&encrypted_json.stdout),
         redacted_diagnostic(&encrypted_json.stderr)
     );
+    for (surface, bytes) in [
+        ("encrypted human stdout", encrypted_human.stdout.as_slice()),
+        ("encrypted human stderr", encrypted_human.stderr.as_slice()),
+        ("encrypted JSON stdout", encrypted_json.stdout.as_slice()),
+        ("encrypted JSON stderr", encrypted_json.stderr.as_slice()),
+    ] {
+        ensure!(
+            !String::from_utf8_lossy(bytes).contains(SECRET),
+            "token leaked through {surface}"
+        );
+        ensure!(
+            !String::from_utf8_lossy(bytes).contains(PASSPHRASE),
+            "passphrase leaked through {surface}"
+        );
+    }
     let encrypted_value: serde_json::Value = serde_json::from_slice(&encrypted_json.stdout)?;
     ensure!(encrypted_value["outcome"]["status"] == "terminal");
     ensure!(encrypted_value["outcome"]["plan_id"] == plan.plan_id);
@@ -580,11 +595,14 @@ fn durable_status_process_matrix_is_fail_closed_and_side_effect_free() -> Result
         server.recv_timeout(Duration::from_millis(250))?.is_none(),
         "durable status queried registry"
     );
-    ensure!(
-        !snapshot(td.path())?
-            .values()
-            .any(|body| String::from_utf8_lossy(body).contains(SECRET)),
-        "secret leaked to artifacts"
-    );
+    let retained_artifacts = snapshot(td.path())?;
+    for (label, secret) in [("token", SECRET), ("passphrase", PASSPHRASE)] {
+        ensure!(
+            !retained_artifacts
+                .values()
+                .any(|body| String::from_utf8_lossy(body).contains(secret)),
+            "{label} leaked to retained artifacts"
+        );
+    }
     Ok(())
 }

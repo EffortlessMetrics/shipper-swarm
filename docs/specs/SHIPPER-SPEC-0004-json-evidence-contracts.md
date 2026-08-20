@@ -99,14 +99,16 @@ from authoritative local events plus matching state, receipt, reconciliation,
 and affirmative liveness evidence. It does not query a registry or publish,
 and `publication_performed` is always false. Matching unfinished evidence
 whose exact local process is proven absent and whose package posture is
-pending or retryable may report `safe_to_resume: true`, but the action remains
-commandless because this envelope does not encode the complete manifest,
+pending or retryable may report `outcome.safe_to_resume.value: true`, but the
+action remains commandless because this envelope does not encode the complete manifest,
 config, registry, and state-directory invocation context needed for a replayable
 command. Missing, corrupt, ambiguous, mismatched, live, or inconclusive
 evidence also omits a resume command. The configured state-directory spelling
 is retained in output; only evidence reads use the workspace-resolved path.
-Durable mode rejects `--registries` and `--all-registries` at argument parsing
-time rather than inspecting an unrelated registry-specific state directory.
+`outcome.safe_to_resume` is an object containing `value` (`true`, `false`, or
+`null`) and a human-readable `reason`; it is not a bare Boolean. Durable mode
+rejects `--watch`, `--registries`, and `--all-registries` during argument
+validation rather than inspecting an unrelated registry-specific state directory.
 This additive mode does
 not change `shipper.status.v1`, `shipper.status.watch.v1`, raw event JSONL, or
 direct versioned receipt rendering. When resolved runtime options enable state

@@ -479,16 +479,15 @@ fn verify_reconciliation_evidence(
     reconciliation_report: Option<&ReconciliationReport>,
     findings: &mut Vec<String>,
 ) {
-    let reconciled_outcomes: BTreeMap<String, _> = event_log
-        .all_events()
-        .iter()
-        .filter_map(|event| match &event.event_type {
-            EventType::PublishReconciled { outcome } => {
-                Some((event.package.clone(), outcome.clone()))
-            }
-            _ => None,
-        })
-        .collect();
+    let mut reconciled_outcomes: BTreeMap<String, Vec<_>> = BTreeMap::new();
+    for event in event_log.all_events() {
+        if let EventType::PublishReconciled { outcome } = &event.event_type {
+            reconciled_outcomes
+                .entry(event.package.clone())
+                .or_default()
+                .push(outcome.clone());
+        }
+    }
     let reconciled_packages: BTreeSet<String> = reconciled_outcomes.keys().cloned().collect();
 
     if reconciled_packages.is_empty() {
@@ -521,11 +520,13 @@ fn verify_reconciliation_evidence(
         .iter()
         .map(|record| record.package.clone())
         .collect();
-    let report_outcomes: BTreeMap<_, _> = report
-        .records
-        .iter()
-        .map(|record| (record.package.as_str(), &record.outcome))
-        .collect();
+    let mut report_outcomes: BTreeMap<String, Vec<_>> = BTreeMap::new();
+    for record in &report.records {
+        report_outcomes
+            .entry(record.package.clone())
+            .or_default()
+            .push(record.outcome.clone());
+    }
 
     for package in reconciled_packages.difference(&report_packages) {
         findings.push(format!(
@@ -537,12 +538,12 @@ fn verify_reconciliation_evidence(
             "{package} reconciliation drift: reconciliation.json has no matching event outcome"
         ));
     }
-    for (package, event_outcome) in reconciled_outcomes {
-        if let Some(report_outcome) = report_outcomes.get(package.as_str())
-            && **report_outcome != event_outcome
+    for (package, event_history) in reconciled_outcomes {
+        if let Some(report_history) = report_outcomes.get(package.as_str())
+            && report_history.as_slice() != event_history.as_slice()
         {
             findings.push(format!(
-                "{package} reconciliation drift: event and reconciliation.json outcomes differ"
+                "{package} reconciliation drift: ordered event and reconciliation.json outcome histories differ"
             ));
         }
     }
@@ -749,6 +750,16 @@ mod tests {
                     },
                     package: "a@1.0.0".to_string(),
                 },
+                PublishEvent {
+                    timestamp: Utc::now(),
+                    event_type: EventType::PublishReconciled {
+                        outcome: ReconciliationOutcome::Published {
+                            attempts: 2,
+                            elapsed_ms: 20,
+                        },
+                    },
+                    package: "a@1.0.0".to_string(),
+                },
             ],
         );
         let state = rebuild_state_from_events(
@@ -756,11 +767,19 @@ mod tests {
             StateRebuildOptions::new(Registry::crates_io()),
         )?;
         let mut report = reconciliation_report("a@1.0.0");
-        let record = report
+        let published_record = report
             .records
-            .get_mut(0)
+            .first()
+            .cloned()
             .ok_or_else(|| anyhow::anyhow!("missing reconciliation record"))?;
-        record.outcome = unknown;
+        let mut unknown_record = published_record.clone();
+        unknown_record.outcome = unknown;
+        let mut final_record = published_record;
+        final_record.outcome = ReconciliationOutcome::Published {
+            attempts: 2,
+            elapsed_ms: 20,
+        };
+        report.records = vec![unknown_record, final_record];
         verify_unfinished_consistency(&events_path(td.path()), &state, Some(&report))?;
 
         let record = report
@@ -768,12 +787,12 @@ mod tests {
             .get_mut(0)
             .ok_or_else(|| anyhow::anyhow!("missing reconciliation record"))?;
         record.outcome = ReconciliationOutcome::Published {
-            attempts: 1,
-            elapsed_ms: 10,
+            attempts: 2,
+            elapsed_ms: 20,
         };
         anyhow::ensure!(
             verify_unfinished_consistency(&events_path(td.path()), &state, Some(&report)).is_err(),
-            "mismatched reconciliation outcome should fail consistency"
+            "an earlier reconciliation mismatch must not be hidden by a matching final outcome"
         );
         Ok(())
     }
