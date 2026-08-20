@@ -25,6 +25,13 @@ use tempfile::tempdir;
 use tiny_http::Server;
 
 const SECRET: &str = "DURABLE_STATUS_MATRIX_SECRET_SENTINEL";
+const PASSPHRASE: &str = "fixture-passphrase";
+
+fn redacted_diagnostic(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .replace(SECRET, "<redacted-token>")
+        .replace(PASSPHRASE, "<redacted-passphrase>")
+}
 
 fn write(path: &Path, body: impl AsRef<[u8]>) -> Result<()> {
     if let Some(parent) = path.parent() {
@@ -379,7 +386,7 @@ fn durable_status_process_matrix_is_fail_closed_and_side_effect_free() -> Result
 
     let encrypted = td.path().join("encrypted-state");
     let (encrypted_state, encrypted_receipt) = terminal_evidence(&encrypted, &plan)?;
-    let encryption = shipper_core::encryption::EncryptionConfig::new("fixture-passphrase".into());
+    let encryption = shipper_core::encryption::EncryptionConfig::new(PASSPHRASE.into());
     save_state_encrypted(&encrypted, &encrypted_state, &encryption)?;
     write_receipt_encrypted(&encrypted, &encrypted_receipt, &encryption)?;
     let encrypted_before = snapshot(td.path())?;
@@ -388,17 +395,29 @@ fn durable_status_process_matrix_is_fail_closed_and_side_effect_free() -> Result
         &base_url,
         "encrypted-state",
         false,
-        Some("fixture-passphrase"),
+        Some(PASSPHRASE),
     )?;
     let encrypted_json = invoke_with_passphrase(
         td.path(),
         &base_url,
         "encrypted-state",
         true,
-        Some("fixture-passphrase"),
+        Some(PASSPHRASE),
     )?;
-    ensure!(encrypted_human.status.success());
-    ensure!(encrypted_json.status.success());
+    ensure!(
+        encrypted_human.status.success(),
+        "encrypted human failed: status={:?}; stdout={:?}; stderr={:?}",
+        encrypted_human.status.code(),
+        redacted_diagnostic(&encrypted_human.stdout),
+        redacted_diagnostic(&encrypted_human.stderr)
+    );
+    ensure!(
+        encrypted_json.status.success(),
+        "encrypted JSON failed: status={:?}; stdout={:?}; stderr={:?}",
+        encrypted_json.status.code(),
+        redacted_diagnostic(&encrypted_json.stdout),
+        redacted_diagnostic(&encrypted_json.stderr)
+    );
     let encrypted_value: serde_json::Value = serde_json::from_slice(&encrypted_json.stdout)?;
     ensure!(encrypted_value["outcome"]["status"] == "terminal");
     ensure!(encrypted_value["outcome"]["plan_id"] == plan.plan_id);

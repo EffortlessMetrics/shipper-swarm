@@ -440,11 +440,20 @@ fn durable_status_rejects_multi_registry_selectors_before_evidence_reads() -> Re
             command.arg(selector[1]);
         }
         let output = command.arg("status").arg("--durable").output()?;
-        anyhow::ensure!(output.status.code() == Some(2), "expected Clap exit 2");
-        anyhow::ensure!(output.stdout.is_empty(), "parser failure wrote stdout");
         anyhow::ensure!(
-            String::from_utf8(output.stderr)?.contains("cannot be used with"),
-            "parser did not report the selector conflict"
+            output.status.code() == Some(2),
+            "{}: expected Clap exit 2, got {:?}; stdout={:?}; stderr={:?}",
+            selector[0],
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        anyhow::ensure!(output.stdout.is_empty(), "parser failure wrote stdout");
+        let stderr = String::from_utf8(output.stderr)?;
+        anyhow::ensure!(
+            stderr.contains("cannot be used with"),
+            "{}: parser did not report the selector conflict; stderr={stderr:?}",
+            selector[0]
         );
         anyhow::ensure!(
             fs::read_to_string(state_dir.join("events.jsonl"))? == "not-json\n",

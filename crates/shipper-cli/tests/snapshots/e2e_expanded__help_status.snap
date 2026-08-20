@@ -27,11 +27,11 @@ Options:
 
           Watch mode is read-only and does not poll the registry. It summarizes `state.json` and `events.jsonl` so operators can see current progress, the last durable event, and the next scheduled wait/retry/poll.
 
-      --durable
-          Interpret authoritative local run evidence without querying a registry
-
       --config <CONFIG>
           Path to a custom configuration file (.shipper.toml)
+
+      --durable
+          Interpret authoritative local run evidence without querying a registry
 
       --manifest-path <MANIFEST_PATH>
           Path to the workspace Cargo.toml
