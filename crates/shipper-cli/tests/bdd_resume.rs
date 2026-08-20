@@ -15,6 +15,7 @@ use std::path::Path;
 use std::thread;
 use std::time::Duration;
 
+use anyhow::{Context, Result, ensure};
 use assert_cmd::Command;
 use predicates::str::contains;
 use serial_test::serial;
@@ -193,15 +194,21 @@ struct TestRegistry {
 
 impl TestRegistry {
     fn join(self) {
+        self.finish().expect("join server");
+    }
+
+    fn finish(self) -> Result<()> {
         self.stop.store(true, Ordering::Release);
-        self.handle.join().expect("join server");
-        assert_eq!(
-            self.request_count.load(Ordering::Acquire),
-            self.expected_requests,
-            "registry request count mismatch: expected {}, got {}",
-            self.expected_requests,
-            self.request_count.load(Ordering::Acquire)
+        self.handle
+            .join()
+            .map_err(|_| anyhow::anyhow!("registry thread panicked"))?;
+        let observed = self.request_count.load(Ordering::Acquire);
+        ensure!(
+            observed == self.expected_requests,
+            "registry request count mismatch: expected {}, got {observed}",
+            self.expected_requests
         );
+        Ok(())
     }
 }
 
@@ -690,17 +697,151 @@ mod resume_completed_state {
 // (feature line 26)
 // ----------------------------------------------------------------------------
 mod resume_plan_id_mismatch {
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+
     use super::*;
+
+    const SECRET_SENTINEL: &str = "RESUME_MISMATCH_SECRET_SENTINEL";
+
+    fn create_recording_publish_cargo(root: &Path) -> Result<(PathBuf, PathBuf)> {
+        let log = root.join("unexpected-publish-cargo-invocation.log");
+
+        #[cfg(windows)]
+        let executable = {
+            let path = root.join("recording-cargo.cmd");
+            fs::write(
+                &path,
+                "@echo off\r\n>>\"%SHIPPER_FAKE_INVOCATION_LOG%\" echo invoked\r\nexit /b 99\r\n",
+            )
+            .context("write Windows recording Cargo")?;
+            path
+        };
+
+        #[cfg(not(windows))]
+        let executable = {
+            use std::os::unix::fs::PermissionsExt;
+
+            let path = root.join("recording-cargo");
+            fs::write(
+                &path,
+                "#!/usr/bin/env sh\nprintf 'invoked\\n' >> \"$SHIPPER_FAKE_INVOCATION_LOG\"\nexit 99\n",
+            )
+            .context("write recording Cargo")?;
+            let mut permissions = fs::metadata(&path)
+                .context("read recording Cargo metadata")?
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&path, permissions).context("make recording Cargo executable")?;
+            path
+        };
+
+        Ok((executable, log))
+    }
+
+    fn collect_files(root: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
+        let mut files = BTreeMap::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(directory) = pending.pop() {
+            for entry in fs::read_dir(&directory)
+                .with_context(|| format!("read artifact directory {}", directory.display()))?
+            {
+                let entry = entry.context("read artifact entry")?;
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    let relative = path
+                        .strip_prefix(root)
+                        .with_context(|| format!("relativize artifact {}", path.display()))?
+                        .to_path_buf();
+                    files.insert(
+                        relative,
+                        fs::read(&path)
+                            .with_context(|| format!("read artifact {}", path.display()))?,
+                    );
+                }
+            }
+        }
+        Ok(files)
+    }
+
+    fn run_mismatch(
+        root: &Path,
+        state_dir: &Path,
+        api_base: &str,
+        publish_cargo_bin: &Path,
+        publish_cargo_log: &Path,
+        format: Option<&str>,
+    ) -> Result<std::process::Output> {
+        let mut command = loopback_shipper_cmd();
+        command
+            .timeout(Duration::from_secs(20))
+            .arg("--manifest-path")
+            .arg(root.join("Cargo.toml"))
+            .arg("--api-base")
+            .arg(api_base)
+            .arg("--allow-dirty")
+            .arg("--state-dir")
+            .arg(state_dir)
+            .env("CARGO_REGISTRY_TOKEN", SECRET_SENTINEL)
+            .env("SHIPPER_CARGO_BIN", publish_cargo_bin)
+            .env("SHIPPER_FAKE_INVOCATION_LOG", publish_cargo_log);
+        if let Some(format) = format {
+            command.arg("--format").arg(format);
+        }
+        command
+            .arg("resume")
+            .output()
+            .context("run bounded resume mismatch process")
+    }
+
+    fn assert_mismatch_output(output: &std::process::Output, surface: &str) -> Result<()> {
+        ensure!(
+            output.status.code() == Some(1),
+            "{surface} mismatch exit was {:?}",
+            output.status.code()
+        );
+        ensure!(output.stdout.is_empty(), "{surface} stdout must be empty");
+        let stderr = String::from_utf8(output.stderr.clone())
+            .with_context(|| format!("decode {surface} stderr"))?;
+        ensure!(
+            stderr.contains("does not match current plan_id"),
+            "{surface} mismatch diagnostic"
+        );
+        ensure!(
+            stderr.contains("--force-resume"),
+            "{surface} force escape diagnostic"
+        );
+        for forbidden in [
+            "shipper.resume.v1",
+            "Result:",
+            "Safe to resume:",
+            "safe_to_resume",
+            "\"outcome\"",
+        ] {
+            ensure!(
+                !stderr.contains(forbidden),
+                "{surface} fabricated completed/safe claim: {forbidden}"
+            );
+        }
+        ensure!(
+            !stderr.contains(SECRET_SENTINEL),
+            "{surface} leaked secret sentinel"
+        );
+        Ok(())
+    }
 
     /// Given an existing state file with plan_id "abc123",
     /// And the current workspace generates a different plan_id,
     /// When I run "shipper resume",
     /// Then the exit code is non-zero and the error mentions plan_id.
     #[test]
-    fn given_mismatched_plan_id_when_resume_then_rejects_with_error() {
-        let td = tempdir().expect("tempdir");
+    fn given_mismatched_plan_id_when_resume_then_rejects_with_error() -> Result<()> {
+        let td = tempdir().context("create mismatch workspace")?;
         create_single_crate_workspace(td.path());
         let state_dir = td.path().join(".shipper");
+        let registry = spawn_registry(Vec::new(), 0);
 
         let mock_state = r#"{
             "state_version": "shipper.state.v1",
@@ -721,21 +862,54 @@ mod resume_plan_id_mismatch {
                     "last_updated_at": "2024-01-01T00:00:00Z"
                 }
             }
-        }"#;
-        write_state_json(&state_dir, mock_state);
+        }"#
+        .replace("https://crates.io", &registry.base_url)
+        .replace("https://index.crates.io", &registry.base_url);
+        write_state_json(&state_dir, &mock_state);
+        fs::write(
+            state_dir.join("events.jsonl"),
+            b"{\"fixture\":\"pre-existing-event-evidence\"}\n",
+        )
+        .context("write pre-existing event evidence")?;
+        let state_before = collect_files(&state_dir)?;
+        let (publish_cargo_bin, publish_cargo_log) = create_recording_publish_cargo(td.path())?;
 
-        // When: resume with mismatched plan_id
-        loopback_shipper_cmd()
-            .arg("--manifest-path")
-            .arg(td.path().join("Cargo.toml"))
-            .arg("--allow-dirty")
-            .arg("--state-dir")
-            .arg(&state_dir)
-            .arg("resume")
-            .assert()
-            .failure()
-            .stderr(contains("does not match current plan_id"))
-            .stderr(contains("--force-resume"));
+        let human = run_mismatch(
+            td.path(),
+            &state_dir,
+            &registry.base_url,
+            &publish_cargo_bin,
+            &publish_cargo_log,
+            None,
+        )?;
+        let json = run_mismatch(
+            td.path(),
+            &state_dir,
+            &registry.base_url,
+            &publish_cargo_bin,
+            &publish_cargo_log,
+            Some("json"),
+        )?;
+
+        assert_mismatch_output(&human, "human")?;
+        assert_mismatch_output(&json, "JSON-requested")?;
+        registry.finish()?;
+        ensure!(
+            !publish_cargo_log.exists(),
+            "resume mismatch invoked publish Cargo"
+        );
+        ensure!(
+            collect_files(&state_dir)? == state_before,
+            "resume mismatch mutated state/events or created evidence"
+        );
+        for (path, contents) in collect_files(td.path())? {
+            ensure!(
+                !String::from_utf8_lossy(&contents).contains(SECRET_SENTINEL),
+                "secret sentinel leaked in {}",
+                path.display()
+            );
+        }
+        Ok(())
     }
 
     /// Given an existing state file with a wrong plan_id,
