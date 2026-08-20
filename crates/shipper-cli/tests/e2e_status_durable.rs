@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command as StdCommand;
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
@@ -26,6 +27,9 @@ use tiny_http::Server;
 
 const SECRET: &str = "DURABLE_STATUS_MATRIX_SECRET_SENTINEL";
 const PASSPHRASE: &str = "fixture-passphrase";
+const ORPHAN_LOCK_STATE_DIR: &str = "SHIPPER_TEST_ORPHAN_LOCK_STATE_DIR";
+const ORPHAN_LOCK_WORKSPACE_ROOT: &str = "SHIPPER_TEST_ORPHAN_LOCK_WORKSPACE_ROOT";
+const ORPHAN_LOCK_PLAN_ID: &str = "SHIPPER_TEST_ORPHAN_LOCK_PLAN_ID";
 
 fn redacted_diagnostic(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes)
@@ -220,14 +224,44 @@ fn still_unknown_outcome() -> ReconciliationOutcome {
     }
 }
 
-fn write_not_live_lock(state_dir: &Path, root: &Path, plan_id: &str) -> Result<()> {
-    let lock = LockFile::acquire(state_dir, Some(root))?;
-    lock.set_plan_id(plan_id)?;
+fn write_not_live_lock(state_dir: &Path, root: &Path, plan_id: &str) -> Result<PathBuf> {
+    let output = StdCommand::new(std::env::current_exe()?)
+        .arg("--exact")
+        .arg("durable_status_orphan_lock_helper")
+        .arg("--nocapture")
+        .env(ORPHAN_LOCK_STATE_DIR, state_dir)
+        .env(ORPHAN_LOCK_WORKSPACE_ROOT, root)
+        .env(ORPHAN_LOCK_PLAN_ID, plan_id)
+        .output()?;
+    ensure!(
+        output.status.success(),
+        "orphan-lock helper failed: status={:?}; stdout={:?}; stderr={:?}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     let path = lock_path(state_dir, Some(root));
-    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
-    lock.release()?;
-    value["pid"] = serde_json::json!(u32::MAX);
-    write(&path, serde_json::to_vec_pretty(&value)?)
+    ensure!(
+        path.exists(),
+        "orphan-lock helper exited without retaining {}",
+        path.display()
+    );
+    Ok(path)
+}
+
+#[test]
+fn durable_status_orphan_lock_helper() -> Result<()> {
+    let Some(state_dir) = std::env::var_os(ORPHAN_LOCK_STATE_DIR) else {
+        return Ok(());
+    };
+    let workspace_root = std::env::var_os(ORPHAN_LOCK_WORKSPACE_ROOT)
+        .map(PathBuf::from)
+        .context("orphan-lock helper workspace root")?;
+    let plan_id = std::env::var(ORPHAN_LOCK_PLAN_ID).context("orphan-lock helper plan ID")?;
+    let lock = LockFile::acquire(&PathBuf::from(state_dir), Some(&workspace_root))?;
+    lock.set_plan_id(&plan_id)?;
+    std::mem::forget(lock);
+    Ok(())
 }
 
 fn invoke(
@@ -462,16 +496,23 @@ fn durable_status_process_matrix_is_fail_closed_and_side_effect_free() -> Result
     let resumable = td.path().join("resumable-state");
     write_events(&resumable, &plan.plan_id, [])?;
     save_state(&resumable, &pending_state(&plan, PackageState::Pending))?;
-    write_not_live_lock(&resumable, td.path(), &plan.plan_id)?;
+    let resumable_lock = write_not_live_lock(&resumable, td.path(), &plan.plan_id)?;
     let resumable_observation = shipper_core::cli_bridge::observe_run(&resumable, Some(td.path()))?;
     ensure!(
         matches!(
             resumable_observation,
-            shipper_core::cli_bridge::RunObservation::Unfinished { .. }
+            shipper_core::cli_bridge::RunObservation::Unfinished {
+                liveness: shipper_core::cli_bridge::RunLiveness::NotLive,
+                ..
+            }
         ),
-        "resumable-state: expected unfinished core observation; observation={resumable_observation:?}"
+        "resumable-state: fixture must prove NotLive before spawning status children; observation={resumable_observation:?}"
     );
     eprintln!("resumable-state: core observation={resumable_observation:?}");
+    ensure!(
+        resumable_lock.exists(),
+        "resumable lock disappeared before human/JSON durable status children"
+    );
     assert_pair(
         td.path(),
         &base_url,
