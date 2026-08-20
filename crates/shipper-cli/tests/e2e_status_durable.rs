@@ -3,7 +3,6 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command as StdCommand;
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
@@ -225,7 +224,9 @@ fn still_unknown_outcome() -> ReconciliationOutcome {
 }
 
 fn write_not_live_lock(state_dir: &Path, root: &Path, plan_id: &str) -> Result<PathBuf> {
-    let output = StdCommand::new(std::env::current_exe()?)
+    let mut helper = Command::new(std::env::current_exe()?);
+    let output = helper
+        .timeout(Duration::from_secs(20))
         .arg("--exact")
         .arg("durable_status_orphan_lock_helper")
         .arg("--nocapture")
