@@ -294,9 +294,22 @@ fn assert_pair(
     );
     let human_text = String::from_utf8(human.stdout)?;
     let value: serde_json::Value = serde_json::from_slice(&json.stdout)?;
-    ensure!(value["schema_version"] == "shipper.status.durable.v1");
-    ensure!(value["state_dir"] == state_name);
-    ensure!(value["outcome"]["status"] == status);
+    ensure!(
+        value["schema_version"] == "shipper.status.durable.v1",
+        "{state_name}: unexpected schema: {}",
+        redacted_diagnostic(&json.stdout)
+    );
+    ensure!(
+        value["state_dir"] == state_name,
+        "{state_name}: unexpected state identity: {}",
+        redacted_diagnostic(&json.stdout)
+    );
+    ensure!(
+        value["outcome"]["status"] == status,
+        "{state_name}: expected status {status:?}, got {:?}; envelope={}",
+        value["outcome"]["status"],
+        redacted_diagnostic(&json.stdout)
+    );
     ensure!(value["outcome"]["next_action"]["kind"] == action);
     ensure!(value["outcome"]["plan_id"] == expected_plan_id);
     ensure!(human_text.contains(&format!("Plan ID: {expected_plan_id}")));
@@ -435,6 +448,15 @@ fn durable_status_process_matrix_is_fail_closed_and_side_effect_free() -> Result
     write_events(&resumable, &plan.plan_id, [])?;
     save_state(&resumable, &pending_state(&plan, PackageState::Pending))?;
     write_not_live_lock(&resumable, td.path(), &plan.plan_id)?;
+    let resumable_observation = shipper_core::cli_bridge::observe_run(&resumable, Some(td.path()))?;
+    ensure!(
+        matches!(
+            resumable_observation,
+            shipper_core::cli_bridge::RunObservation::Unfinished { .. }
+        ),
+        "resumable-state: expected unfinished core observation; observation={resumable_observation:?}"
+    );
+    eprintln!("resumable-state: core observation={resumable_observation:?}");
     assert_pair(
         td.path(),
         &base_url,

@@ -372,6 +372,22 @@ fn hide_args_from_help(command: Command, hidden_ids: &[&str]) -> Command {
     })
 }
 
+fn validate_cli_combinations(cli: &Cli) -> std::result::Result<(), clap::Error> {
+    let durable_status = matches!(&cli.cmd, Some(Commands::Status { durable: true, .. }));
+    if durable_status && (cli.registries.is_some() || cli.all_registries) {
+        let selector = if cli.registries.is_some() {
+            "--registries"
+        } else {
+            "--all-registries"
+        };
+        return Err(cli_command().error(
+            clap::error::ErrorKind::ArgumentConflict,
+            format!("the argument '--durable' cannot be used with '{selector}'"),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Print the deterministic publish plan (dependency-first ordering).
@@ -503,10 +519,7 @@ EXAMPLES:
         #[arg(long)]
         watch: bool,
         /// Interpret authoritative local run evidence without querying a registry.
-        #[arg(
-            long,
-            conflicts_with_all = ["watch", "registries", "all_registries"]
-        )]
+        #[arg(long, conflicts_with = "watch")]
         durable: bool,
     },
     /// Print environment and auth diagnostics.
@@ -1230,6 +1243,10 @@ pub fn run() -> Result<std::process::ExitCode> {
     if cli.version {
         print_version(cli.verbose);
         return Ok(std::process::ExitCode::SUCCESS);
+    }
+
+    if let Err(error) = validate_cli_combinations(&cli) {
+        error.exit();
     }
 
     // Handle Config commands early (they don't need workspace plan)
@@ -6426,6 +6443,39 @@ mod tests {
         assert_eq!(cli.verify_mode.as_deref(), Some("package"));
         assert_eq!(cli.policy.as_deref(), Some("safe"));
         assert_eq!(cli.format, "json");
+    }
+
+    #[test]
+    fn durable_status_validation_rejects_both_multi_registry_selectors() -> Result<()> {
+        for args in [
+            ["shipper", "--registries", "a,b", "status", "--durable"].as_slice(),
+            ["shipper", "--all-registries", "status", "--durable"].as_slice(),
+        ] {
+            let matches = cli_command().try_get_matches_from(args)?;
+            let cli = Cli::from_arg_matches(&matches)?;
+            let error = validate_cli_combinations(&cli).err().ok_or_else(|| {
+                anyhow::anyhow!("multi-registry durable status validated: {args:?}")
+            })?;
+            anyhow::ensure!(
+                error.kind() == clap::error::ErrorKind::ArgumentConflict,
+                "expected argument conflict for {args:?}, got {:?}: {error}",
+                error.kind()
+            );
+        }
+
+        let singular_matches = cli_command().try_get_matches_from([
+            "shipper",
+            "--registry",
+            "private",
+            "status",
+            "--durable",
+        ])?;
+        let singular = Cli::from_arg_matches(&singular_matches)?;
+        anyhow::ensure!(
+            validate_cli_combinations(&singular).is_ok(),
+            "single-registry durable status must remain accepted"
+        );
+        Ok(())
     }
 
     // #100 — `--preflight-only` on `shipper preflight` must parse into a
