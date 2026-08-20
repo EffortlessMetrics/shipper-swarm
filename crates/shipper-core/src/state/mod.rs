@@ -9,3 +9,4 @@ pub mod execution_state;
 pub mod rebuild;
 pub mod reconciliation;
 pub mod rehearsal;
+pub(crate) mod run_observation;
