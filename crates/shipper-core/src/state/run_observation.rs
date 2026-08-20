@@ -124,20 +124,25 @@ enum EventPhase {
 }
 
 fn event_phase(events: &EventLog) -> EventPhase {
-    let mut next_plan_id = None;
+    let mut pending_plan_id = None;
     let mut phase = EventPhase::NoEvidence;
     for event in events.all_events() {
         match &event.event_type {
-            EventType::PlanCreated { plan_id, .. } => next_plan_id = Some(plan_id.clone()),
+            EventType::PlanCreated { plan_id, .. } => match &mut phase {
+                EventPhase::Unfinished {
+                    plan_id: active_plan_id,
+                } => *active_plan_id = Some(plan_id.clone()),
+                _ => pending_plan_id = Some(plan_id.clone()),
+            },
             EventType::ExecutionStarted => {
                 phase = EventPhase::Unfinished {
-                    plan_id: next_plan_id.clone(),
+                    plan_id: pending_plan_id.take(),
                 }
             }
             EventType::ExecutionFinished { result } => {
                 let plan_id = match &phase {
                     EventPhase::Unfinished { plan_id } => plan_id.clone(),
-                    _ => next_plan_id.clone(),
+                    _ => pending_plan_id.take(),
                 };
                 phase = EventPhase::Finished {
                     plan_id,
@@ -275,6 +280,15 @@ mod tests {
                 package_count: 1,
             },
             EventType::ExecutionStarted,
+        ]
+    }
+    fn started_in_production_order(plan: &str) -> Vec<EventType> {
+        vec![
+            EventType::ExecutionStarted,
+            EventType::PlanCreated {
+                plan_id: plan.into(),
+                package_count: 1,
+            },
         ]
     }
 
@@ -506,7 +520,7 @@ mod tests {
         e.push(EventType::ExecutionFinished {
             result: ExecutionResult::Success,
         });
-        e.extend(started("new"));
+        e.extend(started_in_production_order("new"));
         write_events(td.path(), e)?;
         write_lock(td.path(), &record("a", Some("new"), Some(identity(7)))?)?;
         let observed = observe_run_with(
@@ -517,6 +531,22 @@ mod tests {
         )?;
         ensure!(
             matches!(observed,RunObservation::Unfinished{plan_id:Some(ref p),liveness:RunLiveness::Live} if p=="new")
+        );
+        Ok(())
+    }
+    #[test]
+    fn production_order_binds_plan_to_first_active_segment() -> Result<()> {
+        let td = tempdir()?;
+        write_events(td.path(), started_in_production_order("plan-a"))?;
+        write_lock(td.path(), &record("a", Some("plan-a"), Some(identity(7)))?)?;
+        let observed = observe_run_with(
+            td.path(),
+            None,
+            "a",
+            &mut probe(ProcessStatus::Running(identity(7))),
+        )?;
+        ensure!(
+            matches!(observed, RunObservation::Unfinished { plan_id: Some(ref plan_id), liveness: RunLiveness::Live } if plan_id == "plan-a")
         );
         Ok(())
     }
