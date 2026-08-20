@@ -19,6 +19,10 @@ A green swarm commit is not publication authorization. A release becomes tag-eli
 - [Swarm sync policy](../status/SWARM_SYNC.md) — history-preserving promotion and backfill mechanics.
 - [Changie workflow](../how-to/manage-changelog-fragments.md) — local fragment intake, the retained pre-Changie baseline, batching, and round-trip proof.
 
+- [0.5.0 change ledger](0.5.0-change-ledger.md) — exact source inventory,
+  canonical release-story dispositions, compatibility coverage, and editorial
+  claim boundaries for the 0.5.0 changelog pass.
+
 ## Evidence identity rule
 
 Every candidate record must distinguish these identities:
