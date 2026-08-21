@@ -2303,7 +2303,7 @@ pub fn run() -> Result<std::process::ExitCode> {
                 } else {
                     PlanYankFilter::AllPublished
                 };
-                plan_yank::build_plan(&receipt, filter)
+                plan_yank::build_plan_with_reason(&receipt, filter, reason.as_deref())
             };
 
             match cli.format.as_str() {
