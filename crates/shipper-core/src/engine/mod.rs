@@ -3084,6 +3084,30 @@ mod tests {
             run_publish(&ws, &opts, &mut reporter).expect_err("controlled stop");
         });
 
+        let reconciliation_path = state::reconciliation_path(&state_dir);
+        let reconciliation_before =
+            std::fs::read(&reconciliation_path).expect("reconciliation before marker negatives");
+        let mut report: crate::types::ReconciliationReport =
+            serde_json::from_slice(&reconciliation_before)
+                .expect("parse reconciliation for marker negatives");
+        let mut other = report
+            .records
+            .first()
+            .cloned()
+            .expect("controlled-stop reconciliation record");
+        other.package = "other@1.0.0".to_string();
+        other.name = "other".to_string();
+        other.version = "1.0.0".to_string();
+        other.outcome = ReconciliationOutcome::StillUnknown {
+            attempts: 1,
+            elapsed_ms: 1,
+            reason: "other package remains ambiguous".to_string(),
+        };
+        other.operator_action = crate::types::ReconciliationOperatorAction::OperatorActionRequired;
+        report.records.push(other);
+        state::write_reconciliation_report(&state_dir, &report)
+            .expect("write mixed reconciliation for marker negatives");
+
         let controlled_events_path = events::events_path(&state_dir);
         let complete_events =
             std::fs::read_to_string(&controlled_events_path).expect("complete events");
@@ -3095,6 +3119,8 @@ mod tests {
             format!("{}\n", event_lines.join("\n")),
         )
         .expect("remove marker for negative");
+        let markerless_events_before =
+            std::fs::read(&controlled_events_path).expect("markerless events before rejection");
         let state_before_rejection =
             std::fs::read(state::state_path(&state_dir)).expect("state before rejection");
         let cargo_before_rejection = std::fs::read(&cargo_log).expect("cargo log before rejection");
@@ -3107,6 +3133,11 @@ mod tests {
             std::fs::read(state::state_path(&state_dir)).expect("state after rejection"),
             state_before_rejection,
             "rejected resume must not mutate state"
+        );
+        assert_eq!(
+            std::fs::read(&controlled_events_path).expect("events after markerless rejection"),
+            markerless_events_before,
+            "markerless rejection must not mutate events"
         );
         assert_eq!(
             std::fs::read(&cargo_log).expect("cargo log after rejection"),
@@ -3126,6 +3157,8 @@ mod tests {
             format!("{}\n", reordered.join("\n")),
         )
         .expect("write reordered marker");
+        let reordered_events_before =
+            std::fs::read(&controlled_events_path).expect("reordered events before rejection");
         let reordered_error = run_resume(&ws, &opts, &mut CollectingReporter::default())
             .expect_err("non-terminal marker must be rejected");
         assert!(
@@ -3138,14 +3171,20 @@ mod tests {
             "reordered marker rejection must not mutate state"
         );
         assert_eq!(
+            std::fs::read(&controlled_events_path).expect("events after reordered rejection"),
+            reordered_events_before,
+            "reordered marker rejection must not mutate events"
+        );
+        assert_eq!(
             std::fs::read(&cargo_log).expect("cargo log after reordered rejection"),
             cargo_before_rejection,
             "reordered marker rejection must not dispatch Cargo"
         );
         std::fs::write(&controlled_events_path, &complete_events)
             .expect("restore terminal marker after reordered negative");
+        std::fs::write(&reconciliation_path, &reconciliation_before)
+            .expect("restore reconciliation after marker negatives");
 
-        let reconciliation_path = state::reconciliation_path(&state_dir);
         let reconciliation_before =
             std::fs::read(&reconciliation_path).expect("reconciliation before cross-run negative");
         let mut cross_run: serde_json::Value = serde_json::from_slice(&reconciliation_before)
@@ -3173,7 +3212,7 @@ mod tests {
 
         #[cfg(target_os = "linux")]
         {
-            let live_lock = crate::lock::LockFile::acquire(&state_dir, Some(&ws.root))
+            let live_lock = crate::lock::LockFile::acquire(&state_dir, Some(&ws.workspace_root))
                 .expect("acquire matching live lock");
             live_lock
                 .set_plan_id(&ws.plan.plan_id)

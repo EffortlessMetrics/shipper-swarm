@@ -174,6 +174,9 @@ pub(crate) fn verify_controlled_stop_consistency(
     {
         bail!("controlled-stop reconciliation identity disagrees with state");
     }
+    if has_latest_still_unknown(report) {
+        bail!("controlled stop retains a latest StillUnknown reconciliation outcome");
+    }
     let latest_retry_allowed = |package: &str| latest_retry_allowed(report, package);
     if !latest_retry_allowed(&last.package) {
         bail!("controlled-stop package lacks latest NotPublished retry evidence");
@@ -210,6 +213,14 @@ fn latest_retry_allowed(report: &ReconciliationReport, package: &str) -> bool {
                     shipper_types::ReconciliationOperatorAction::RetryAllowed
                 )
         })
+}
+
+fn has_latest_still_unknown(report: &ReconciliationReport) -> bool {
+    let mut seen = BTreeSet::new();
+    report.records.iter().rev().any(|record| {
+        seen.insert(&record.package)
+            && matches!(record.outcome, ReconciliationOutcome::StillUnknown { .. })
+    })
 }
 
 pub(crate) fn has_not_published_retryable_posture(
@@ -977,7 +988,97 @@ mod tests {
         let error =
             verify_controlled_stop_consistency(&events_path(td.path()), &state, Some(&report))
                 .expect_err("latest StillUnknown must block controlled resume");
-        assert!(format!("{error:#}").contains("latest NotPublished"));
+        assert!(format!("{error:#}").contains("latest StillUnknown"));
+        Ok(())
+    }
+
+    #[test]
+    fn controlled_stop_rejects_latest_still_unknown_for_another_package() -> Result<()> {
+        let td = tempdir()?;
+        let marker_package = "a@1.0.0";
+        let other_package = "b@1.0.0";
+        let not_published = ReconciliationOutcome::NotPublished {
+            attempts: 1,
+            elapsed_ms: 10,
+        };
+        let still_unknown = ReconciliationOutcome::StillUnknown {
+            attempts: 1,
+            elapsed_ms: 20,
+            reason: "other package remains ambiguous".to_string(),
+        };
+        write_events(
+            td.path(),
+            vec![
+                plan_created_event(),
+                PublishEvent {
+                    timestamp: Utc::now(),
+                    event_type: EventType::ExecutionStarted,
+                    package: "all".to_string(),
+                },
+                PublishEvent {
+                    timestamp: Utc::now(),
+                    event_type: EventType::PublishReconciled {
+                        outcome: still_unknown.clone(),
+                    },
+                    package: other_package.to_string(),
+                },
+                published_event("b", "1.0.0"),
+                PublishEvent {
+                    timestamp: Utc::now(),
+                    event_type: EventType::PublishReconciled {
+                        outcome: not_published.clone(),
+                    },
+                    package: marker_package.to_string(),
+                },
+                PublishEvent {
+                    timestamp: Utc::now(),
+                    event_type: EventType::PackageFailed {
+                        class: ErrorClass::Retryable,
+                        message: "retry budget exhausted".to_string(),
+                    },
+                    package: marker_package.to_string(),
+                },
+                PublishEvent {
+                    timestamp: Utc::now(),
+                    event_type: EventType::ExecutionStopped {
+                        reason:
+                            shipper_types::ControlledStopReason::NotPublishedRetryBudgetExhausted,
+                    },
+                    package: marker_package.to_string(),
+                },
+            ],
+        );
+        let state = rebuild_state_from_events(
+            &events_path(td.path()),
+            StateRebuildOptions::new(Registry::crates_io()),
+        )?;
+        let mut report = reconciliation_report(marker_package);
+        let template = report
+            .records
+            .first()
+            .cloned()
+            .context("reconciliation template")?;
+        report.records = vec![
+            ReconciliationRecord {
+                package: other_package.to_string(),
+                name: "b".to_string(),
+                version: "1.0.0".to_string(),
+                outcome: still_unknown,
+                operator_action: ReconciliationOperatorAction::OperatorActionRequired,
+                ..template.clone()
+            },
+            ReconciliationRecord {
+                outcome: not_published,
+                operator_action: ReconciliationOperatorAction::RetryAllowed,
+                ..template
+            },
+        ];
+        let error =
+            verify_controlled_stop_consistency(&events_path(td.path()), &state, Some(&report))
+                .expect_err("another package's latest StillUnknown must block controlled resume");
+        assert!(format!("{error:#}").contains("latest StillUnknown"));
+        assert!(has_not_published_retryable_posture(&state, Some(&report)));
+        assert!(!has_not_published_retryable_posture(&state, None));
         Ok(())
     }
 
