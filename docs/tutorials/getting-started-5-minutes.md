@@ -70,8 +70,8 @@ Read the finishability result as a release decision:
 
 | Result | Meaning | Next action |
 |---|---|---|
-| `PROVEN` | Local packaging and registry checks passed for the configured policy. | You can proceed to `shipper publish` if the version and changelog are already final. |
-| `NOT PROVEN` | Nothing definitive failed, but at least one proof cannot be completed locally. | Review the listed gaps, then decide whether to publish, add rehearsal proof, or change policy. |
+| `PROVEN` | Local packaging and registry checks passed for the configured policy. | Follow the typed `next_action`; complete required non-live rehearsal and release authorization before any publish. |
+| `NOT PROVEN` | Nothing definitive failed, but at least one proof cannot be completed locally. | Follow the typed `next_action`. Only the all-new, dry-run-passed first-publish case offers publish-with-confirmation, and it still requires rehearsal plus release authorization. Investigate every other gap and rerun preflight. |
 | `FAILED` | A blocker was found before publish. | Fix the finding and rerun `shipper preflight`. |
 
 ## 5. Stop before the irreversible step

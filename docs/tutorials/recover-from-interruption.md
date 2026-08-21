@@ -118,11 +118,14 @@ Run `shipper resume` only when the durable result and retained evidence say the
 run is interrupted and safe to resume. Resume recomputes the current plan and
 refuses mismatched plan, source, workspace, registry, or run identity.
 
-The durable result is intentionally fail-closed. Missing/corrupt evidence,
-identity disagreement, cross-host liveness, and unavailable process probes
-stay unknown. On Linux, `Live` requires an exact local boot, PID namespace,
-PID, and process-start match. `NotLive` means the process was absent inside the
-same proven scope; it is not by itself permission to resume.
+The durable result is intentionally fail-closed. `no_evidence` means no durable
+run was found; `identity_mismatch` means source, plan, registry, or evidence
+identity differs; `evidence_disagreement` means the retained sources
+contradict each other; and `unknown` means an unfinished run's liveness cannot
+be established. None authorizes resume. On Linux, `Live` requires an exact
+local boot, PID namespace, PID, and process-start match. `NotLive` means the
+process was absent inside the same proven scope; it is not by itself permission
+to resume.
 
 Do not use `--force-resume` as a normal recovery step. It overrides a plan
 guard and requires a separate operator risk decision.

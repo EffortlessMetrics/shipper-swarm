@@ -26,8 +26,11 @@ shipper status --durable
 
 This local mode bypasses registry access. It correlates the active event
 segment with plan, workspace, state, receipt, reconciliation, and lock
-identity. Missing/corrupt evidence, cross-host identity, probe failure, and
-source disagreement remain unknown.
+identity. Its fail-closed status distinguishes `no_evidence`,
+`identity_mismatch`, `evidence_disagreement`, and `unknown`: respectively no
+durable run, mismatched source/plan/registry/evidence identity, contradictory
+evidence, or an unfinished run whose liveness cannot be established. None of
+those statuses authorizes resume.
 
 On Linux, `Live` requires an exact local boot, PID namespace, PID, and
 process-start match. `NotLive` means the matching-scope process was observed

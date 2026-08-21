@@ -221,24 +221,33 @@ done
 
 Each line should show the rehearsal version.
 
-### Step 9 — yank the rehearsal
+### Step 9 — plan, review, and yank the rehearsal
 
 ```bash
-for c in shipper shipper-cli shipper-core shipper-config shipper-types \
-         shipper-duration shipper-retry shipper-encrypt shipper-webhook \
-         shipper-registry shipper-sparse-index shipper-cargo-failure \
-         shipper-output-sanitizer; do
-  cargo yank --version <rehearsal-version> "$c"
-done
+shipper plan-yank \
+  --from-receipt <downloaded-resume-receipt.json> \
+  --format json > yank-plan.raw.json
+
+# Default receipt mode does not yet apply --reason; stamp the approved reason
+# into every final entry before review and execution.
+jq --arg reason "authorized rehearsal containment" \
+  '.entries |= map(.reason = $reason)' \
+  yank-plan.raw.json > yank-plan.json
+
+# Review every package, version, registry, reason, and dependents-first order.
+jq '.' yank-plan.json
+
+# Destructive: execute only after the reviewed plan is approved.
+shipper yank --plan yank-plan.json
 ```
 
 Yanking is containment, not deletion — the bytes remain on crates.io,
 but new resolves skip them.
 
-Use `shipper plan-yank --from-receipt <file>` to generate a reviewable
-dependents-first containment plan from the rehearsal receipt. Execute direct
-yanks only after checking that plan and supplying the incident reason required
-by `shipper yank`.
+The reviewed final plan embeds the approved reason into each entry. Plan
+execution keeps that evidence and replaces the direct, unreviewed `cargo yank`
+loop. [Issue #338](https://github.com/EffortlessMetrics/shipper-swarm/issues/338)
+tracks applying `plan-yank --reason` directly in default receipt mode.
 
 ## Pass / fail rubric
 

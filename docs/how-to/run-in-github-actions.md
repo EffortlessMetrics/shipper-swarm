@@ -6,9 +6,8 @@ Goal: a tag push triggers a workspace release driven by Shipper. Interruption-sa
 > versions. Protect the `release` environment with maintainer approval and use
 > it only from the repository that owns release authority. Pull requests and
 > ordinary CI should use the fake-Cargo/mock-registry recovery rehearsal, not a
-> live publish.
-
-> `EffortlessMetrics/shipper` remains the release-authority repository. Its
+> live publish. `EffortlessMetrics/shipper` remains the release-authority
+> repository. Its
 > `.github/workflows/release.yml` is the production example; the active
 > development repository does not own publish credentials.
 
@@ -44,7 +43,7 @@ jobs:
       - name: Plan
         run: |
           mkdir -p .shipper
-          shipper plan --format json | tee .shipper/plan.json
+          shipper plan --format json | tee .shipper/plan.txt
 
       - name: Upload plan artifact (before anything destructive)
         if: always()
@@ -240,7 +239,9 @@ operator-controlled follow-up:
   shell: bash
   run: |
     set +e
-    shipper publish --format json > .shipper/publish.json
+    shipper publish --format json \
+      > .shipper/publish.json \
+      2> .shipper/publish.stderr
     code=$?
     echo "shipper_exit=$code" >> "$GITHUB_OUTPUT"
     exit "$code"
@@ -254,7 +255,14 @@ operator-controlled follow-up:
     include-hidden-files: true
 ```
 
-The JSON envelope carries `execution_result` (`"success"`,
+For a wrapped plan-build or publish-engine failure before a receipt exists,
+inspect `.shipper/publish.stderr` for the redacted
+`shipper.publish.error.v1` envelope; stdout is intentionally empty in that
+case. Parser/usage and config/option-validation errors outside that typed
+boundary may instead be prose or usage output. The separate stderr file keeps
+either form available; retain both files with the rest of `.shipper/`.
+
+The completed-result JSON envelope carries `execution_result` (`"success"`,
 `"partial_failure"`, `"complete_failure"`) for programmatic gating. A later
 approved job may restore the exact artifact as `.shipper/` inside the exact
 source checkout and run `shipper status --durable` with the matching candidate
