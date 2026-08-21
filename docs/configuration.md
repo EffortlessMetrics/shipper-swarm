@@ -148,7 +148,7 @@ Shipper uses a lock file to prevent concurrent publish operations. If a lock is 
 policy = "default"
 # Retry strategy: immediate, exponential (default), linear, constant
 strategy = "exponential"
-# Max attempts per crate publish step
+# Cumulative max attempts per crate across publish and resume
 max_attempts = 6
 # Base backoff delay
 base_delay = "2s"
@@ -295,7 +295,7 @@ timeout = "1h"
 policy = "default"
 # Retry strategy: immediate, exponential (default), linear, constant
 strategy = "exponential"
-# Max attempts per crate publish step
+# Cumulative max attempts per crate across publish and resume
 max_attempts = 6
 # Base backoff delay
 base_delay = "2s"

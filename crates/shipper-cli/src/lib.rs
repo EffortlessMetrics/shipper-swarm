@@ -132,7 +132,7 @@ struct Cli {
     #[arg(long, global = true)]
     no_verify: bool,
 
-    /// Max attempts per crate publish step (default: 6)
+    /// Cumulative max attempts per crate across publish and resume (default: 6)
     #[arg(long, global = true)]
     max_attempts: Option<u32>,
 
@@ -1007,6 +1007,43 @@ struct PublishEarlyError {
     evidence: Vec<String>,
 }
 
+#[derive(Debug)]
+struct ResumeRetryBudgetError {
+    format: String,
+    rendered_error: String,
+    package: String,
+    current_attempts: u32,
+    requested_max_attempts: u32,
+    minimum_max_attempts: Option<u32>,
+    safe_to_resume: ResumeSafeToResume,
+    next_action: OperatorAction,
+    evidence: Vec<String>,
+}
+
+impl std::fmt::Display for ResumeRetryBudgetError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("the requested cumulative retry ceiling cannot permit another attempt")
+    }
+}
+
+impl std::error::Error for ResumeRetryBudgetError {}
+
+#[derive(Serialize)]
+struct ResumeRetryBudgetReport<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    status: &'static str,
+    category: &'static str,
+    summary: &'static str,
+    package: &'a str,
+    current_attempts: u32,
+    requested_max_attempts: u32,
+    minimum_max_attempts: Option<u32>,
+    safe_to_resume: ResumeSafeToResume,
+    next_action: &'a OperatorAction,
+    evidence: Vec<String>,
+}
+
 impl std::fmt::Display for PublishEarlyError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(self.summary)
@@ -1214,6 +1251,57 @@ fn mark_publish_engine_error(
     }
 }
 
+fn mark_resume_engine_error(
+    error: anyhow::Error,
+    format: &str,
+    configured_state_dir: &Path,
+    evidence_state_dir: &Path,
+) -> anyhow::Error {
+    let Some(budget) = engine::classify_resume_retry_budget(&error) else {
+        return error.context(resume_failure_hint(configured_state_dir));
+    };
+    let evidence = still_unknown_evidence(evidence_state_dir, true);
+    let (safe_to_resume, next_action, next_action_reason) = match budget.minimum_max_attempts {
+        Some(minimum) => (
+            true,
+            ActionKind::Resume,
+            format!(
+                "retry ceilings are cumulative; rerun resume with --max-attempts {minimum} or greater while preserving the same plan, registry, workspace, and state directory"
+            ),
+        ),
+        None => (
+            false,
+            ActionKind::StopAndInvestigate,
+            "the cumulative attempt count cannot be increased within the supported range; inspect retained evidence before acting".to_string(),
+        ),
+    };
+    let error = error.context(
+        "resume was rejected before changing retained evidence or dispatching a publish attempt",
+    );
+    let rendered_error = shipper_output_sanitizer::redact_sensitive(&format_error(&error))
+        .trim_end()
+        .to_string();
+    ResumeRetryBudgetError {
+        format: format.to_string(),
+        rendered_error,
+        package: budget.package,
+        current_attempts: budget.current_attempts,
+        requested_max_attempts: budget.requested_max_attempts,
+        minimum_max_attempts: budget.minimum_max_attempts,
+        safe_to_resume: ResumeSafeToResume {
+            value: safe_to_resume,
+            reason: if safe_to_resume {
+                "the rejected command did not consume or change the retained controlled-stop authorization".to_string()
+            } else {
+                "retained evidence is coherent, but no larger supported retry ceiling can authorize another attempt".to_string()
+            },
+        },
+        next_action: OperatorAction::posture(next_action, next_action_reason),
+        evidence,
+    }
+    .into()
+}
+
 fn mark_publish_early_error_with_next_action(
     error: anyhow::Error,
     format: &str,
@@ -1242,6 +1330,50 @@ fn mark_publish_early_error_with_next_action(
 
 /// Render a top-level error to stderr via [`format_error`].
 pub fn report_error(error: &anyhow::Error) {
+    if let Some(resume_error) = error.downcast_ref::<ResumeRetryBudgetError>() {
+        if resume_error.format == "json" {
+            let report = ResumeRetryBudgetReport {
+                schema_version: "shipper.resume.error.v1",
+                command: "resume",
+                status: "failed",
+                category: "retry_budget_exhausted",
+                summary: "the requested cumulative retry ceiling cannot permit another attempt",
+                package: &resume_error.package,
+                current_attempts: resume_error.current_attempts,
+                requested_max_attempts: resume_error.requested_max_attempts,
+                minimum_max_attempts: resume_error.minimum_max_attempts,
+                safe_to_resume: ResumeSafeToResume {
+                    value: resume_error.safe_to_resume.value,
+                    reason: resume_error.safe_to_resume.reason.clone(),
+                },
+                next_action: &resume_error.next_action,
+                evidence: resume_error.evidence.clone(),
+            };
+            match serde_json::to_string_pretty(&report) {
+                Ok(json) => eprintln!("{json}"),
+                Err(_) => eprintln!("{}", resume_error.rendered_error),
+            }
+            return;
+        }
+
+        eprintln!("{}", resume_error.rendered_error);
+        eprintln!();
+        eprintln!(
+            "Result: failed — the requested cumulative retry ceiling cannot permit another attempt"
+        );
+        let safe_to_resume = if resume_error.safe_to_resume.value {
+            "yes"
+        } else {
+            "no"
+        };
+        eprintln!(
+            "Safe to resume: {safe_to_resume} — {}",
+            resume_error.safe_to_resume.reason
+        );
+        eprintln!("Next: {}", resume_error.next_action.reason);
+        eprintln!("Evidence: {}", resume_error.evidence.join(", "));
+        return;
+    }
     if let Some(publish_error) = error.downcast_ref::<PublishEarlyError>() {
         if publish_error.format == "json" {
             let report = PublishEarlyErrorReport {
@@ -1716,8 +1848,19 @@ pub fn run() -> Result<std::process::ExitCode> {
                 // countdown via ProgressReporter::retry_countdown.
                 reporter.install_progress(progress, package_positions);
 
+                let evidence_state_dir = shipper_core::runtime::execution::resolve_state_dir(
+                    &current_planned.workspace_root,
+                    &current_opts.state_dir,
+                );
                 let receipt = engine::run_resume(&current_planned, &current_opts, &mut reporter)
-                    .with_context(|| resume_failure_hint(&current_opts.state_dir))?;
+                    .map_err(|error| {
+                        mark_resume_engine_error(
+                            error,
+                            &cli.format,
+                            &current_opts.state_dir,
+                            &evidence_state_dir,
+                        )
+                    })?;
 
                 if let Some(progress) = reporter.take_progress() {
                     progress.finish();

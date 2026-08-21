@@ -74,7 +74,12 @@ evidence for each targeted registry.
 - `--policy <safe|balanced|fast>` — verification posture
 - `--verify-mode <workspace|package|none>` — dry-run granularity
 - `--readiness-method <api|index|both>` — post-publish visibility check
-- `--max-attempts <N>` — retry budget per crate (default 6)
+- `--max-attempts <N>` — cumulative retry ceiling per crate across the initial
+  publish and later resume segments (default 6). A resume whose retained
+  attempt count already meets the requested ceiling is rejected before state,
+  events, a Cargo publish attempt, or registry traffic changes; the diagnostic
+  reports the minimum larger ceiling that can permit another attempt, or stops
+  for investigation if the supported ceiling range is exhausted.
 - `--base-delay <duration>`, `--max-delay <duration>` — backoff envelope
 - `--verify-timeout <duration>`, `--readiness-timeout <duration>` — verification budgets
 
@@ -95,6 +100,15 @@ the same object at `shipper.resume.v1.outcome` while preserving the existing
 top-level fields. Ambiguous registry truth stops for reconciliation, uploaded
 work waits for registry visibility, permanent failures require repair, and
 only durable pending or retryable work recommends resume.
+
+A controlled NotPublished stop can remain safe to resume while a particular
+resume invocation is rejected because its cumulative `--max-attempts` ceiling
+is exhausted. Human stderr reports the package and current, requested, and
+minimum usable attempt counts. JSON stderr emits the same fields in
+`shipper.resume.error.v1`, with `safe_to_resume`, a typed next action, and the
+unchanged retained evidence paths. Increase the explicit ceiling only after
+reviewing that evidence; the rejected command does not consume the controlled
+resume authorization.
 
 Resume's plan guard compares the stored and recomputed `plan_id`. That ID is a
 hash of the registry API base and ordered package names/versions. It does not

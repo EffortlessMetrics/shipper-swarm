@@ -78,7 +78,7 @@ pub struct RetryConfig {
     #[serde(default)]
     pub policy: RetryPolicy,
 
-    /// Max attempts per crate publish step (used when policy is custom or as fallback)
+    /// Cumulative max attempts per crate across publish and resume (used when policy is custom or as fallback)
     #[serde(default = "default_max_attempts")]
     pub max_attempts: u32,
 
@@ -893,7 +893,7 @@ timeout = "1h"
 # - conservative: linear backoff with 3 attempts, 5s base, 60s max
 # - custom: uses explicit strategy settings below
 policy = "default"
-# Max attempts per crate publish step (used when policy is custom)
+# Cumulative max attempts per crate across publish and resume (used when policy is custom)
 max_attempts = 6
 # Base backoff delay
 base_delay = "2s"
