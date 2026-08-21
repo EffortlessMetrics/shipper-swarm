@@ -31,8 +31,14 @@ pub(in crate::doctor) fn inspect(
     let auth_type = shipper_core::auth::detect_auth_type(&ws.plan.registry.name)?;
     let auth_label = match auth_type {
         Some(AuthType::Token) => "token (detected)",
-        Some(AuthType::TrustedPublishing) => "trusted (detected)",
-        Some(AuthType::Unknown) => "unknown",
+        Some(AuthType::TrustedPublishing) if ws.plan.registry.name == "crates-io" => {
+            "trusted (detected)"
+        }
+        Some(AuthType::TrustedPublishing) => {
+            "selected-registry auth unproven (OIDC environment detected)"
+        }
+        Some(AuthType::Unknown) if ws.plan.registry.name == "crates-io" => "unknown",
+        Some(AuthType::Unknown) => "selected-registry auth unproven (incomplete environment)",
         None if ws.plan.registry.name == "crates-io" => "NONE FOUND (set CARGO_REGISTRY_TOKEN)",
         None => "NONE FOUND (selected-registry token missing)",
     };
@@ -46,7 +52,7 @@ pub(in crate::doctor) fn inspect(
             Some(AuthType::TrustedPublishing | AuthType::Unknown)
         )
     {
-        findings.push(non_crates_oidc_finding(ws, auth_type.as_ref()));
+        findings.push(non_crates_oidc_finding(ws, auth_type.as_ref(), auth_label));
     } else if auth_type == Some(AuthType::TrustedPublishing) {
         findings.push(Finding {
             id: "trusted-publishing-token-not-minted",
@@ -92,7 +98,11 @@ pub(in crate::doctor) fn inspect(
     })
 }
 
-fn non_crates_oidc_finding(ws: &plan::PlannedWorkspace, auth_type: Option<&AuthType>) -> Finding {
+fn non_crates_oidc_finding(
+    ws: &plan::PlannedWorkspace,
+    auth_type: Option<&AuthType>,
+    auth_label: &str,
+) -> Finding {
     let trusted = auth_type == Some(&AuthType::TrustedPublishing);
     let (id, title, why_it_matters) = if trusted {
         (
@@ -113,14 +123,7 @@ fn non_crates_oidc_finding(ws: &plan::PlannedWorkspace, auth_type: Option<&AuthT
         status: FindingLevel::Blocked,
         title,
         why_it_matters,
-        evidence: trusted_publishing_evidence(
-            if trusted {
-                "oidc environment detected; selected-registry auth unproven"
-            } else {
-                "incomplete environment; selected-registry auth unproven"
-            },
-            &ws.plan.registry.name,
-        ),
+        evidence: trusted_publishing_evidence(auth_label, &ws.plan.registry.name),
         try_next: vec![
             "confirm the selected registry's supported authentication method with its operator",
             "configure the selected registry token through Cargo's registry-specific token interface",

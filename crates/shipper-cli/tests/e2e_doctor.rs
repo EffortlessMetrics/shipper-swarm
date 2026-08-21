@@ -594,18 +594,20 @@ fn doctor_uses_selected_registry_token_without_exposing_it() {
 
 #[test]
 fn doctor_keeps_non_crates_oidc_postures_blocked_and_registry_neutral() {
-    for (case, oidc_url, oidc_token, expected_id) in [
+    for (case, oidc_url, oidc_token, expected_id, expected_auth_type) in [
         (
             "complete",
             Some("https://oidc.example.test/request"),
             Some("oidc-secret-sentinel-complete"),
             "selected-registry-auth-not-proven",
+            "selected-registry auth unproven (OIDC environment detected)",
         ),
         (
             "partial",
             Some("https://oidc.example.test/request"),
             None,
             "selected-registry-auth-environment-incomplete",
+            "selected-registry auth unproven (incomplete environment)",
         ),
     ] {
         let td = tempdir().expect("tempdir");
@@ -664,6 +666,12 @@ fn doctor_keeps_non_crates_oidc_postures_blocked_and_registry_neutral() {
             assert!(!stderr.contains(secret), "case={case}: {stderr}");
         }
         let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid doctor JSON");
+        assert_eq!(
+            json.pointer("/reports/0/auth/auth_type")
+                .and_then(serde_json::Value::as_str),
+            Some(expected_auth_type),
+            "case={case}: {stdout}"
+        );
         let auth_findings = json
             .pointer("/reports/0/auth/findings")
             .and_then(serde_json::Value::as_array)
@@ -681,6 +689,70 @@ fn doctor_keeps_non_crates_oidc_postures_blocked_and_registry_neutral() {
             state_dir.display()
         );
         registry.join();
+
+        let human_registry = spawn_registry(1);
+        let human_state_dir = td.path().join(format!("doctor-oidc-{case}-human-state"));
+        let mut human = loopback_shipper_cmd();
+        human
+            .arg("--manifest-path")
+            .arg(td.path().join("Cargo.toml"))
+            .arg("--registry")
+            .arg("isolated-rehearsal")
+            .arg("--api-base")
+            .arg(&human_registry.base_url)
+            .arg("--state-dir")
+            .arg(&human_state_dir)
+            .arg("doctor")
+            .env("CARGO_HOME", td.path().join("cargo-home"))
+            .env_remove("CARGO_REGISTRY_TOKEN")
+            .env_remove("CARGO_REGISTRIES_ISOLATED_REHEARSAL_TOKEN");
+        match oidc_url {
+            Some(value) => {
+                human.env("ACTIONS_ID_TOKEN_REQUEST_URL", value);
+            }
+            None => {
+                human.env_remove("ACTIONS_ID_TOKEN_REQUEST_URL");
+            }
+        }
+        match oidc_token {
+            Some(value) => {
+                human.env("ACTIONS_ID_TOKEN_REQUEST_TOKEN", value);
+            }
+            None => {
+                human.env_remove("ACTIONS_ID_TOKEN_REQUEST_TOKEN");
+            }
+        }
+        let human_output = human.assert().success().get_output().clone();
+        let human_stdout = String::from_utf8(human_output.stdout).expect("utf8 human stdout");
+        let human_stderr = String::from_utf8(human_output.stderr).expect("utf8 human stderr");
+        assert!(
+            human_stdout.contains(&format!("auth_type: {expected_auth_type}")),
+            "case={case}: {human_stdout}"
+        );
+        assert!(
+            !human_stdout.contains("trusted (detected)"),
+            "case={case}: {human_stdout}"
+        );
+        assert!(
+            !human_stdout.contains("crates.io"),
+            "case={case}: {human_stdout}"
+        );
+        if let Some(secret) = oidc_token {
+            assert!(
+                !human_stdout.contains(secret),
+                "case={case}: {human_stdout}"
+            );
+            assert!(
+                !human_stderr.contains(secret),
+                "case={case}: {human_stderr}"
+            );
+        }
+        assert!(
+            !human_state_dir.exists(),
+            "case={case}: unexpected state at {}",
+            human_state_dir.display()
+        );
+        human_registry.join();
     }
 }
 
