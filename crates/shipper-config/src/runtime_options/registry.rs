@@ -154,7 +154,8 @@ fn is_safe_synthetic_registry_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_registry_for_name, is_safe_synthetic_registry_name, resolve, resolve_with_policies,
+        default_registry_for_name, is_safe_synthetic_registry_name, rehearsal_allows_loopback,
+        resolve, resolve_with_policies,
     };
     use crate::{CliOverrides, MultiRegistryConfig, RegistryConfig, RehearsalConfig};
 
@@ -358,6 +359,54 @@ mod tests {
 
         assert!(policies["local"].allow_loopback);
         assert!(!policies["local"].allow_private);
+    }
+
+    #[test]
+    fn resolve_named_registry_combines_cli_and_rehearsal_loopback_policy() {
+        let config = config_with(vec![registry_config("local")]);
+        let cli_only = CliOverrides {
+            registries: Some(vec!["local".to_string()]),
+            allow_loopback: true,
+            ..CliOverrides::default()
+        };
+        let (_, policies) =
+            resolve_with_policies(&config, None, &RehearsalConfig::default(), &cli_only);
+        assert!(policies["local"].allow_loopback);
+
+        let rehearsal_only = RehearsalConfig {
+            enabled: false,
+            allow_loopback: true,
+            registry: Some("local".to_string()),
+        };
+        let cli = CliOverrides {
+            registries: Some(vec!["local".to_string()]),
+            ..CliOverrides::default()
+        };
+        let (_, policies) = resolve_with_policies(&config, None, &rehearsal_only, &cli);
+        assert!(policies["local"].allow_loopback);
+    }
+
+    #[test]
+    fn rehearsal_loopback_policy_covers_both_flags_and_registry_identity() {
+        let cases = [
+            (false, false, "local", false),
+            (true, false, "local", true),
+            (false, true, "local", true),
+            (true, true, "other", false),
+        ];
+
+        for (enabled, allow_loopback, registry_name, expected) in cases {
+            let rehearsal = RehearsalConfig {
+                enabled,
+                allow_loopback,
+                registry: Some("local".to_string()),
+            };
+            assert_eq!(
+                rehearsal_allows_loopback(&rehearsal, registry_name),
+                expected,
+                "enabled={enabled}, allow_loopback={allow_loopback}, registry={registry_name}"
+            );
+        }
     }
 
     #[test]

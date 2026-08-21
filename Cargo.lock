@@ -2424,6 +2424,7 @@ dependencies = [
  "proptest",
  "serde",
  "serde_with",
+ "serial_test",
  "shipper-encrypt",
  "shipper-registry",
  "shipper-retry",
