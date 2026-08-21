@@ -37,7 +37,11 @@ runs:
 0.5 artifacts are rebuildable for every field promised by the event vocabulary.
 0.4 events, state, and receipts remain readable and safely resumable, but
 fields introduced after 0.4 are unknown when the old artifact cannot provide
-evidence; consumers must not invent default values. See
+evidence unless their schema defines an explicit compatibility default. The
+current exception is `Receipt.execution_result`: a missing value in a legacy
+all-published receipt deserializes as `success`, as preserved by
+`receipt_without_execution_result_defaults_to_success`. Consumers must not
+invent defaults for other absent evidence. See
 [INVARIANTS.md](../INVARIANTS.md) for the full compatibility and event-first
 contract.
 
