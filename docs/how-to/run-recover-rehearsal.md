@@ -226,13 +226,8 @@ Each line should show the rehearsal version.
 ```bash
 shipper plan-yank \
   --from-receipt <downloaded-resume-receipt.json> \
-  --format json > yank-plan.raw.json
-
-# Default receipt mode does not yet apply --reason; stamp the approved reason
-# into every final entry before review and execution.
-jq --arg reason "authorized rehearsal containment" \
-  '.entries |= map(.reason = $reason)' \
-  yank-plan.raw.json > yank-plan.json
+  --reason "authorized rehearsal containment" \
+  --format json > yank-plan.json
 
 # Review every package, version, registry, reason, and dependents-first order.
 jq '.' yank-plan.json
@@ -244,10 +239,9 @@ shipper yank --plan yank-plan.json
 Yanking is containment, not deletion — the bytes remain on crates.io,
 but new resolves skip them.
 
-The reviewed final plan embeds the approved reason into each entry. Plan
-execution keeps that evidence and replaces the direct, unreviewed `cargo yank`
-loop. [Issue #338](https://github.com/EffortlessMetrics/shipper-swarm/issues/338)
-tracks applying `plan-yank --reason` directly in default receipt mode.
+`plan-yank --reason` embeds the approved reason into every selected entry. The
+reviewed final plan preserves that reason, and plan execution keeps that
+evidence while replacing the direct, unreviewed `cargo yank` loop.
 
 ## Pass / fail rubric
 

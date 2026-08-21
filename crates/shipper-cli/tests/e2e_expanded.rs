@@ -1875,6 +1875,126 @@ fn plan_yank_json_format_emits_schema_version() {
 }
 
 #[test]
+fn plan_yank_reason_matches_human_json_and_compromised_modes() {
+    let td = tempdir().expect("tempdir");
+    create_multi_crate_workspace(td.path());
+    let receipt_path = td.path().join("receipt.json");
+    write_remediation_receipt(&receipt_path);
+    let manifest = td.path().join("Cargo.toml");
+    let approved = "operator approved containment";
+
+    let json_output = loopback_shipper_cmd()
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .args(["--format", "json", "plan-yank", "--from-receipt"])
+        .arg(&receipt_path)
+        .args(["--reason", approved])
+        .output()
+        .expect("failed to run JSON plan-yank");
+    assert!(
+        json_output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&json_output.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&json_output.stdout).expect("plan-yank JSON parses");
+    let entries = json["entries"].as_array().expect("entries array");
+    assert_eq!(entries.len(), 2);
+    assert!(entries.iter().all(|entry| entry["reason"] == approved));
+
+    let human_output = loopback_shipper_cmd()
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .args(["plan-yank", "--from-receipt"])
+        .arg(&receipt_path)
+        .args(["--reason", approved])
+        .output()
+        .expect("failed to run human plan-yank");
+    assert!(
+        human_output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&human_output.stderr)
+    );
+    let human = String::from_utf8_lossy(&human_output.stdout);
+    assert_eq!(
+        human.matches(&format!("# {approved}")).count(),
+        entries.len(),
+        "human plan must show the same reason for every JSON entry: {human}"
+    );
+
+    let compromised_output = loopback_shipper_cmd()
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .args(["--format", "json", "plan-yank", "--from-receipt"])
+        .arg(&receipt_path)
+        .args(["--compromised-only", "--reason", approved])
+        .output()
+        .expect("failed to run compromised-only plan-yank");
+    assert!(compromised_output.status.success());
+    let compromised: serde_json::Value = serde_json::from_slice(&compromised_output.stdout)
+        .expect("compromised-only plan-yank JSON parses");
+    assert_eq!(compromised["entries"].as_array().map(Vec::len), Some(1));
+    assert_eq!(compromised["entries"][0]["name"], "core-lib");
+    assert_eq!(compromised["entries"][0]["reason"], approved);
+}
+
+#[test]
+fn reasoned_default_plan_roundtrips_to_yank_output_and_events() {
+    let td = tempdir().expect("tempdir");
+    create_multi_crate_workspace(td.path());
+    let receipt_path = td.path().join("receipt.json");
+    write_remediation_receipt(&receipt_path);
+    let state_dir = td.path().join(".shipper");
+    let plan_path = td.path().join("reasoned-yank-plan.json");
+    let approved = "operator approved containment";
+
+    let planned = loopback_shipper_cmd()
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .args(["--format", "json", "plan-yank", "--from-receipt"])
+        .arg(&receipt_path)
+        .args(["--reason", approved])
+        .output()
+        .expect("failed to generate reasoned yank plan");
+    assert!(planned.status.success());
+    fs::write(&plan_path, &planned.stdout).expect("write reasoned yank plan");
+
+    let fake_cargo = write_fake_yank_cargo(td.path(), false);
+    let fake_log = td.path().join("fake-cargo.log");
+    let executed = loopback_shipper_cmd()
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .args(["yank", "--plan"])
+        .arg(&plan_path)
+        .env("SHIPPER_CARGO_BIN", &fake_cargo)
+        .env("SHIPPER_FAKE_CARGO_LOG", &fake_log)
+        .output()
+        .expect("failed to execute reasoned yank plan");
+    assert!(
+        executed.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&executed.stderr)
+    );
+    let operator_output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&executed.stdout),
+        String::from_utf8_lossy(&executed.stderr)
+    );
+    assert_eq!(operator_output.matches(approved).count(), 2);
+
+    let events = read_jsonl(&state_dir.join("events.jsonl"));
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().all(|event| {
+        event
+            .pointer("/event_type/reason")
+            .and_then(|value| value.as_str())
+            == Some(approved)
+    }));
+}
+
+#[test]
 fn yank_single_command_records_package_yanked_event_with_fake_cargo() {
     let td = tempdir().expect("tempdir");
     create_multi_crate_workspace(td.path());
