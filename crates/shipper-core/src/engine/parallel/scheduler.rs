@@ -55,11 +55,25 @@ fn finish_publish_errors(mut errors: Vec<anyhow::Error>) -> Result<()> {
             errors.len() + 1
         )));
     }
-    let recoverable = errors.swap_remove(0);
-    Err(recoverable.context(format!(
-        "parallel publish stopped recoverably for {} package(s): {summary}",
-        errors.len() + 1
-    )))
+    let package = errors
+        .iter()
+        .find_map(|error| {
+            error
+                .downcast_ref::<crate::engine::PublishRecoverableStopError>()
+                .map(|stop| stop.package.clone())
+        })
+        .unwrap_or_else(|| "workspace".to_string());
+    Err(crate::engine::PublishRecoverableStopError {
+        message: format!(
+            "parallel publish stopped recoverably for {} package(s): {summary}",
+            errors.len()
+        ),
+        package,
+        // A worker-local bit can never authorize the run. Only run_publish's
+        // post-join, post-marker full consistency predicate may promote this.
+        evidence_consistent: false,
+    }
+    .into())
 }
 
 impl WorkerHandle {
@@ -219,18 +233,18 @@ mod tests {
     }
 
     #[test]
-    fn recoverable_stop_identity_survives_when_every_worker_is_recoverable() -> Result<()> {
+    fn all_recoverable_aggregation_erases_mixed_worker_authorization() -> Result<()> {
         let errors = vec![
             crate::engine::PublishRecoverableStopError {
                 message: "a stopped recoverably".to_string(),
                 package: "a@1.0.0".to_string(),
-                reconciliation_written: true,
+                evidence_consistent: true,
             }
             .into(),
             crate::engine::PublishRecoverableStopError {
                 message: "b stopped recoverably".to_string(),
                 package: "b@1.0.0".to_string(),
-                reconciliation_written: true,
+                evidence_consistent: false,
             }
             .into(),
         ];
@@ -238,9 +252,14 @@ mod tests {
             bail!("parallel aggregation unexpectedly succeeded");
         };
         ensure!(
-            error
-                .downcast_ref::<crate::engine::PublishRecoverableStopError>()
-                .is_some(),
+            matches!(
+                crate::engine::classify_publish_stop(&error),
+                Some(
+                    crate::engine::PublishStopClassification::RecoverableNotPublished {
+                        evidence_consistent: false
+                    }
+                )
+            ),
             "typed recoverable stop identity was lost: {error:#}"
         );
         Ok(())
@@ -252,7 +271,7 @@ mod tests {
             crate::engine::PublishRecoverableStopError {
                 message: "a stopped recoverably".to_string(),
                 package: "a@1.0.0".to_string(),
-                reconciliation_written: true,
+                evidence_consistent: false,
             }
             .into(),
             anyhow!("permanent worker blocker"),

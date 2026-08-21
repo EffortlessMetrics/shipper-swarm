@@ -1378,7 +1378,7 @@ pub(crate) fn publish_package_with_timeout(
                                 }
                                 log.clear();
                             }
-                            let reconciliation_written = write_reconciliation_report_best_effort(
+                            let _ = write_reconciliation_report_best_effort(
                                 state_dir,
                                 ws,
                                 events_path,
@@ -1430,7 +1430,7 @@ pub(crate) fn publish_package_with_timeout(
                                             p.name, p.version
                                         ),
                                         package: pkg_label.clone(),
-                                        reconciliation_written,
+                                        evidence_consistent: false,
                                     }
                                     .into()),
                                 };

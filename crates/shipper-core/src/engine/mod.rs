@@ -69,7 +69,7 @@ pub struct PublishStillUnknownError {
 pub(crate) struct PublishRecoverableStopError {
     message: String,
     package: String,
-    reconciliation_written: bool,
+    evidence_consistent: bool,
 }
 
 /// CLI-facing classification for publish stops whose safety posture must not
@@ -78,7 +78,7 @@ pub(crate) struct PublishRecoverableStopError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PublishStopClassification {
     StillUnknown { reconciliation_written: bool },
-    RecoverableNotPublished { reconciliation_written: bool },
+    RecoverableNotPublished { evidence_consistent: bool },
 }
 
 #[doc(hidden)]
@@ -92,9 +92,25 @@ pub fn classify_publish_stop(error: &anyhow::Error) -> Option<PublishStopClassif
         .downcast_ref::<PublishRecoverableStopError>()
         .map(
             |recoverable| PublishStopClassification::RecoverableNotPublished {
-                reconciliation_written: recoverable.reconciliation_written,
+                evidence_consistent: recoverable.evidence_consistent,
             },
         )
+}
+
+fn controlled_stop_evidence_consistent(
+    state_dir: &Path,
+    events_path: &Path,
+    state: &ExecutionState,
+) -> bool {
+    let reconciliation_path = state::reconciliation_path(state_dir);
+    let Ok(raw) = std::fs::read_to_string(reconciliation_path) else {
+        return false;
+    };
+    let Ok(report) = serde_json::from_str::<shipper_types::ReconciliationReport>(&raw) else {
+        return false;
+    };
+    crate::state::consistency::verify_controlled_stop_consistency(events_path, state, Some(&report))
+        .is_ok()
 }
 
 impl PublishStillUnknownError {
@@ -375,12 +391,13 @@ pub fn run_publish(
             Ok(receipts) => receipts,
             Err(error) => {
                 if let Some(stop) = error.downcast_ref::<PublishRecoverableStopError>() {
+                    let package = stop.package.clone();
                     event_log.record(PublishEvent {
                         timestamp: Utc::now(),
                         event_type: EventType::ExecutionStopped {
                             reason: shipper_types::ControlledStopReason::NotPublishedRetryBudgetExhausted,
                         },
-                        package: stop.package.clone(),
+                        package: package.clone(),
                     });
                     event_log.write_to_file(&events_path)?;
                     publish::finalize::record_consistency_drift(
@@ -389,6 +406,14 @@ pub fn run_publish(
                         &mut event_log,
                         reporter,
                     );
+                    let evidence_consistent =
+                        controlled_stop_evidence_consistent(&state_dir, &events_path, &st);
+                    return Err(PublishRecoverableStopError {
+                        message: format!("{error:#}"),
+                        package,
+                        evidence_consistent,
+                    }
+                    .into());
                 }
                 return Err(error);
             }
@@ -423,13 +448,14 @@ pub fn run_publish(
         Ok(receipts) => receipts,
         Err(error) => {
             if let Some(stop) = error.downcast_ref::<PublishRecoverableStopError>() {
+                let package = stop.package.clone();
                 event_log.record(PublishEvent {
                     timestamp: Utc::now(),
                     event_type: EventType::ExecutionStopped {
                         reason:
                             shipper_types::ControlledStopReason::NotPublishedRetryBudgetExhausted,
                     },
-                    package: stop.package.clone(),
+                    package: package.clone(),
                 });
                 event_log.write_to_file(&events_path)?;
                 publish::finalize::record_consistency_drift(
@@ -438,6 +464,14 @@ pub fn run_publish(
                     &mut event_log,
                     reporter,
                 );
+                let evidence_consistent =
+                    controlled_stop_evidence_consistent(&state_dir, &events_path, &st);
+                return Err(PublishRecoverableStopError {
+                    message: format!("{error:#}"),
+                    package,
+                    evidence_consistent,
+                }
+                .into());
             }
             return Err(error);
         }

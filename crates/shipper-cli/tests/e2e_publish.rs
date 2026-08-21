@@ -101,6 +101,23 @@ utils = { path = "../utils" }
     write_file(&root.join("app/src/lib.rs"), "pub fn app() {}\n");
 }
 
+fn create_independent_workspace(root: &Path) {
+    write_file(
+        &root.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"alpha\", \"beta\"]\nresolver = \"2\"\n",
+    );
+    for name in ["alpha", "beta"] {
+        write_file(
+            &root.join(name).join("Cargo.toml"),
+            &format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+        );
+        write_file(
+            &root.join(name).join("src/lib.rs"),
+            &format!("pub fn {name}() {{}}\n"),
+        );
+    }
+}
+
 fn create_fake_cargo_proxy(bin_dir: &Path) {
     #[cfg(windows)]
     {
@@ -1107,6 +1124,77 @@ struct ControlledStopRun {
     _workspace: tempfile::TempDir,
     state_dir: std::path::PathBuf,
     output: std::process::Output,
+}
+
+struct ParallelInconsistentRun {
+    workspace: tempfile::TempDir,
+    state_dir: std::path::PathBuf,
+    api_base: String,
+    publish_log: std::path::PathBuf,
+    new_path: String,
+    real_cargo: String,
+    fake_cargo: String,
+    output: std::process::Output,
+}
+
+fn run_parallel_inconsistent_controlled_stop(
+    format: Option<&str>,
+) -> Result<ParallelInconsistentRun> {
+    let td = tempdir().context("create parallel inconsistent workspace")?;
+    create_independent_workspace(td.path());
+    let (new_path, real_cargo, fake_cargo) = setup_fake_cargo(td.path());
+    let registry = spawn_bounded_registry(vec![404, 404, 404, 404], 4);
+    let api_base = registry.base_url.clone();
+    let state_dir = td.path().join("parallel-inconsistent-state");
+    fs::create_dir_all(state_dir.join("reconciliation.json"))?;
+    let publish_log = td.path().join("parallel-inconsistent.log");
+    let mut command = loopback_shipper_cmd();
+    command
+        .timeout(Duration::from_secs(20))
+        .current_dir(td.path())
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--api-base")
+        .arg(&api_base)
+        .arg("--allow-dirty")
+        .arg("--skip-ownership-check")
+        .arg("--parallel")
+        .arg("--max-concurrent")
+        .arg("2")
+        .arg("--readiness-timeout")
+        .arg("0ms")
+        .arg("--readiness-poll")
+        .arg("0ms")
+        .arg("--max-attempts")
+        .arg("1")
+        .arg("--base-delay")
+        .arg("0ms")
+        .arg("--state-dir")
+        .arg(&state_dir);
+    if let Some(format) = format {
+        command.arg("--format").arg(format);
+    }
+    let output = command
+        .arg("publish")
+        .env("PATH", &new_path)
+        .env("REAL_CARGO", &real_cargo)
+        .env("SHIPPER_CARGO_BIN", &fake_cargo)
+        .env("SHIPPER_FAKE_PUBLISH_EXIT", "1")
+        .env("SHIPPER_FAKE_PUBLISH_STDERR", "ambiguous parallel close")
+        .env("SHIPPER_FAKE_PUBLISH_LOG", &publish_log)
+        .env("CARGO_REGISTRY_TOKEN", "CONTROLLED_STOP_SECRET_SENTINEL")
+        .output()?;
+    registry.finish(Duration::from_secs(2))?;
+    Ok(ParallelInconsistentRun {
+        workspace: td,
+        state_dir,
+        api_base,
+        publish_log,
+        new_path,
+        real_cargo,
+        fake_cargo,
+        output,
+    })
 }
 
 fn run_initial_controlled_stop_publish(
@@ -2413,8 +2501,9 @@ fn controlled_stop_without_reconciliation_denies_resume_in_human_and_json() -> R
     ensure!(json.output.status.code() == Some(1));
     let human_stderr = String::from_utf8(human.output.stderr.clone())?;
     ensure!(
-        human_stderr
-            .contains("reconciliation evidence persistence failed; recovery is not authorized"),
+        human_stderr.contains(
+            "retained recovery evidence is missing or inconsistent; recovery is not authorized"
+        ),
         "{human_stderr}"
     );
     let human_safe = human_outcome_value(&human_stderr, "Safe to rerun:")?;
@@ -2429,12 +2518,12 @@ fn controlled_stop_without_reconciliation_denies_resume_in_human_and_json() -> R
     ensure!(report["safe_to_rerun"]["value"] == false);
     ensure!(
         report["safe_to_rerun"]["reason"]
-            == "reconciliation evidence was not persisted, so recovery safety is not proven"
+            == "retained recovery evidence is missing or inconsistent, so recovery safety is not proven"
     );
     ensure!(report["next_action"]["kind"] == "inspect_events");
     ensure!(
         report["next_action"]["reason"]
-            == "inspect retained events and state; do not resume without reconciliation evidence"
+            == "inspect retained events, state, and reconciliation evidence; do not resume while evidence is missing or inconsistent"
     );
     ensure!(report["evidence"].as_array().map(Vec::len) == Some(2));
     ensure!(
@@ -2451,6 +2540,73 @@ fn controlled_stop_without_reconciliation_denies_resume_in_human_and_json() -> R
             "CONTROLLED_STOP_SECRET_SENTINEL",
         );
     }
+    Ok(())
+}
+
+#[test]
+fn parallel_incomplete_reconciliation_never_authorizes_resume() -> Result<()> {
+    let human = run_parallel_inconsistent_controlled_stop(None)?;
+    let json = run_parallel_inconsistent_controlled_stop(Some("json"))?;
+    ensure!(human.output.status.code() == Some(1));
+    ensure!(json.output.status.code() == Some(1));
+    let human_stderr = String::from_utf8(human.output.stderr.clone())?;
+    ensure!(
+        human_stderr.contains("recovery is not authorized"),
+        "{human_stderr}"
+    );
+    ensure!(!human_stderr.contains("authorizes a controlled resume"));
+    let report: serde_json::Value = serde_json::from_slice(&json.output.stderr)?;
+    ensure!(report["safe_to_rerun"]["value"] == false);
+    ensure!(report["next_action"]["kind"] == "inspect_events");
+    ensure!(read_publish_log(&human.publish_log).len() == 2);
+
+    let state_before = fs::read(human.state_dir.join("state.json"))?;
+    let events_before = fs::read(human.state_dir.join("events.jsonl"))?;
+    let cargo_before = fs::read(&human.publish_log)?;
+    let status = loopback_shipper_cmd()
+        .timeout(Duration::from_secs(20))
+        .current_dir(human.workspace.path())
+        .arg("--manifest-path")
+        .arg(human.workspace.path().join("Cargo.toml"))
+        .arg("--api-base")
+        .arg(&human.api_base)
+        .arg("--state-dir")
+        .arg(&human.state_dir)
+        .arg("--format")
+        .arg("json")
+        .arg("status")
+        .arg("--durable")
+        .output()?;
+    if status.status.success() {
+        let status_json: serde_json::Value = serde_json::from_slice(&status.stdout)?;
+        ensure!(status_json["outcome"]["next_action"]["kind"] != "resume");
+        ensure!(status_json["outcome"]["safe_to_resume"]["value"] != true);
+    } else {
+        ensure!(status.stdout.is_empty());
+    }
+
+    let resume = loopback_shipper_cmd()
+        .timeout(Duration::from_secs(20))
+        .current_dir(human.workspace.path())
+        .arg("--manifest-path")
+        .arg(human.workspace.path().join("Cargo.toml"))
+        .arg("--api-base")
+        .arg(&human.api_base)
+        .arg("--allow-dirty")
+        .arg("--skip-ownership-check")
+        .arg("--state-dir")
+        .arg(&human.state_dir)
+        .arg("resume")
+        .env("PATH", &human.new_path)
+        .env("REAL_CARGO", &human.real_cargo)
+        .env("SHIPPER_CARGO_BIN", &human.fake_cargo)
+        .env("SHIPPER_FAKE_PUBLISH_LOG", &human.publish_log)
+        .env("SHIPPER_FAKE_PUBLISH_EXIT", "0")
+        .output()?;
+    ensure!(!resume.status.success());
+    ensure!(fs::read(human.state_dir.join("state.json"))? == state_before);
+    ensure!(fs::read(human.state_dir.join("events.jsonl"))? == events_before);
+    ensure!(fs::read(&human.publish_log)? == cargo_before);
     Ok(())
 }
 

@@ -1123,13 +1123,15 @@ fn mark_recoverable_publish_stop(
     error: anyhow::Error,
     format: &str,
     evidence_state_dir: &Path,
-    reconciliation_written: bool,
+    evidence_consistent: bool,
 ) -> anyhow::Error {
+    let reconciliation_written =
+        shipper_core::state::execution_state::reconciliation_path(evidence_state_dir).is_file();
     let evidence = still_unknown_evidence(evidence_state_dir, reconciliation_written);
-    let error = error.context(if reconciliation_written {
+    let error = error.context(if evidence_consistent {
         "publish stopped after registry truth proved the package absent and the retry budget was exhausted; retained evidence authorizes a controlled resume"
     } else {
-        "publish stopped after registry truth proved the package absent, but reconciliation evidence persistence failed; recovery is not authorized"
+        "publish stopped after registry truth proved the package absent, but retained recovery evidence is missing or inconsistent; recovery is not authorized"
     });
     let rendered_error = shipper_output_sanitizer::redact_sensitive(&format_error(&error))
         .trim_end()
@@ -1141,22 +1143,22 @@ fn mark_recoverable_publish_stop(
         rendered_error,
         safe_to_rerun: PublishEarlySafeRerun {
             value: Some(false),
-            reason: if reconciliation_written {
+            reason: if evidence_consistent {
                 "do not rerun publish; retained evidence authorizes controlled resume"
             } else {
-                "reconciliation evidence was not persisted, so recovery safety is not proven"
+                "retained recovery evidence is missing or inconsistent, so recovery safety is not proven"
             },
         },
         next_action: OperatorAction::posture(
-            if reconciliation_written {
+            if evidence_consistent {
                 ActionKind::Resume
             } else {
                 ActionKind::InspectEvents
             },
-            if reconciliation_written {
+            if evidence_consistent {
                 "resume only with the same plan, registry, workspace, and state directory"
             } else {
-                "inspect retained events and state; do not resume without reconciliation evidence"
+                "inspect retained events, state, and reconciliation evidence; do not resume while evidence is missing or inconsistent"
             },
         ),
         evidence,
@@ -1207,10 +1209,8 @@ fn mark_publish_engine_error(
             .into()
         }
         engine::PublishStopClassification::RecoverableNotPublished {
-            reconciliation_written,
-        } => {
-            mark_recoverable_publish_stop(error, format, evidence_state_dir, reconciliation_written)
-        }
+            evidence_consistent,
+        } => mark_recoverable_publish_stop(error, format, evidence_state_dir, evidence_consistent),
     }
 }
 
