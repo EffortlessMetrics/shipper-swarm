@@ -277,7 +277,7 @@ A complete evidence picture for a release requires all of the following:
 | Policy gates green | `ci.yml` `policy` (every xtask check in blocking-allowlist) |
 | Static exposure signal | `ripr.yml` `ripr-pilot` (advisory) |
 | Mutation signal (opt-in) | `mutation.yml` `mutants-pr` (label-gated) or `mutants-weekly` |
-| Coverage signal (opt-in) | `coverage.yml` (label-triggered) |
+| Coverage signal (opt-in) | `coverage.yml` (selected by `coverage`/`full-ci` on the next code-changing PR event; dispatch independent) |
 | Publish path verified | `release.yml` `publish-crates-io` (dogfoods Shipper) |
 | Trusted Publishing configured | OIDC token exchange in `release.yml` |
 
