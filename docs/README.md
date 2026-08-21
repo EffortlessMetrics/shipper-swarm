@@ -36,6 +36,9 @@ Task-oriented recipes. Each solves one focused problem.
 ## Release preparation
 
 - [Release preparation and evidence index](release/README.md) — authority, exact-identity rules, and current release-line posture
+- [0.5.0 release notes](../RELEASE_NOTES_v0.5.0.md) — reviewed GitHub Release publication input; the file alone is not publication evidence
+- [0.5.0 migration guide](release/0.5.0-migration.md) — source, config, artifact, command, and recovery changes for the candidate
+- [0.5.0 change ledger](release/0.5.0-change-ledger.md) — complete editorial source inventory and compatibility dispositions
 - [Release operator runbook](release-runbook.md) — ordered candidate, promotion, rehearsal, publication, resume, and backfill procedure
 - [Release preparation checklist](release/release-preparation-checklist.md) — copy per candidate and record exact SHAs, trees, workflow runs, artifacts, and authorization
 - [0.5.0 release-candidate readiness](release/0.5.0-readiness.md) — retained product and historical candidate evidence for the 0.5 line; a later source change requires a fresh candidate identity before publication
