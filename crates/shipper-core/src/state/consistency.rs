@@ -141,6 +141,9 @@ pub(crate) fn verify_controlled_stop_consistency(
     state: &ExecutionState,
     reconciliation_report: Option<&ReconciliationReport>,
 ) -> Result<()> {
+    if let Some(report) = reconciliation_report {
+        verify_reconciliation_record_identities(report)?;
+    }
     verify_unfinished_consistency(events_path, state, reconciliation_report)?;
     let event_log = EventLog::read_from_file(events_path)?;
     let Some(last) = event_log.all_events().last() else {
@@ -215,6 +218,20 @@ fn latest_retry_allowed(report: &ReconciliationReport, package: &str) -> bool {
         })
 }
 
+fn verify_reconciliation_record_identities(report: &ReconciliationReport) -> Result<()> {
+    for record in &report.records {
+        let expected_package = format!("{}@{}", record.name, record.version);
+        if record.package != expected_package {
+            bail!(
+                "reconciliation package identity disagrees: package {} does not match {}",
+                record.package,
+                expected_package
+            );
+        }
+    }
+    Ok(())
+}
+
 fn has_latest_still_unknown(report: &ReconciliationReport) -> bool {
     let mut seen = BTreeSet::new();
     report.records.iter().rev().any(|record| {
@@ -230,6 +247,9 @@ pub(crate) fn has_not_published_retryable_posture(
     let Some(report) = reconciliation_report else {
         return false;
     };
+    if verify_reconciliation_record_identities(report).is_err() {
+        return false;
+    }
     let mut saw_retryable = false;
     for (package, progress) in &state.packages {
         match &progress.state {
@@ -1079,6 +1099,77 @@ mod tests {
         assert!(format!("{error:#}").contains("latest StillUnknown"));
         assert!(has_not_published_retryable_posture(&state, Some(&report)));
         assert!(!has_not_published_retryable_posture(&state, None));
+        Ok(())
+    }
+
+    #[test]
+    fn controlled_stop_rejects_mismatched_duplicate_reconciliation_identity() -> Result<()> {
+        let td = tempdir()?;
+        let package = "a@1.0.0";
+        let not_published = ReconciliationOutcome::NotPublished {
+            attempts: 1,
+            elapsed_ms: 10,
+        };
+        write_events(
+            td.path(),
+            vec![
+                plan_created_event(),
+                PublishEvent {
+                    timestamp: Utc::now(),
+                    event_type: EventType::ExecutionStarted,
+                    package: "all".to_string(),
+                },
+                PublishEvent {
+                    timestamp: Utc::now(),
+                    event_type: EventType::PublishReconciled {
+                        outcome: not_published.clone(),
+                    },
+                    package: package.to_string(),
+                },
+                PublishEvent {
+                    timestamp: Utc::now(),
+                    event_type: EventType::PackageFailed {
+                        class: ErrorClass::Retryable,
+                        message: "retry budget exhausted".to_string(),
+                    },
+                    package: package.to_string(),
+                },
+                PublishEvent {
+                    timestamp: Utc::now(),
+                    event_type: EventType::ExecutionStopped {
+                        reason:
+                            shipper_types::ControlledStopReason::NotPublishedRetryBudgetExhausted,
+                    },
+                    package: package.to_string(),
+                },
+            ],
+        );
+        let state = rebuild_state_from_events(
+            &events_path(td.path()),
+            StateRebuildOptions::new(Registry::crates_io()),
+        )?;
+        let mut report = reconciliation_report(package);
+        let mut valid = report
+            .records
+            .first()
+            .cloned()
+            .context("reconciliation fixture record")?;
+        valid.outcome = not_published;
+        valid.operator_action = ReconciliationOperatorAction::RetryAllowed;
+        let corrupt_duplicate = ReconciliationRecord {
+            name: "forged".to_string(),
+            ..valid.clone()
+        };
+        report.records = vec![valid, corrupt_duplicate];
+
+        assert!(!has_not_published_retryable_posture(&state, Some(&report)));
+        let error =
+            verify_controlled_stop_consistency(&events_path(td.path()), &state, Some(&report))
+                .expect_err("duplicated package identity must not authorize recovery");
+        assert!(
+            format!("{error:#}").contains("reconciliation package identity disagrees"),
+            "{error:#}"
+        );
         Ok(())
     }
 

@@ -82,13 +82,16 @@ For `shipper publish --format json`, the command envelope must carry:
 - A stable schema version (`shipper.publish.v1`).
 - Per-package `packages[].state` values that distinguish published, skipped,
   failed, ambiguous, uploaded, and pending outcomes.
-- A top-level `safe_to_rerun` boolean. It is true only when the command-owned
+- A top-level `safe_to_rerun` boolean, mirrored by
+  `outcome.safe_to_rerun.value` with an explanatory
+  `outcome.safe_to_rerun.reason`. The value is true only when the command-owned
   package summary has no pending, uploaded, failed, or ambiguous packages; the
   detailed evidence remains the package states, receipt, and reconciliation
   artifact.
 - A pre-receipt controlled stop emits `shipper.publish.error.v1` on stderr,
   keeps stdout empty in JSON mode, and does not claim or synthesize a receipt.
-  Its failed-retryable package therefore keeps `safe_to_rerun: false`: direct
+  In this error envelope, its failed-retryable package therefore keeps
+  `safe_to_rerun.value: false` with a `safe_to_rerun.reason` that says direct
   `publish` rerun is not authorized. When the exact state, event, and
   `NotPublished` reconciliation evidence is retained and consistent, the
   separate commandless next action may be `resume`. Missing, malformed,

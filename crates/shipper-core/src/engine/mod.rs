@@ -3186,6 +3186,59 @@ mod tests {
         std::fs::write(&reconciliation_path, &reconciliation_before)
             .expect("restore reconciliation after marker negatives");
 
+        let mut corrupt_identity: crate::types::ReconciliationReport =
+            serde_json::from_slice(&reconciliation_before)
+                .expect("parse reconciliation for identity negative");
+        let mut duplicate = corrupt_identity
+            .records
+            .last()
+            .cloned()
+            .expect("controlled-stop reconciliation record");
+        duplicate.name = "forged-package-name".to_string();
+        corrupt_identity.records.push(duplicate);
+        state::write_reconciliation_report(&state_dir, &corrupt_identity)
+            .expect("write corrupt duplicate identity");
+        let stopped_state = state::load_state(&state_dir)
+            .expect("load stopped state")
+            .expect("stopped state exists");
+        assert!(
+            !controlled_stop_evidence_consistent(
+                &state_dir,
+                &controlled_events_path,
+                &stopped_state
+            ),
+            "corrupt duplicate identity must not authorize the initial stop envelope or durable status"
+        );
+        let corrupt_state_before =
+            std::fs::read(state::state_path(&state_dir)).expect("state before identity rejection");
+        let corrupt_events_before =
+            std::fs::read(&controlled_events_path).expect("events before identity rejection");
+        let corrupt_cargo_before =
+            std::fs::read(&cargo_log).expect("cargo log before identity rejection");
+        let corrupt_error = run_resume(&ws, &opts, &mut CollectingReporter::default())
+            .expect_err("corrupt duplicate identity must reject resume");
+        assert!(
+            format!("{corrupt_error:#}").contains("reconciliation package identity disagrees"),
+            "unexpected corrupt-identity error: {corrupt_error:#}"
+        );
+        assert_eq!(
+            std::fs::read(state::state_path(&state_dir)).expect("state after identity rejection"),
+            corrupt_state_before,
+            "identity rejection must not mutate state"
+        );
+        assert_eq!(
+            std::fs::read(&controlled_events_path).expect("events after identity rejection"),
+            corrupt_events_before,
+            "identity rejection must not mutate events"
+        );
+        assert_eq!(
+            std::fs::read(&cargo_log).expect("cargo log after identity rejection"),
+            corrupt_cargo_before,
+            "identity rejection must not dispatch Cargo"
+        );
+        std::fs::write(&reconciliation_path, &reconciliation_before)
+            .expect("restore reconciliation after identity negative");
+
         let reconciliation_before =
             std::fs::read(&reconciliation_path).expect("reconciliation before cross-run negative");
         let mut cross_run: serde_json::Value = serde_json::from_slice(&reconciliation_before)

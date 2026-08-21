@@ -2682,8 +2682,9 @@ fn conclusive_not_published_stop_status_and_resume_preserve_completed_packages()
     ensure!(terminal["event_type"]["type"] == "execution_stopped");
     ensure!(terminal["event_type"]["reason"] == "not_published_retry_budget_exhausted");
     ensure!(terminal["package"] == "app@0.1.0");
-    let reconciliation: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(state_dir.join("reconciliation.json"))?)?;
+    let reconciliation_path = state_dir.join("reconciliation.json");
+    let reconciliation_bytes = fs::read(&reconciliation_path)?;
+    let reconciliation: serde_json::Value = serde_json::from_slice(&reconciliation_bytes)?;
     ensure!(reconciliation["plan_id"] == initial_state["plan_id"]);
     ensure!(reconciliation["registry"] == initial_state["registry"]);
     let latest = reconciliation["records"]
@@ -2725,6 +2726,65 @@ fn conclusive_not_published_stop_status_and_resume_preserve_completed_packages()
             .env("CARGO_REGISTRY_TOKEN", SECRET)
             .output()?)
     };
+
+    let mut corrupt_reconciliation = reconciliation.clone();
+    let mut corrupt_duplicate = latest.clone();
+    corrupt_duplicate["name"] = serde_json::Value::String("forged-package-name".to_string());
+    corrupt_reconciliation["records"]
+        .as_array_mut()
+        .context("mutable reconciliation records")?
+        .push(corrupt_duplicate);
+    fs::write(
+        &reconciliation_path,
+        serde_json::to_vec_pretty(&corrupt_reconciliation)?,
+    )?;
+    let corrupt_state_before = fs::read(state_dir.join("state.json"))?;
+    let corrupt_events_before = fs::read(state_dir.join("events.jsonl"))?;
+    let corrupt_cargo_before = fs::read(&publish_log)?;
+    for corrupt_status in [invoke_status(false)?, invoke_status(true)?] {
+        ensure!(corrupt_status.status.success());
+        let rendered = if corrupt_status.stdout.starts_with(b"{") {
+            let value: serde_json::Value = serde_json::from_slice(&corrupt_status.stdout)?;
+            ensure!(value["outcome"]["safe_to_resume"]["value"] == false);
+            ensure!(value["outcome"]["next_action"]["kind"] != "resume");
+            value.to_string()
+        } else {
+            let text = String::from_utf8(corrupt_status.stdout)?;
+            ensure!(text.contains("Safe to resume: no"), "{text}");
+            ensure!(!text.contains("Next: resume is safe"), "{text}");
+            text
+        };
+        ensure!(!rendered.contains(SECRET));
+    }
+    let corrupt_resume = loopback_shipper_cmd()
+        .timeout(Duration::from_secs(20))
+        .current_dir(td.path())
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--api-base")
+        .arg(&first_registry_base)
+        .arg("--allow-dirty")
+        .arg("--skip-ownership-check")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("resume")
+        .env("PATH", &new_path)
+        .env("REAL_CARGO", &real_cargo)
+        .env("SHIPPER_CARGO_BIN", &fake_cargo)
+        .env("SHIPPER_FAKE_PUBLISH_LOG", &publish_log)
+        .env("SHIPPER_FAKE_PUBLISH_EXIT", "0")
+        .env("CARGO_REGISTRY_TOKEN", SECRET)
+        .output()?;
+    ensure!(!corrupt_resume.status.success());
+    ensure!(
+        String::from_utf8_lossy(&corrupt_resume.stderr)
+            .contains("reconciliation package identity disagrees")
+    );
+    ensure!(fs::read(state_dir.join("state.json"))? == corrupt_state_before);
+    ensure!(fs::read(state_dir.join("events.jsonl"))? == corrupt_events_before);
+    ensure!(fs::read(&publish_log)? == corrupt_cargo_before);
+    fs::write(&reconciliation_path, &reconciliation_bytes)?;
+
     let human = invoke_status(false)?;
     let json = invoke_status(true)?;
     ensure!(
