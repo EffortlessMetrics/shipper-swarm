@@ -364,7 +364,7 @@ pub struct ShipperConfig {
 /// ```toml
 /// [rehearsal]
 /// enabled = true
-/// registry = "kellnr-local"  # name must match an entry in [[registries]]
+/// registry = "kellnr-local"  # name must match an entry in [[registries.registries]]
 /// # allow_loopback = true      # local HTTP test posture; does not enable the gate
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -379,7 +379,7 @@ pub struct RehearsalConfig {
     #[serde(default)]
     pub allow_loopback: bool,
 
-    /// Name of the registry (declared under `[[registries]]`) to use for
+    /// Name of the registry (declared under `[[registries.registries]]`) to use for
     /// rehearsal. Must differ from the live target registry.
     #[serde(default)]
     pub registry: Option<String>,
@@ -433,14 +433,7 @@ impl MultiRegistryConfig {
     pub fn get_registries(&self) -> Vec<RegistryConfig> {
         if self.registries.is_empty() {
             // Return default crates-io registry
-            vec![RegistryConfig {
-                name: "crates-io".to_string(),
-                api_base: "https://crates.io".to_string(),
-                index_base: Some("https://index.crates.io".to_string()),
-                token: None,
-                default: true,
-                allow_private: false,
-            }]
+            vec![crates_io_registry_config()]
         } else {
             self.registries.clone()
         }
@@ -453,14 +446,7 @@ impl MultiRegistryConfig {
             .find(|r| r.default)
             .or(self.registries.first())
             .cloned()
-            .unwrap_or_else(|| RegistryConfig {
-                name: "crates-io".to_string(),
-                api_base: "https://crates.io".to_string(),
-                index_base: Some("https://index.crates.io".to_string()),
-                token: None,
-                default: true,
-                allow_private: false,
-            })
+            .unwrap_or_else(crates_io_registry_config)
     }
 
     /// Find a registry by name
@@ -835,6 +821,8 @@ impl ShipperConfig {
             bail!("only one registry can be marked as default");
         }
 
+        validate_rehearsal_registry_authorities(self, allow_loopback)?;
+
         Ok(())
     }
 
@@ -962,7 +950,10 @@ per_package_timeout = "30m"
     }
 }
 
-fn validate_registry_destination(registry: &RegistryConfig, allow_loopback: bool) -> Result<()> {
+fn validated_registry_destination(
+    registry: &RegistryConfig,
+    allow_loopback: bool,
+) -> Result<ValidatedRegistry> {
     let identity = Registry {
         name: registry.name.clone(),
         api_base: registry.api_base.clone(),
@@ -972,8 +963,79 @@ fn validate_registry_destination(registry: &RegistryConfig, allow_loopback: bool
         .with_private(registry.allow_private)
         .with_loopback(allow_loopback);
     ValidatedRegistry::new(identity, policy)
-        .map(|_| ())
         .with_context(|| format!("invalid registry '{}' destination", registry.name))
+}
+
+fn validate_registry_destination(registry: &RegistryConfig, allow_loopback: bool) -> Result<()> {
+    validated_registry_destination(registry, allow_loopback).map(|_| ())
+}
+
+fn validate_rehearsal_registry_authorities(
+    config: &ShipperConfig,
+    allow_loopback: bool,
+) -> Result<()> {
+    if !config.rehearsal.enabled {
+        return Ok(());
+    }
+    let Some(rehearsal_name) = config.rehearsal.registry.as_deref() else {
+        return Ok(());
+    };
+    let Some(rehearsal_config) = configured_registry(config, rehearsal_name) else {
+        // Static config validation is opportunistic. The engine resolves the
+        // effective CLI/runtime catalog and rejects a missing entry before any
+        // rehearsal side effect.
+        return Ok(());
+    };
+    let rehearsal = validated_registry_destination(
+        &rehearsal_config,
+        allow_loopback || config.rehearsal.enabled || config.rehearsal.allow_loopback,
+    )?;
+
+    for live_config in configured_live_registries(config) {
+        let live_allow_loopback = allow_loopback
+            || ((config.rehearsal.enabled || config.rehearsal.allow_loopback)
+                && config.rehearsal.registry.as_deref() == Some(live_config.name.as_str()));
+        let live = validated_registry_destination(&live_config, live_allow_loopback)?;
+        rehearsal.ensure_rehearsal_isolated_from(&live)?;
+    }
+
+    Ok(())
+}
+
+fn configured_registry(config: &ShipperConfig, name: &str) -> Option<RegistryConfig> {
+    config
+        .registry
+        .as_ref()
+        .filter(|registry| registry.name == name)
+        .cloned()
+        .or_else(|| config.registries.find_by_name(name))
+        .or_else(|| (name == "crates-io").then(crates_io_registry_config))
+}
+
+fn configured_live_registries(config: &ShipperConfig) -> Vec<RegistryConfig> {
+    if let Some(registry) = config.registry.as_ref() {
+        return vec![registry.clone()];
+    }
+    if !config.registries.default_registries.is_empty() {
+        return config
+            .registries
+            .default_registries
+            .iter()
+            .filter_map(|name| configured_registry(config, name))
+            .collect();
+    }
+    vec![config.registries.get_default()]
+}
+
+fn crates_io_registry_config() -> RegistryConfig {
+    RegistryConfig {
+        name: "crates-io".to_string(),
+        api_base: "https://crates.io".to_string(),
+        index_base: Some("https://index.crates.io".to_string()),
+        token: None,
+        default: true,
+        allow_private: false,
+    }
 }
 
 #[cfg(test)]
@@ -1203,6 +1265,114 @@ mod tests {
         assert!(crates_io.validate().is_err());
         crates_io.rehearsal.enabled = false;
         assert!(crates_io.validate().is_ok());
+    }
+
+    #[test]
+    fn rehearsal_authority_validation_rejects_aliases_and_same_name_different_endpoint() {
+        let registry = |name: &str, api: &str, index: &str, default: bool| RegistryConfig {
+            name: name.to_string(),
+            api_base: api.to_string(),
+            index_base: Some(index.to_string()),
+            token: None,
+            default,
+            allow_private: false,
+        };
+        let live = registry(
+            "live",
+            "https://registry.example/api",
+            "https://index.registry.example/index",
+            true,
+        );
+        let mut config = ShipperConfig {
+            registries: MultiRegistryConfig {
+                registries: vec![
+                    live.clone(),
+                    registry(
+                        "alias",
+                        "https://registry.example/other-path",
+                        "https://index.registry.example/other-path",
+                        false,
+                    ),
+                ],
+                default_registries: vec![],
+            },
+            ..ShipperConfig::default()
+        };
+        config.rehearsal.enabled = true;
+        config.rehearsal.registry = Some("alias".to_string());
+        let error = config
+            .validate()
+            .expect_err("different-name authority alias must fail");
+        assert!(error.to_string().contains("authority overlaps"));
+
+        let mut same_name = ShipperConfig {
+            registry: Some(live),
+            registries: MultiRegistryConfig {
+                registries: vec![registry(
+                    "live",
+                    "https://rehearsal.example/api",
+                    "https://index.rehearsal.example/index",
+                    false,
+                )],
+                default_registries: vec![],
+            },
+            ..ShipperConfig::default()
+        };
+        same_name.rehearsal.enabled = true;
+        same_name.rehearsal.registry = Some("live".to_string());
+        let error = same_name
+            .validate()
+            .expect_err("same name must fail even with different endpoints");
+        assert!(error.to_string().contains("must differ"));
+    }
+
+    #[test]
+    fn rehearsal_authority_validation_rejects_crates_io_alias_and_accepts_distinct_loopback() {
+        let mut config = ShipperConfig {
+            registries: MultiRegistryConfig {
+                registries: vec![RegistryConfig {
+                    name: "public-alias".to_string(),
+                    api_base: "https://rehearsal.crates.io:444/api".to_string(),
+                    index_base: Some("https://index.rehearsal.crates.io:444/index".to_string()),
+                    token: None,
+                    default: false,
+                    allow_private: false,
+                }],
+                default_registries: vec!["crates-io".to_string()],
+            },
+            ..ShipperConfig::default()
+        };
+        config.rehearsal.enabled = true;
+        config.rehearsal.registry = Some("public-alias".to_string());
+        let error = config
+            .validate()
+            .expect_err("crates.io family alias must fail");
+        assert!(error.to_string().contains("crates.io family"));
+
+        config.registries.registries[0] = RegistryConfig {
+            name: "rehearsal".to_string(),
+            api_base: "http://127.0.0.1:18081/api".to_string(),
+            index_base: Some("http://127.0.0.1:18081/index".to_string()),
+            token: None,
+            default: false,
+            allow_private: false,
+        };
+        config.rehearsal.registry = Some("rehearsal".to_string());
+        config.rehearsal.allow_loopback = true;
+        let result = config.validate();
+        assert!(result.is_ok(), "distinct loopback authority: {result:?}");
+    }
+
+    #[test]
+    fn rehearsal_authority_validation_does_not_invent_missing_catalog_identity() {
+        let mut config = ShipperConfig::default();
+        config.rehearsal.enabled = true;
+        config.rehearsal.registry = Some("missing".to_string());
+
+        assert!(
+            config.validate().is_ok(),
+            "effective runtime resolution owns a missing rehearsal catalog entry"
+        );
     }
 
     #[test]

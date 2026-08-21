@@ -154,7 +154,7 @@ Options:
           Select where resume begins: sequential uses the named package and later plan entries; parallel uses its whole dependency level and later levels
 
       --rehearsal-registry <REHEARSAL_REGISTRY>
-          Name of a registry (from `[[registries]]` in `.shipper.toml`) to rehearse the publish against before live dispatch.
+          Name of a registry (from `[[registries.registries]]` in `.shipper.toml`) to rehearse the publish against before live dispatch.
           
           Runs the rehearsal publish flow against the alternate registry and enables the live-publish rehearsal gate when configured.
 

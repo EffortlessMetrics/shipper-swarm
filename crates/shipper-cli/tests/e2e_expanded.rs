@@ -1721,6 +1721,30 @@ fn help_publish_snapshot() {
     assert_snapshot!("help_publish", normalize_stderr(&stdout));
 }
 
+/// Snapshot and semantic contract: `rehearse --help` describes configured
+/// authority separation without presenting crates.io as a sandbox.
+#[test]
+fn help_rehearse_snapshot() {
+    let output = loopback_shipper_cmd()
+        .args(["rehearse", "--help"])
+        .output()
+        .expect("failed to run");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("distinct configured API/index authority"));
+    assert!(stdout.contains("--registries NAME --rehearsal-registry NAME"));
+    assert!(stdout.contains("matching `[[registries.registries]]` entry"));
+    assert!(stdout.contains("rejects every crates.io-family host"));
+    assert!(stdout.contains("does not prove DNS or administrative isolation"));
+    assert!(!stdout.contains("throwaway alternate registry"));
+    assert!(!stdout.contains("crates.io account"));
+    assert_snapshot!(
+        "help_rehearse",
+        trim_trailing_line_whitespace(&normalize_stderr(&stdout))
+    );
+}
+
 /// Snapshot: `doctor --help` output.
 #[test]
 fn help_doctor_snapshot() {

@@ -9,7 +9,7 @@ use chrono::Utc;
 use crate::cargo;
 use crate::ops::auth;
 use crate::plan::PlannedWorkspace;
-use crate::registry::{RegistryClient, RegistryPolicy};
+use crate::registry::{RegistryClient, RegistryPolicy, ValidatedRegistry};
 #[cfg(test)]
 use crate::runtime::environment;
 #[cfg(test)]
@@ -265,6 +265,11 @@ fn init_registry_client(
     opts: &RuntimeOptions,
 ) -> Result<RegistryClient> {
     let cache_dir = state_dir.join("cache");
+    let policy = registry_policy(&registry, opts);
+    RegistryClient::with_policy(registry, policy).map(|c| c.with_cache_dir(cache_dir))
+}
+
+fn registry_policy(registry: &Registry, opts: &RuntimeOptions) -> RegistryPolicy {
     let allow_private = opts
         .registry_policies
         .get(&registry.name)
@@ -273,10 +278,17 @@ fn init_registry_client(
         .registry_policies
         .get(&registry.name)
         .is_some_and(|policy| policy.allow_loopback);
-    let policy = RegistryPolicy::secure()
+    RegistryPolicy::secure()
         .with_private(allow_private)
-        .with_loopback(allow_loopback);
-    RegistryClient::with_policy(registry, policy).map(|c| c.with_cache_dir(cache_dir))
+        .with_loopback(allow_loopback)
+}
+
+fn validated_registry_identity(
+    registry: Registry,
+    opts: &RuntimeOptions,
+) -> Result<ValidatedRegistry> {
+    let policy = registry_policy(&registry, opts);
+    ValidatedRegistry::new(registry, policy)
 }
 
 #[cfg(test)]
@@ -797,18 +809,21 @@ pub fn run_rehearsal(
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "rehearsal registry '{rehearsal_name}' is not configured. \
-             Add it to [[registries]] in .shipper.toml or pass --registries."
+             Add it to [[registries.registries]] in .shipper.toml and select it with --registries."
             )
         })?;
 
-    if rehearsal_reg.name == ws.plan.registry.name {
-        bail!(
-            "rehearsal registry '{}' must differ from the live target; \
-             pick a sandbox registry (e.g. kellnr, a fresh crates-io test account, \
-             or a throwaway alternate-registry entry)",
-            rehearsal_reg.name
-        );
-    }
+    let mut rehearsal_opts = opts.clone();
+    let rehearsal_policy = rehearsal_opts
+        .registry_policies
+        .entry(rehearsal_reg.name.clone())
+        .or_insert_with(RegistryTrustOptions::secure);
+    rehearsal_policy.allow_loopback = true;
+    let live_identity = validated_registry_identity(ws.plan.registry.clone(), opts)
+        .context("invalid live registry identity for rehearsal isolation")?;
+    let rehearsal_identity = validated_registry_identity(rehearsal_reg.clone(), &rehearsal_opts)
+        .context("invalid rehearsal registry identity")?;
+    rehearsal_identity.ensure_rehearsal_isolated_from(&live_identity)?;
 
     let workspace_root = &ws.workspace_root;
     let state_dir = resolve_state_dir(workspace_root, &opts.state_dir);
@@ -836,12 +851,6 @@ pub fn run_rehearsal(
     event_log.write_to_file(&events_path)?;
     event_log.clear();
 
-    let mut rehearsal_opts = opts.clone();
-    let rehearsal_policy = rehearsal_opts
-        .registry_policies
-        .entry(rehearsal_reg.name.clone())
-        .or_insert_with(RegistryTrustOptions::secure);
-    rehearsal_policy.allow_loopback = true;
     let rehearsal_client =
         init_registry_client(rehearsal_reg.clone(), &state_dir, &rehearsal_opts)?;
     event_log.record(PublishEvent {
@@ -8540,17 +8549,112 @@ mod tests {
             opts.rehearsal_registry = Some("crates-io".to_string());
             opts.registries = vec![Registry {
                 name: "crates-io".to_string(),
-                api_base: "http://127.0.0.1:1".to_string(),
-                index_base: None,
+                api_base: "http://127.0.0.1:2".to_string(),
+                index_base: Some("http://127.0.0.1:2".to_string()),
             }];
 
             let mut reporter = CollectingReporter::default();
             let err = run_rehearsal(&ws, &opts, &mut reporter).expect_err("must fail");
             let msg = format!("{err:#}");
             assert!(
-                msg.contains("must differ from the live target"),
+                msg.contains("registry name matches the live target"),
                 "err was: {msg}"
             );
+            assert!(
+                !td.path().join(".shipper").exists(),
+                "same-name rejection must precede rehearsal evidence"
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn run_rehearsal_rejects_authority_alias_before_state_cargo_or_network() {
+        let td = tempdir().expect("tempdir");
+        let bin = td.path().join("bin");
+        write_fake_tools(&bin);
+        let cargo_log = td.path().join("cargo.log");
+        let state_dir = td.path().join("evidence");
+
+        let server = Server::http("127.0.0.1:0").expect("server");
+        let base_url = format!("http://{}", server.server_addr());
+        let network = thread::spawn(move || match server.recv_timeout(Duration::from_secs(1)) {
+            Ok(Some(request)) => {
+                request
+                    .respond(Response::from_string("{}"))
+                    .expect("respond");
+                true
+            }
+            Ok(None) | Err(_) => false,
+        });
+
+        with_test_env(
+            &bin,
+            vec![(
+                "SHIPPER_CARGO_ARGS_LOG",
+                Some(cargo_log.to_string_lossy().into_owned()),
+            )],
+            || {
+                let mut ws = planned_workspace(td.path(), base_url.clone());
+                ws.plan.registry.name = "live".to_string();
+                let mut opts = default_opts(state_dir.clone());
+                opts.registry_policies.insert(
+                    "live".to_string(),
+                    RegistryTrustOptions {
+                        allow_private: false,
+                        allow_loopback: true,
+                    },
+                );
+                opts.rehearsal_registry = Some("alias".to_string());
+                opts.registries = vec![Registry {
+                    name: "alias".to_string(),
+                    api_base: format!("{base_url}/different-path"),
+                    index_base: Some(format!("{base_url}/different-index-path")),
+                }];
+
+                let mut reporter = CollectingReporter::default();
+                let error = run_rehearsal(&ws, &opts, &mut reporter)
+                    .expect_err("same-authority alias must fail");
+                assert!(error.to_string().contains("authority overlaps"));
+                assert!(!state_dir.exists(), "guard must precede state mutation");
+                assert!(
+                    !cargo_log.exists(),
+                    "guard must precede Cargo publish/install"
+                );
+            },
+        );
+
+        assert!(
+            !network.join().expect("network observer"),
+            "guard must precede registry requests"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn run_rehearsal_rejects_differently_named_crates_io_alias() {
+        let td = tempdir().expect("tempdir");
+        let bin = td.path().join("bin");
+        write_fake_tools(&bin);
+        let env_vars = fake_program_env_vars(&bin);
+        temp_env::with_vars(env_vars, || {
+            let mut ws = planned_workspace(td.path(), "https://registry.example".into());
+            ws.plan.registry.name = "live".to_string();
+            ws.plan.registry.index_base = Some("https://index.registry.example".to_string());
+            let state_dir = td.path().join("evidence");
+            let mut opts = default_opts(state_dir.clone());
+            opts.rehearsal_registry = Some("public-alias".to_string());
+            opts.registries = vec![Registry {
+                name: "public-alias".to_string(),
+                api_base: "https://rehearsal.crates.io:444/api".to_string(),
+                index_base: Some("https://index.rehearsal.crates.io:444/index".to_string()),
+            }];
+
+            let mut reporter = CollectingReporter::default();
+            let error = run_rehearsal(&ws, &opts, &mut reporter)
+                .expect_err("crates.io family alias must fail");
+            assert!(error.to_string().contains("crates.io family"));
+            assert!(!state_dir.exists());
         });
     }
 
@@ -8571,6 +8675,10 @@ mod tests {
             let err = run_rehearsal(&ws, &opts, &mut reporter).expect_err("must fail");
             let msg = format!("{err:#}");
             assert!(msg.contains("is not configured"), "err was: {msg}");
+            assert!(
+                !td.path().join(".shipper").exists(),
+                "missing catalog entry must fail before rehearsal evidence"
+            );
         });
     }
 
@@ -8610,6 +8718,20 @@ mod tests {
         write_fake_tools(&bin);
         let env_vars = fake_program_env_vars(&bin);
         temp_env::with_vars(env_vars, || {
+            let live_server = Server::http("127.0.0.1:0").expect("live server");
+            let live_url = format!("http://{}", live_server.server_addr());
+            let live_network =
+                thread::spawn(
+                    move || match live_server.recv_timeout(Duration::from_secs(1)) {
+                        Ok(Some(request)) => {
+                            request
+                                .respond(Response::from_string("{}"))
+                                .expect("respond");
+                            true
+                        }
+                        Ok(None) | Err(_) => false,
+                    },
+                );
             // Rehearsal-registry mock: returns 404 for the preflight lookup
             // (not here) and 200 for the post-publish visibility check.
             let rehearsal_server = spawn_registry_server(
@@ -8620,8 +8742,17 @@ mod tests {
                 1,
             );
 
-            let ws = planned_workspace(td.path(), "http://127.0.0.1:1".into());
+            let mut ws = planned_workspace(td.path(), live_url);
+            ws.plan.registry.name = "live".to_string();
+            ws.plan.registry.index_base = Some(ws.plan.registry.api_base.clone());
             let mut opts = default_opts(PathBuf::from(".shipper"));
+            opts.registry_policies.insert(
+                "live".to_string(),
+                RegistryTrustOptions {
+                    allow_private: false,
+                    allow_loopback: true,
+                },
+            );
             opts.rehearsal_registry = Some("rehearsal".to_string());
             opts.registries = vec![Registry {
                 name: "rehearsal".to_string(),
@@ -8665,6 +8796,10 @@ mod tests {
             );
 
             rehearsal_server.join();
+            assert!(
+                !live_network.join().expect("live network observer"),
+                "rehearsal must not dispatch requests to the live registry"
+            );
         });
     }
 
@@ -8737,7 +8872,7 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("no rehearsal receipt was found"), "err: {msg}");
         assert!(
-            msg.contains("shipper rehearse"),
+            msg.contains("shipper rehearse --registries rehearsal --rehearsal-registry rehearsal"),
             "err should hint fix: {msg}"
         );
     }
