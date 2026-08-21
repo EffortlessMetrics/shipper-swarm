@@ -9,7 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const RELEASE_HEADINGS: [&str; 7] = [
-    "## [0.5.0] - 2026-08-01",
+    "## [0.5.0] - Unreleased",
     "## [0.4.0] - 2026-05-20",
     "## [0.4.0-rc.1] - 2026-05-12",
     "## [0.3.0-rc.2] - 2026-04-18",
