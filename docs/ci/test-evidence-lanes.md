@@ -217,7 +217,7 @@ When a maintainer applies the `mutation` or `full-ci` label, `mutation.yml`'s `m
 cargo xtask mutants-pr --changed --base origin/<PR-base>
 ```
 
-The wrapper computes `git diff <base>...HEAD --name-only -- '*.rs'`, filters out `tests/` and `benches/` paths (cargo-mutants only mutates production source), and runs `cargo mutants --no-shuffle --file <each>`. A `--dry-run` mode (`cargo mutants --list`) is available locally for shape inspection without running tests.
+The wrapper computes `git diff <base>...HEAD --name-only -- '*.rs'`, filters out `tests/` and `benches/` paths (cargo-mutants only mutates production source), and runs `cargo mutants --no-shuffle --workspace --file <each>`. Workspace selection makes non-default members discoverable; the retained `--file` arguments still limit mutation to the PR's changed production files. A `--dry-run` mode (`cargo mutants --list`) is available locally for shape inspection without running tests. When no production Rust files changed, the wrapper exits before probing or invoking cargo-mutants.
 
 Local invocation:
 
