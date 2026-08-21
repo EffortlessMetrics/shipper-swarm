@@ -101,6 +101,29 @@ fn resume_help() {
 }
 
 #[test]
+fn resume_help_explains_mode_specific_resume_selection() {
+    let output = shipper_cmd()
+        .args(["resume", "--help"])
+        .output()
+        .expect("failed to run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let normalized = stdout.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    for required in [
+        "sequential uses the named package and later plan entries",
+        "parallel uses its whole dependency level and later levels",
+        "In sequential mode, `--resume-from` selects the named package and later plan entries",
+        "In parallel mode, it selects the target's whole dependency level and later levels",
+        "an earlier same-level sibling can therefore block retry-budget admission",
+    ] {
+        assert!(
+            normalized.contains(required),
+            "resume help must explain mode-specific selection `{required}`:\n{stdout}"
+        );
+    }
+}
+
+#[test]
 fn preflight_help() {
     let output = shipper_cmd()
         .args(["preflight", "--help"])

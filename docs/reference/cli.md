@@ -92,7 +92,10 @@ evidence for each targeted registry.
 ### Resume
 
 - `--force-resume` — resume even if the computed plan differs from the state file (advanced; can cause duplicate publish attempts if misused)
-- `--resume-from <crate>` — start from a specific crate
+- `--resume-from <crate>` — select where resume begins. Sequential mode starts
+  at the named package and continues through later plan entries. Parallel mode
+  selects the target's whole dependency level and later levels, so an earlier
+  same-level sibling can block retry-budget admission.
 
 Completed resume output ends with one typed operator outcome. Human output
 renders `Result`, `Safe to resume`, `Next`, and retained `Evidence`; JSON adds

@@ -13,8 +13,13 @@ EXAMPLES:
     # Continue the current workspace release from persisted state:
     shipper resume
 
-    # Resume from a specific crate after reviewing the saved state:
+    # Select a resume point after reviewing the saved state:
     shipper resume --resume-from shipper-core
+
+In sequential mode, `--resume-from` selects the named package and later plan
+entries. In parallel mode, it selects the target's whole dependency level and
+later levels; an earlier same-level sibling can therefore block retry-budget
+admission.
 
     # Force resume when the computed plan differs from saved state:
     shipper resume --force-resume
@@ -139,7 +144,7 @@ Options:
           Publish to all configured registries
 
       --resume-from <RESUME_FROM>
-          Optional package name to resume from
+          Select where resume begins: sequential uses the named package and later plan entries; parallel uses its whole dependency level and later levels
 
       --rehearsal-registry <REHEARSAL_REGISTRY>
           Name of a registry (from `[[registries]]` in `.shipper.toml`) to rehearse the publish against before live dispatch.

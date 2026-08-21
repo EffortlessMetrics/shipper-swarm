@@ -233,7 +233,8 @@ struct Cli {
     #[arg(long, global = true)]
     all_registries: bool,
 
-    /// Optional package name to resume from
+    /// Select where resume begins: sequential uses the named package and later plan entries;
+    /// parallel uses its whole dependency level and later levels
     #[arg(long, global = true)]
     resume_from: Option<String>,
 
@@ -483,8 +484,13 @@ EXAMPLES:
     # Continue the current workspace release from persisted state:
     shipper resume
 
-    # Resume from a specific crate after reviewing the saved state:
+    # Select a resume point after reviewing the saved state:
     shipper resume --resume-from shipper-core
+
+In sequential mode, `--resume-from` selects the named package and later plan
+entries. In parallel mode, it selects the target's whole dependency level and
+later levels; an earlier same-level sibling can therefore block retry-budget
+admission.
 
     # Force resume when the computed plan differs from saved state:
     shipper resume --force-resume
