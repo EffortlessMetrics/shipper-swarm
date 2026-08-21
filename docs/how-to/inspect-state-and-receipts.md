@@ -9,6 +9,7 @@ questions → different file.
 
 | Question | File | Command |
 |---|---|---|
+| Is the retained run terminal, live, interrupted, or still unknown? | correlated local evidence | `shipper status --durable` |
 | Exactly what happened, and when? | `events.jsonl` | `shipper inspect-events` |
 | What's the current state (for resume)? | `state.json` | `cat .shipper/state.json` |
 | What was the final outcome + evidence? | `receipt.json` | `shipper inspect-receipt` |
@@ -17,6 +18,18 @@ questions → different file.
 | What would remediation do? | `remediation-plan.json` | `jq '.' .shipper/remediation-plan.json` |
 
 **Authority order:** events are truth, state is a projection, receipt is a summary. When they disagree, events win. See [INVARIANTS.md](../INVARIANTS.md).
+
+## Start with durable status after an interruption
+
+```bash
+shipper status --durable
+```
+
+This local, registry-bypassing mode correlates the authoritative event segment
+with state, receipt, reconciliation, plan, workspace, and lock evidence. It
+fails closed: disagreement, corruption, missing identity, cross-host liveness,
+or an unavailable process probe remains unknown. A `NotLive` observation by
+itself is not permission to resume; use the reported rerun posture and reason.
 
 ## Reading events
 
@@ -109,15 +122,16 @@ If you want to sanity-check that events and state agree:
 
 ```bash
 # package_published events
-jq -r 'select(.event_type.type == "package_published") | .event_type.crate_name' .shipper/events.jsonl | sort > /tmp/events_published.txt
+jq -r 'select(.event_type.type == "package_published") | .package' .shipper/events.jsonl | sort > /tmp/events_published.txt
 
 # packages with state.state == "published"
-jq -r '.packages[] | select(.state.state == "published") | .name' .shipper/state.json | sort > /tmp/state_published.txt
+jq -r '.packages[] | select(.state.state == "published") | "\(.name)@\(.version)"' .shipper/state.json | sort > /tmp/state_published.txt
 
 diff /tmp/events_published.txt /tmp/state_published.txt
 ```
 
-They should match exactly. If they don't, events are authoritative. ([#93](https://github.com/EffortlessMetrics/shipper/issues/93) tracks an end-of-run consistency check that does this automatically.)
+They should match exactly. If they do not, events are authoritative and the
+disagreement must be investigated rather than papered over by resume.
 
 ## See also
 
