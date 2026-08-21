@@ -433,14 +433,7 @@ impl MultiRegistryConfig {
     pub fn get_registries(&self) -> Vec<RegistryConfig> {
         if self.registries.is_empty() {
             // Return default crates-io registry
-            vec![RegistryConfig {
-                name: "crates-io".to_string(),
-                api_base: "https://crates.io".to_string(),
-                index_base: Some("https://index.crates.io".to_string()),
-                token: None,
-                default: true,
-                allow_private: false,
-            }]
+            vec![crates_io_registry_config()]
         } else {
             self.registries.clone()
         }
@@ -453,14 +446,7 @@ impl MultiRegistryConfig {
             .find(|r| r.default)
             .or(self.registries.first())
             .cloned()
-            .unwrap_or_else(|| RegistryConfig {
-                name: "crates-io".to_string(),
-                api_base: "https://crates.io".to_string(),
-                index_base: Some("https://index.crates.io".to_string()),
-                token: None,
-                default: true,
-                allow_private: false,
-            })
+            .unwrap_or_else(crates_io_registry_config)
     }
 
     /// Find a registry by name

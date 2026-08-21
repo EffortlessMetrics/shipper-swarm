@@ -77,7 +77,7 @@ The first flag selects the configured catalog entry for this command; the
 second activates rehearsal against that selected entry. This does not change
 the live `[registry]` target.
 
-## Step 2 — Dry-run in isolation
+## Step 2 — Rehearse against the isolated registry
 
 ```bash
 shipper rehearse --registries rehearsal --rehearsal-registry rehearsal
