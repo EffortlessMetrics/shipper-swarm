@@ -152,11 +152,22 @@ build. It does not publish crates or move release authority into
 
 For PR-time advisory evidence, a maintainer can also apply labels:
 
+The canonical names, descriptions, colors, and lane memberships live in
+`policy/ci-trigger-labels.toml`. Validate source/workflow agreement offline with
+`cargo xtask ci-labels check`, compare live GitHub metadata read-only with
+`cargo xtask ci-labels check-live --repo EffortlessMetrics/shipper-swarm`, and
+use `cargo xtask ci-labels sync --repo EffortlessMetrics/shipper-swarm --apply`
+only as an explicitly reviewed maintainer action. Sync prints its deterministic
+plan before applying it, creates or updates only the configured labels, and
+never deletes unrelated labels. GitHub label updates are not transactional: a
+failed apply may leave an already-applied bounded update, and an idempotent
+rerun converges the remaining drift.
+
 | Label | Effect |
 |---|---|
-| `coverage` | Runs `coverage.yml` on the PR. |
+| `coverage` | Selects `coverage.yml` for the next code-changing PR event. Label-only events deliberately do not launch/cancel coverage; `workflow_dispatch` is a separate unconditional path for an immediate run and does not consume the label. |
 | `mutation` | Runs the label-gated `mutants-pr` job on changed production Rust files. |
-| `full-ci` | Runs both PR coverage and label-gated mutation. It does not trigger `ci.yml`; use manual workflow dispatch for the broad full-CI lane. |
+| `full-ci` | Selects both advisory lanes asymmetrically: mutation can start immediately when the label is applied, while coverage waits for the next code-changing PR event. For an immediate combined run, apply the label for mutation and separately dispatch coverage; that dispatch is unconditional. `full-ci` never triggers broad `ci.yml`. |
 
 Do not run same-repo self-hosted full-CI proof on untrusted fork code. Move the
 work onto a trusted same-repo branch first, or rely on the fork-safe normalized
@@ -185,7 +196,7 @@ The `policy` job runs each check in blocking-allowlist mode and uploads `target/
 
 | Job | Workflow | Trigger | What it proves |
 |---|---|---|---|
-| `coverage` | `coverage.yml` | `push` to main, dispatch, `coverage` or `full-ci` label on PR | Codecov line/branch coverage. |
+| `coverage` | `coverage.yml` | `push` to main, dispatch, or a code-changing PR event while `coverage`/`full-ci` is present | Codecov line/branch coverage. Label-only events deliberately do not start or cancel this lane. |
 | `rust-small` | `em-ci-routed-rust.yml` | PRs, merge groups, pushes to main, dispatch | Required Rust-small PR gate with self-hosted routing and explicit fallback control. Carries `cargo fmt --check` and `cargo clippy -- -D warnings`, because `ci.yml`'s `lint` job never sees a pull request. |
 | `ripr-pilot` | `ripr.yml` | PRs touching `crates/**`, `xtask/**`, `Cargo.{toml,lock}`, `ripr.toml`, `policy/ripr-suppressions.toml`, `.github/workflows/ripr.yml`. `continue-on-error: true`. | Static mutation-exposure analysis: does the diff appear exposed to a meaningful test oracle? |
 | `mutants-pr` | `mutation.yml` | PRs labeled `mutation` or `full-ci` | Runtime mutation backstop scoped to the PR's changed files via `cargo xtask mutants-pr --changed`. Blocking when it runs. |
