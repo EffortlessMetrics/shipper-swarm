@@ -446,8 +446,16 @@ every step.
 If `.shipper/state.json` already exists for this plan, `publish` picks
 up where the previous run left off — already-published crates are
 skipped, and the run continues from the first pending or failed
-package. On interruption (Ctrl-C, network drop, ambiguous registry
-response), rerun `shipper publish` or `shipper resume`.
+package.
+
+If a run stops (Ctrl-C, network drop, or ambiguous registry response),
+inspect retained evidence before another publish. Run `shipper status
+--durable` with the same manifest, registry, and state selection, then
+`shipper inspect-events`; use `shipper inspect-receipt` only when a
+finalized receipt exists. Resume only when the typed retained-evidence
+posture explicitly authorizes it. `StillUnknown`, evidence disagreement,
+identity mismatch, malformed evidence, or inconclusive liveness must
+stop; preserve `reconciliation.json` when present.
 
 EXAMPLES:
     # Publish the whole workspace to crates.io:
@@ -2662,7 +2670,9 @@ fn print_first_run_guidance() {
     eprintln!("  shipper doctor      check auth, git, tooling, and registry reachability");
     eprintln!("  shipper plan        preview the deterministic publish order");
     eprintln!("  shipper preflight   prove the release can finish before anything uploads");
-    eprintln!("  shipper publish     execute the plan — rerun (or `shipper resume`) to continue");
+    eprintln!(
+        "  shipper publish     execute the plan — after a stop, inspect retained evidence and follow its typed next action"
+    );
     eprintln!();
     eprintln!("Usage: shipper [OPTIONS] <COMMAND>");
     eprintln!();
