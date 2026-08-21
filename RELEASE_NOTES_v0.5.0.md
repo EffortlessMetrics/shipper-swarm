@@ -1,6 +1,6 @@
 # Shipper 0.5.0 release notes
 
-Status: **pre-release; publication not authorized**
+Status: **reviewed release body; this source file grants no publication authority**
 
 Shipper 0.5.0 makes Rust workspace publication easier to recover and easier to
 operate. Durable events now capture the upload-to-visibility window and
@@ -23,7 +23,7 @@ registry and credential checks stop unsafe work earlier.
 
 ## Before upgrading
 
-Read the [0.5.0 migration guide](docs/release/0.5.0-migration.md) if you:
+Read the [0.5.0 migration guide](https://github.com/EffortlessMetrics/shipper/blob/v0.5.0/docs/release/0.5.0-migration.md) if you:
 
 - construct `RuntimeOptions` with a Rust struct literal;
 - exhaustively match public event enums;
@@ -34,17 +34,18 @@ Read the [0.5.0 migration guide](docs/release/0.5.0-migration.md) if you:
 
 ### Installation posture
 
-Before publication there is no verified public 0.5.0 install path. Evaluate
-the reviewed source candidate only in a disposable environment. After release
-authority records crates.io success, the expected CLI install command is:
+This reviewed source file does not prove that 0.5.0 is publicly available. If
+you are reading it on the published `v0.5.0` GitHub Release produced after the
+release workflow completed, install the CLI with:
 
 ```console
 cargo install shipper --version 0.5.0 --locked
 ```
 
-The command above is upgrade guidance, not evidence that the version is
-currently available. Preserve active `.shipper` evidence before changing the
-binary used to inspect or resume a run.
+Before that workflow-created Release exists, treat the command as prospective
+upgrade guidance and evaluate only a reviewed source candidate in a disposable
+environment. Preserve active `.shipper` evidence before changing the binary
+used to inspect or resume a run.
 
 The short compatibility summary is:
 

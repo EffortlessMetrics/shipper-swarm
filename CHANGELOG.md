@@ -64,6 +64,13 @@ Consumers of the Rust API and of `events.jsonl`, `state.json`, or
   token before registry or package work. Conflicting multi-registry selectors
   are rejected before durable evidence is read; singular `--registry` remains
   supported.
+- **Configuration validates on load.** Ordinary `.shipper.toml` loading now
+  rejects invalid values such as `output.lines = 0` at the configuration
+  boundary instead of carrying them into a later publish failure.
+- **Direct and plan-based yank execution.** `shipper yank --crate NAME
+  --version VERSION --reason TEXT` uses a command-scoped yank-version parser
+  identity rather than colliding with the global version flag. `shipper yank
+  --plan PATH` executes reviewed plan entries in order.
 - **Operator guidance is explicit.** `doctor` reports readiness, check counts,
   unevaluated checks, and the first safe next action. Plan and preflight state
   that no publication occurred. Non-watch status reports a typed transient
