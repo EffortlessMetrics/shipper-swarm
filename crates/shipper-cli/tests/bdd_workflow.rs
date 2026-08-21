@@ -72,6 +72,56 @@ fn spawn_registry(statuses: Vec<u16>, expected_requests: usize) -> TestRegistry 
     TestRegistry { base_url, handle }
 }
 
+fn assert_controlled_not_published_stop(state_dir: &Path, failed_package: &str) {
+    let state: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(state_dir.join("state.json")).expect("read controlled-stop state"),
+    )
+    .expect("parse controlled-stop state");
+    assert_eq!(
+        state["packages"][failed_package]["state"]["state"].as_str(),
+        Some("failed")
+    );
+    assert_eq!(
+        state["packages"][failed_package]["state"]["class"].as_str(),
+        Some("retryable")
+    );
+
+    let events =
+        fs::read_to_string(state_dir.join("events.jsonl")).expect("read controlled-stop events");
+    let last_event: serde_json::Value = serde_json::from_str(
+        events
+            .lines()
+            .last()
+            .expect("controlled-stop terminal event"),
+    )
+    .expect("parse controlled-stop terminal event");
+    assert_eq!(
+        last_event["event_type"]["type"].as_str(),
+        Some("execution_stopped")
+    );
+
+    let reconciliation: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(state_dir.join("reconciliation.json"))
+            .expect("read controlled-stop reconciliation"),
+    )
+    .expect("parse controlled-stop reconciliation");
+    let latest = reconciliation["records"]
+        .as_array()
+        .and_then(|records| {
+            records
+                .iter()
+                .rev()
+                .find(|record| record["package"].as_str() == Some(failed_package))
+        })
+        .expect("latest failed-package reconciliation");
+    assert_eq!(latest["outcome"]["outcome"].as_str(), Some("not_published"));
+    assert_eq!(latest["operator_action"].as_str(), Some("retry_allowed"));
+    assert!(
+        !state_dir.join("receipt.json").exists(),
+        "controlled stop must not synthesize a receipt"
+    );
+}
+
 fn spawn_doctor_registry(expected_requests: usize) -> TestRegistry {
     let server = Server::http("127.0.0.1:0").expect("server");
     let base_url = format!("http://{}", server.server_addr());
@@ -581,9 +631,10 @@ mod resume_continues_after_interruption {
         let (new_path, real_cargo, fake_cargo) = setup_fake_cargo(td.path());
         let state_dir = td.path().join(".shipper");
 
-        // Initial publish: core 200 (skip), app 404 cargo-fail 404 404 → ~4 reqs.
-        // Resume: app 404, cargo ok, readiness 200 → ~2 reqs.
-        let registry = spawn_registry(vec![200, 404, 404, 404, 404, 200], 7);
+        // Initial publish: core 200 (skip), app 404, then conclusive
+        // NotPublished reconciliation. Resume: app 404, cargo ok, readiness
+        // 200. Exactly five registry requests span both runs.
+        let registry = spawn_registry(vec![200, 404, 404, 404, 200], 5);
 
         // Initial publish that fails on app
         loopback_shipper_cmd()
@@ -611,15 +662,7 @@ mod resume_continues_after_interruption {
             .assert()
             .failure();
 
-        // Verify pre-condition: app is failed
-        let state: serde_json::Value = serde_json::from_str(
-            &fs::read_to_string(state_dir.join("state.json")).expect("read state"),
-        )
-        .expect("parse state");
-        let app_state = state["packages"]["app@0.1.0"]["state"]["state"]
-            .as_str()
-            .expect("app state");
-        assert_eq!(app_state, "failed", "app should be failed before resume");
+        assert_controlled_not_published_stop(&state_dir, "app@0.1.0");
 
         // When: resume with cargo publish succeeding
         let mut cmd = loopback_shipper_cmd();
@@ -649,6 +692,20 @@ mod resume_continues_after_interruption {
             app_pkg.unwrap()["state"]["state"].as_str(),
             Some("published"),
             "app should be published after resume"
+        );
+        let core_pkg = packages
+            .iter()
+            .find(|package| package["name"].as_str() == Some("core"))
+            .expect("receipt should retain skipped core");
+        assert_eq!(core_pkg["state"]["state"].as_str(), Some("skipped"));
+        let final_state: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(state_dir.join("state.json")).expect("read final state"),
+        )
+        .expect("parse final state");
+        assert_eq!(
+            final_state["packages"]["app@0.1.0"]["attempts"].as_u64(),
+            Some(2),
+            "only the failed app should receive the resumed Cargo attempt"
         );
 
         registry.join();
@@ -1819,10 +1876,10 @@ mod bdd_resume_after_network_failure {
         let (new_path, real_cargo, fake_cargo) = setup_fake_cargo(td.path());
         let state_dir = td.path().join(".shipper");
 
-        // Initial publish: core-lib 200 (skip), utils-lib 200 (skip),
-        // top-app 404 (needs publish), cargo fails → marked failed
-        // Resume: top-app 404 (needs publish), cargo ok, verify 200
-        let registry = spawn_registry(vec![200, 200, 404, 404, 404, 404, 200], 8);
+        // Initial publish: core-lib 200 (skip), utils-lib 200 (skip), top-app
+        // 404, then conclusive NotPublished reconciliation. Resume: top-app
+        // 404, cargo ok, verify 200. Exactly six requests span both runs.
+        let registry = spawn_registry(vec![200, 200, 404, 404, 404, 200], 6);
 
         // Initial publish that fails on top-app (simulated network failure)
         loopback_shipper_cmd()
@@ -1855,6 +1912,7 @@ mod bdd_resume_after_network_failure {
             state_dir.join("state.json").exists(),
             "state.json should exist after failed publish"
         );
+        assert_controlled_not_published_stop(&state_dir, "top-app@0.1.0");
 
         // When: resume with cargo publish now succeeding (network recovered)
         let mut cmd = loopback_shipper_cmd();
@@ -1906,6 +1964,22 @@ mod bdd_resume_after_network_failure {
             Some("published"),
             "top-app should be published after resume"
         );
+        let final_state: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(state_dir.join("state.json")).expect("read final state"),
+        )
+        .expect("parse final state");
+        assert_eq!(
+            final_state["packages"]["top-app@0.1.0"]["attempts"].as_u64(),
+            Some(2),
+            "only top-app should receive the resumed Cargo attempt"
+        );
+        for skipped in ["core-lib@0.1.0", "utils-lib@0.1.0"] {
+            assert_eq!(
+                final_state["packages"][skipped]["state"]["state"].as_str(),
+                Some("skipped"),
+                "already-complete package must remain skipped: {skipped}"
+            );
+        }
 
         registry.join();
     }

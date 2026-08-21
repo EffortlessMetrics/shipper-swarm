@@ -128,20 +128,29 @@ fn load_or_initialize_state(
 ) -> Result<ExecutionState> {
     match state::load_state(state_dir)? {
         Some(existing) => {
-            if existing.plan_id != ws.plan.plan_id {
-                if !opts.force_resume {
-                    bail!(
-                        "existing state plan_id {} does not match current plan_id {}; delete state or use --force-resume",
-                        existing.plan_id,
-                        ws.plan.plan_id
-                    );
-                }
+            if validate_existing_plan_id(&existing, ws, opts)? {
                 reporter.warn("forcing resume with mismatched plan_id (unsafe)");
             }
             Ok(existing)
         }
         None => Ok(init_state(ws, state_dir)?),
     }
+}
+
+pub(in crate::engine) fn validate_existing_plan_id(
+    existing: &ExecutionState,
+    ws: &PlannedWorkspace,
+    opts: &RuntimeOptions,
+) -> Result<bool> {
+    let mismatched = existing.plan_id != ws.plan.plan_id;
+    if mismatched && !opts.force_resume {
+        bail!(
+            "existing state plan_id {} does not match current plan_id {}; delete state or use --force-resume",
+            existing.plan_id,
+            ws.plan.plan_id
+        );
+    }
+    Ok(mismatched)
 }
 
 fn record_execution_start(

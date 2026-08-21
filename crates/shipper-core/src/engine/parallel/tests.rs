@@ -6337,18 +6337,18 @@ fn reconcile_bdd_ambiguous_resolves_to_published() {
 
 #[test]
 #[serial]
-fn reconcile_bdd_ambiguous_resolves_to_not_published_then_retries() {
+fn reconcile_bdd_not_published_exhaustion_records_controlled_retryable_stop() {
     // Scenario: cargo exits ambiguously on every attempt. Registry is
     // consistently 404 — the version never appears. Reconcile resolves
     // to NotPublished on each cargo-failure path, which falls through to
-    // the normal Retryable backoff → retry → fails-ambiguous-again. After
-    // max_attempts, the package ends Failed.
+    // the normal Retryable backoff and one safe retry. After max_attempts,
+    // the package ends in the typed controlled Failed(Retryable) stop.
     //
     // With max_attempts=2 and readiness disabled, the request sequence is:
     //   1. entry check → 404
     //   2. attempt 1 reconcile (enabled=false, single call) → 404 → NotPublished
-    //   3. attempt 2 reconcile → 404 → NotPublished
-    //   4. post-loop final "if last_err, maybe visible" check (execute_package.rs) → 404
+    //   3. attempt 2 reconcile → 404 → NotPublished and controlled stop
+    // There is no redundant post-loop visibility poll.
     let td = tempdir().expect("tempdir");
     let bin = td.path().join("bin");
     write_fake_tools(&bin);
@@ -6360,10 +6360,9 @@ fn reconcile_bdd_ambiguous_resolves_to_not_published_then_retries() {
                 (404, "{}".to_string()),
                 (404, "{}".to_string()),
                 (404, "{}".to_string()),
-                (404, "{}".to_string()),
             ],
         )]),
-        4,
+        3,
     );
 
     let ws = planned_workspace(td.path(), server.base_url.clone());
@@ -6410,8 +6409,13 @@ fn reconcile_bdd_ambiguous_resolves_to_not_published_then_retries() {
                 .expect_err("max_attempts exhausted without success should err");
             let msg = err.to_string();
             assert!(
-                msg.contains("failed"),
-                "expected failure message, got: {msg}"
+                err.downcast_ref::<crate::engine::PublishRecoverableStopError>()
+                    .is_some(),
+                "expected typed controlled-stop error, got: {err:#}"
+            );
+            assert!(
+                msg.contains("retry budget exhausted after registry confirmed NotPublished"),
+                "expected controlled-stop message, got: {msg}"
             );
             // Verify cargo was actually retried (attempts incremented).
             let state = st.lock().unwrap();
@@ -6421,8 +6425,8 @@ fn reconcile_bdd_ambiguous_resolves_to_not_published_then_retries() {
                 PackageState::Failed { class, .. } => {
                     assert_eq!(
                         *class,
-                        ErrorClass::Ambiguous,
-                        "expected ambiguous failure class after retry exhaustion"
+                        ErrorClass::Retryable,
+                        "expected retryable failure class after controlled exhaustion"
                     );
                 }
                 other => panic!("expected failed state, got {:?}", other),
@@ -6444,6 +6448,29 @@ fn reconcile_bdd_ambiguous_resolves_to_not_published_then_retries() {
     assert!(
         has_reconciled_not_published,
         "expected at least one PublishReconciled with NotPublished outcome"
+    );
+    assert!(matches!(
+        persisted.all_events().last().map(|event| &event.event_type),
+        Some(EventType::PackageFailed {
+            class: ErrorClass::Retryable,
+            ..
+        })
+    ));
+    let report: shipper_types::ReconciliationReport = serde_json::from_str(
+        &fs::read_to_string(crate::state::execution_state::reconciliation_path(
+            &state_dir,
+        ))
+        .expect("read reconciliation report"),
+    )
+    .expect("parse reconciliation report");
+    let latest = report.records.last().expect("latest reconciliation record");
+    assert!(matches!(
+        latest.outcome,
+        shipper_types::ReconciliationOutcome::NotPublished { .. }
+    ));
+    assert_eq!(
+        latest.operator_action,
+        shipper_types::ReconciliationOperatorAction::RetryAllowed
     );
     let infos = reporter.drain_infos();
     assert!(

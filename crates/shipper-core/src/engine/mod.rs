@@ -540,6 +540,7 @@ pub fn run_resume(
             state_dir.display()
         );
     };
+    publish::bootstrap::validate_existing_plan_id(&existing_state, ws, opts)?;
     let observation = crate::state::run_observation::observe_run(&state_dir, Some(workspace_root))?;
     let reconciliation_path = state::reconciliation_path(&state_dir);
     let reconciliation = if reconciliation_path.exists() {
