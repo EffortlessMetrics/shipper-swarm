@@ -2,7 +2,14 @@
 
 Goal: a tag push triggers a workspace release driven by Shipper. Interruption-safe, evidence-preserved.
 
-> This repo dogfoods this setup — see `.github/workflows/release.yml` for the production example.
+> **Destructive live-registry fence:** the workflow below can publish permanent
+> versions. Protect the `release` environment with maintainer approval and use
+> it only from the repository that owns release authority. Pull requests and
+> ordinary CI should use the fake-Cargo/mock-registry recovery rehearsal, not a
+> live publish. `EffortlessMetrics/shipper` remains the release-authority
+> repository. Its
+> `.github/workflows/release.yml` is the production example; the active
+> development repository does not own publish credentials.
 
 ## Minimal workflow
 
@@ -30,6 +37,9 @@ jobs:
       - name: Install Shipper
         run: cargo install shipper --locked
 
+      - name: Diagnose release prerequisites
+        run: shipper doctor
+
       - name: Plan
         run: |
           mkdir -p .shipper
@@ -48,6 +58,15 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: shipper preflight --policy safe
+
+      - name: Upload preflight artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: shipper-state-preflight
+          path: .shipper/
+          include-hidden-files: true
+          retention-days: 30
 
       - name: Publish
         env:
@@ -81,13 +100,16 @@ Upload the `.shipper/` directory after plan, after preflight, and after publish 
 
 ### Timeout budget
 
-For a first-publish release of many new crates, crates.io's 1-new-crate-per-10-min rate limit applies. Budget ~10 minutes per crate past the initial 5-crate burst. A 12-crate first publish can run 70–90 minutes. Set `timeout-minutes` accordingly (the example above uses 180).
+Registry rate limits and visibility delays can change. Budget from a rehearsal
+of the actual package graph, retain Shipper's wait/backoff events, and leave
+enough workflow time for evidence upload even after a failure. The example uses
+180 minutes; that number is an operator budget, not a registry guarantee.
 
 ### Token vs Trusted Publishing
 
 The example above uses `CARGO_REGISTRY_TOKEN` — a long-lived personal
-access token stored as a repo secret. That is the current proven Shipper
-release path: the 0.4.0 release evidence recorded Trusted Publishing token
+access token stored as a repo secret. The retained 0.4.0 Shipper release
+evidence proves that fallback path: it recorded Trusted Publishing token
 mint failure, a configured fallback secret, and `selected_token_source =
 "fallback_secret"` without storing token values.
 
@@ -163,8 +185,8 @@ checks for existing crates.
 
 When the workflow keeps `secrets.CARGO_REGISTRY_TOKEN` as a fallback,
 `shipper doctor` and `shipper preflight` keep that path visible with
-advisory warnings. Treat the fallback as the current proven release posture and
-as the incident-recovery path. Promote the short-lived token from
+advisory warnings. Treat the fallback as the retained proven posture and the
+incident-recovery path until newer release evidence proves otherwise. Promote the short-lived token from
 `rust-lang/crates-io-auth-action@v1` to the normal release path only after
 release evidence proves the token mint path succeeds and fallback use is
 explicitly unnecessary for the published crate set.
@@ -180,13 +202,18 @@ explicitly unnecessary for the published crate set.
   crates.io refuses. The `environment:` name is the tightest scope —
   make sure the workflow's environment matches what you registered.
 
-See `.github/workflows/release.yml` in this repo for the production
-example, and [#96](https://github.com/EffortlessMetrics/shipper/issues/96)
-for the migration history.
+See the release authority's
+[`release.yml`](https://github.com/EffortlessMetrics/shipper/blob/main/.github/workflows/release.yml)
+for the production example, and
+[#96](https://github.com/EffortlessMetrics/shipper/issues/96) for the migration
+history.
 
 ### Resume mode
 
-If a release is interrupted, manually trigger the resume workflow (a `workflow_dispatch` with `mode: resume` and `artifact_run_id: <failed run id>`) — or copy the resume job from this repo's `.github/workflows/release.yml`.
+If a release is interrupted, manually trigger the release authority's resume
+workflow (a `workflow_dispatch` with `mode: resume` and
+`artifact_run_id: <failed run id>`) — or adapt the resume job from the linked
+production workflow while preserving its artifact and identity checks.
 
 ### Exit codes
 
@@ -196,22 +223,51 @@ If a release is interrupted, manually trigger the resume workflow (a `workflow_d
 |-----:|---------|-----------|
 | 0 | All packages published/skipped | Proceed |
 | 1 | General failure (config error, preflight failure, complete publish failure) | Alert / investigate |
-| 2 | Partial publish failure — some packages published, some failed | Trigger resume automatically |
+| 2 | Finalized partial publish result — some packages published, some failed | Inspect the outcome and retained evidence before deciding whether resume is safe |
 
-To auto-resume on partial failure:
+Clap/usage errors also exit 2, but print usage and create no `.shipper/`
+execution evidence. They are not partial publish results. Do not branch on the
+number alone; for a finalized JSON result inspect `execution_result`,
+`safe_to_rerun` plus its reason, `next_action`, and evidence references.
+
+Capture the code without hiding it from the job, then upload evidence for an
+operator-controlled follow-up:
 
 ```yaml
 - name: Publish
-  run: shipper publish
-  continue-on-error: true
   id: publish
+  shell: bash
+  run: |
+    set +e
+    shipper publish --format json \
+      > .shipper/publish.json \
+      2> .shipper/publish.stderr
+    code=$?
+    echo "shipper_exit=$code" >> "$GITHUB_OUTPUT"
+    exit "$code"
 
-- name: Auto-resume on partial failure
-  if: steps.publish.outputs.exit-code == '2'
-  run: shipper resume
+- name: Upload retained evidence
+  if: always()
+  uses: actions/upload-artifact@v7
+  with:
+    name: shipper-state-final
+    path: .shipper/
+    include-hidden-files: true
 ```
 
-The `--format json` envelope also carries `execution_result` (`"success"`, `"partial_failure"`, `"complete_failure"`) for programmatic gating without parsing exit codes.
+For a wrapped plan-build or publish-engine failure before a receipt exists,
+inspect `.shipper/publish.stderr` for the redacted
+`shipper.publish.error.v1` envelope; stdout is intentionally empty in that
+case. Parser/usage and config/option-validation errors outside that typed
+boundary may instead be prose or usage output. The separate stderr file keeps
+either form available; retain both files with the rest of `.shipper/`.
+
+The completed-result JSON envelope carries `execution_result` (`"success"`,
+`"partial_failure"`, `"complete_failure"`) for programmatic gating. A later
+approved job may restore the exact artifact as `.shipper/` inside the exact
+source checkout and run `shipper status --durable` with the matching candidate
+binary. It should invoke `shipper resume` only when the evidence-backed rerun
+posture allows it.
 
 ## Generate a template
 
