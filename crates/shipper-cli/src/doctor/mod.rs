@@ -181,7 +181,7 @@ pub(crate) fn collect_report(
     ws: &plan::PlannedWorkspace,
     opts: &RuntimeOptions,
 ) -> Result<DoctorReport> {
-    let auth = checks::auth::inspect(ws)?;
+    let auth = checks::auth::inspect(ws, opts)?;
     let state_dir = checks::state_dir::inspect(ws, opts);
     let tools = checks::tools::inspect();
     let connectivity = checks::connectivity::inspect(ws, opts)?;
@@ -275,7 +275,7 @@ pub(crate) fn run(
         all.extend(workspace.finding());
     }
 
-    let auth = checks::auth::check(ws)?;
+    let auth = checks::auth::check(ws, opts)?;
     all.extend(auth.findings.clone());
 
     let state_dir = checks::state_dir::check(ws, opts);

@@ -2429,7 +2429,7 @@ fn preflight_failure_hint(state_dir: &Path) -> String {
     with_common_blockers(
         hint,
         &[
-            "missing token/auth: run `cargo login <token>` or configure Trusted Publishing",
+            "missing token/auth: run `shipper doctor` for guidance scoped to the selected registry before changing credentials",
             "dirty git: commit or stash changes, or pass `--allow-dirty` only for intentional rehearsal",
             "version already exists: run `shipper status`, then bump or skip the crate version",
             "ownership failure: confirm the token can publish with `cargo owner --list <crate>`",
