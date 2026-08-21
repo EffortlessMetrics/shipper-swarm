@@ -1394,6 +1394,47 @@ pub(crate) fn publish_package_with_timeout(
                             // registry confirms no duplicate-upload risk.
                             // Preserve negative-polling evidence for the receipt.
                             readiness_evidence = reconcile_evidence;
+                            if attempt >= opts.max_attempts {
+                                let retryable = PackageState::Failed {
+                                    class: ErrorClass::Retryable,
+                                    message: msg.clone(),
+                                };
+                                {
+                                    let Ok(mut log) = event_log.lock() else {
+                                        return poisoned_lock("event log");
+                                    };
+                                    log.record(PublishEvent {
+                                        timestamp: Utc::now(),
+                                        event_type: EventType::PackageFailed {
+                                            class: ErrorClass::Retryable,
+                                            message: msg.clone(),
+                                        },
+                                        package: pkg_label.clone(),
+                                    });
+                                }
+                                if let Err(e) = commit_pending_with_attempt_detail_transition(
+                                    st,
+                                    state_dir,
+                                    event_log,
+                                    events_path,
+                                    &key,
+                                    retryable,
+                                    attempt_detail,
+                                ) {
+                                    return PackagePublishResult { result: Err(e) };
+                                }
+                                return PackagePublishResult {
+                                    result: Err(crate::engine::PublishRecoverableStopError {
+                                        message: format!(
+                                            "{}@{}: retry budget exhausted after registry confirmed NotPublished",
+                                            p.name, p.version
+                                        ),
+                                        package: pkg_label.clone(),
+                                        evidence_consistent: false,
+                                    }
+                                    .into()),
+                                };
+                            }
                         }
                         ReconciliationOutcome::StillUnknown { reason, .. } => {
                             let ambiguous_state = PackageState::Ambiguous {

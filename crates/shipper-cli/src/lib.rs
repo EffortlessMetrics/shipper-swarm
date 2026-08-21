@@ -1119,13 +1119,60 @@ fn still_unknown_evidence(state_dir: &Path, reconciliation_written: bool) -> Vec
         .collect()
 }
 
+fn mark_recoverable_publish_stop(
+    error: anyhow::Error,
+    format: &str,
+    evidence_state_dir: &Path,
+    evidence_consistent: bool,
+) -> anyhow::Error {
+    let reconciliation_written =
+        shipper_core::state::execution_state::reconciliation_path(evidence_state_dir).is_file();
+    let evidence = still_unknown_evidence(evidence_state_dir, reconciliation_written);
+    let error = error.context(if evidence_consistent {
+        "publish stopped after registry truth proved the package absent and the retry budget was exhausted; retained evidence authorizes a controlled resume"
+    } else {
+        "publish stopped after registry truth proved the package absent, but retained recovery evidence is missing or inconsistent; recovery is not authorized"
+    });
+    let rendered_error = shipper_output_sanitizer::redact_sensitive(&format_error(&error))
+        .trim_end()
+        .to_string();
+    PublishEarlyError {
+        format: format.to_string(),
+        category: "recoverable_stop",
+        summary: "registry truth confirmed NotPublished after the retry budget was exhausted",
+        rendered_error,
+        safe_to_rerun: PublishEarlySafeRerun {
+            value: Some(false),
+            reason: if evidence_consistent {
+                "do not rerun publish; retained evidence authorizes controlled resume"
+            } else {
+                "retained recovery evidence is missing or inconsistent, so recovery safety is not proven"
+            },
+        },
+        next_action: OperatorAction::posture(
+            if evidence_consistent {
+                ActionKind::Resume
+            } else {
+                ActionKind::InspectEvents
+            },
+            if evidence_consistent {
+                "resume only with the same plan, registry, workspace, and state directory"
+            } else {
+                "inspect retained events, state, and reconciliation evidence; do not resume while evidence is missing or inconsistent"
+            },
+        ),
+        evidence,
+    }
+    .into()
+}
+
 fn mark_publish_engine_error(
     error: anyhow::Error,
     format: &str,
     configured_state_dir: &Path,
     evidence_state_dir: &Path,
 ) -> anyhow::Error {
-    let Some(still_unknown) = error.downcast_ref::<engine::PublishStillUnknownError>() else {
+    let Some(stop) = engine::classify_publish_stop(&error) else {
         let classification = classify_publish_early_error(&error);
         return mark_publish_early_error(
             error.context(publish_failure_hint(configured_state_dir)),
@@ -1133,30 +1180,38 @@ fn mark_publish_engine_error(
             classification,
         );
     };
-    let evidence =
-        still_unknown_evidence(evidence_state_dir, still_unknown.reconciliation_written());
-    let error = error.context(
-        "publish stopped because registry truth remains unknown; inspect the retained reconciliation evidence before any retry",
-    );
-    let rendered_error = shipper_output_sanitizer::redact_sensitive(&format_error(&error))
-        .trim_end()
-        .to_string();
-    PublishEarlyError {
-        format: format.to_string(),
-        category: "ambiguous",
-        summary: "registry truth remains unknown after an ambiguous publish attempt",
-        rendered_error,
-        safe_to_rerun: PublishEarlySafeRerun {
-            value: Some(false),
-            reason: "persisted reconciliation evidence does not prove that another upload is safe",
-        },
-        next_action: OperatorAction::posture(
-            ActionKind::Reconcile,
-            "inspect the retained reconciliation and event evidence before any retry",
-        ),
-        evidence,
+    match stop {
+        engine::PublishStopClassification::StillUnknown {
+            reconciliation_written,
+        } => {
+            let evidence = still_unknown_evidence(evidence_state_dir, reconciliation_written);
+            let error = error.context(
+                "publish stopped because registry truth remains unknown; inspect the retained reconciliation evidence before any retry",
+            );
+            let rendered_error = shipper_output_sanitizer::redact_sensitive(&format_error(&error))
+                .trim_end()
+                .to_string();
+            PublishEarlyError {
+                format: format.to_string(),
+                category: "ambiguous",
+                summary: "registry truth remains unknown after an ambiguous publish attempt",
+                rendered_error,
+                safe_to_rerun: PublishEarlySafeRerun {
+                    value: Some(false),
+                    reason: "persisted reconciliation evidence does not prove that another upload is safe",
+                },
+                next_action: OperatorAction::posture(
+                    ActionKind::Reconcile,
+                    "inspect the retained reconciliation and event evidence before any retry",
+                ),
+                evidence,
+            }
+            .into()
+        }
+        engine::PublishStopClassification::RecoverableNotPublished {
+            evidence_consistent,
+        } => mark_recoverable_publish_stop(error, format, evidence_state_dir, evidence_consistent),
     }
-    .into()
 }
 
 fn mark_publish_early_error_with_next_action(
@@ -5402,6 +5457,7 @@ fn event_type_name(event_type: &EventType) -> &'static str {
         EventType::PlanCreated { .. } => "plan_created",
         EventType::ExecutionStarted => "execution_started",
         EventType::ExecutionFinished { .. } => "execution_finished",
+        EventType::ExecutionStopped { .. } => "execution_stopped",
         EventType::AuthEvidenceRecorded { .. } => "auth_evidence_recorded",
         EventType::RegistryPolicyApplied { .. } => "registry_policy_applied",
         EventType::PackageStarted { .. } => "package_started",
@@ -5447,6 +5503,9 @@ fn summarize_event(event: &PublishEvent) -> String {
     match &event.event_type {
         EventType::ExecutionStarted => "execution started".to_string(),
         EventType::ExecutionFinished { result } => format!("execution finished: {:?}", result),
+        EventType::ExecutionStopped { reason } => {
+            format!("execution stopped: {:?}", reason)
+        }
         EventType::PackageStarted { name, version } => {
             format!("started {}@{}", name, version)
         }
