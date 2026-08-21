@@ -28,7 +28,7 @@ Use `shipper-cli` only when a Rust wrapper needs Shipper's exact Clap command
 surface and exit behavior programmatically:
 
 ```rust,no_run
-fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<std::process::ExitCode> {
     // Add wrapper-specific setup before entering the Shipper command adapter.
     shipper_cli::run()
 }

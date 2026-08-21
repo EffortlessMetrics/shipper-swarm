@@ -16,12 +16,14 @@ command adapter, use [`shipper-cli`](https://crates.io/crates/shipper-cli).
   stable `plan_id`.
 - **Preflight** — check git, registry, dry-run, version, ownership, and policy
   readiness.
-- **Publish and resume** — publish one crate at a time, verify visibility, and
-  persist progress after each step.
+- **Publish and resume** — publish one crate at a time by default, or use
+  bounded opt-in parallelism for independent crates at the same dependency
+  level; verify visibility and persist progress after each package.
 - **Reconciliation** — classify ambiguous outcomes as `Published`,
   `NotPublished`, or `StillUnknown`; never blind-retry `StillUnknown`.
 - **Durable evidence** — keep `events.jsonl` authoritative, `state.json` as its
-  resumable projection, and `receipt.json` as a derived summary.
+  resumable projection, `receipt.json` as a derived summary, and
+  `reconciliation.json` as registry-truth evidence for ambiguous outcomes.
 - **Bounded remediation** — plan containment and fix-forward actions without
   implying a live registry mutation.
 

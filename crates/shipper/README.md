@@ -74,12 +74,14 @@ re-exports. Direct `shipper-cli` use is for specialized command embedding.
 ## Evidence contract
 
 ```text
-events.jsonl = authoritative truth
-state.json   = resumable projection
-receipt.json = derived summary
+events.jsonl         = authoritative truth
+state.json          = resumable projection
+receipt.json        = derived summary
+reconciliation.json = registry-truth evidence for ambiguous publish outcomes
 ```
 
-When these disagree, stop and investigate rather than retrying blindly.
+When these disagree, stop and investigate rather than retrying blindly. A
+`StillUnknown` report is the evidence to inspect before recovery.
 
 ## Scope and support
 
