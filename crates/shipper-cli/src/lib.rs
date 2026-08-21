@@ -449,13 +449,18 @@ skipped, and the run continues from the first pending or failed
 package.
 
 If a run stops (Ctrl-C, network drop, or ambiguous registry response),
-inspect retained evidence before another publish. Run `shipper status
---durable` with the same manifest, registry, and state selection, then
-`shipper inspect-events`; use `shipper inspect-receipt` only when a
+inspect retained evidence before another publish. For one registry, run
+`shipper status --durable` with the same manifest, singular `--registry`,
+and state directory. For a run started with `--registries` or
+`--all-registries`, inspect each registry separately with its matching
+singular `--registry` and registry-specific state directory; `--durable`
+rejects multi-registry selectors. With that same state directory selected,
+run `shipper inspect-events`; use `shipper inspect-receipt` only when a
 finalized receipt exists. Resume only when the typed retained-evidence
-posture explicitly authorizes it. `StillUnknown`, evidence disagreement,
-identity mismatch, malformed evidence, or inconclusive liveness must
-stop; preserve `reconciliation.json` when present.
+posture explicitly authorizes it. The
+reconciliation outcome `StillUnknown`, durable status `unknown`, evidence
+disagreement, identity mismatch, malformed evidence, or inconclusive
+liveness must stop; preserve `reconciliation.json` when present.
 
 EXAMPLES:
     # Publish the whole workspace to crates.io:

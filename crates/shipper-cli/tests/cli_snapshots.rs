@@ -203,12 +203,17 @@ fn publish_help_requires_evidence_before_resume_after_ambiguity() {
 
     for required in [
         "shipper status --durable",
-        "same manifest, registry, and state selection",
+        "same manifest, singular `--registry`, and state directory",
+        "`--registries` or `--all-registries`",
+        "matching singular `--registry` and registry-specific state directory",
+        "`--durable` rejects multi-registry selectors",
+        "same state directory selected",
         "shipper inspect-events",
         "shipper inspect-receipt",
         "finalized receipt exists",
         "typed retained-evidence posture explicitly authorizes it",
-        "StillUnknown",
+        "reconciliation outcome `StillUnknown`",
+        "durable status `unknown`",
         "reconciliation.json",
     ] {
         assert!(
