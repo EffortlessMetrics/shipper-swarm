@@ -19,7 +19,7 @@ planning, or captured plan/preflight output.
 | `events.jsonl` | **Truth** (append-only) | Every state transition with timestamp | Per event | JSONL (one event per line) |
 | `state.json` | Projection | Serialized `ExecutionState` for fast resume | Per package state change | JSON |
 | `receipt.json` | Summary | End-of-run audit artifact with evidence | Once, at run completion | JSON |
-| `lock` | — | Concurrent-publish guard | Held during the run | Small text file |
+| `lock` | — | Concurrent-publish guard and optional process-identity evidence | Held during the run | JSON-compatible `LockInfo` metadata plus optional process identity on supported Linux hosts; legacy text remains readable but cannot prove liveness |
 
 Additional evidence artifacts may appear when the related command or workflow
 runs:
@@ -37,7 +37,11 @@ runs:
 0.5 artifacts are rebuildable for every field promised by the event vocabulary.
 0.4 events, state, and receipts remain readable and safely resumable, but
 fields introduced after 0.4 are unknown when the old artifact cannot provide
-evidence; consumers must not invent default values. See
+evidence unless their schema defines an explicit compatibility default. The
+current exception is `Receipt.execution_result`: a missing value in a legacy
+all-published receipt deserializes as `success`, as preserved by
+`receipt_without_execution_result_defaults_to_success`. Consumers must not
+invent defaults for other absent evidence. See
 [INVARIANTS.md](../INVARIANTS.md) for the full compatibility and event-first
 contract.
 
@@ -53,6 +57,7 @@ contract.
 | Which auth path was observed? | `auth-evidence.json` |
 | How did Shipper resolve ambiguity? | `events.jsonl`; `reconciliation.json` if present |
 | What would remediation do? | `remediation-plan.json` |
+| Is a retained run terminal, live, interrupted, or unsafe to classify? | `shipper status --durable` over the correlated local evidence set; no single file proves this |
 
 ## Key field paths
 
@@ -69,7 +74,7 @@ contract.
 Common event types:
 - `plan_created` — beginning
 - `preflight_started`, `preflight_workspace_verify`, `preflight_complete`
-- `package_started`, `package_attempted`, `package_published`, `package_failed`, `package_skipped`
+- `package_started`, `package_attempted`, `package_uploaded`, `package_published`, `package_failed`, `package_skipped`
 - `retry_backoff_started` — added in [#91](https://github.com/EffortlessMetrics/shipper/issues/91); carries attempt N/M, delay, reason, next-attempt time
 - `publish_reconciling`, `publish_reconciled` — added in [#99](https://github.com/EffortlessMetrics/shipper/issues/99); registry-truth resolution of ambiguous outcomes
 - `state_event_drift_detected` — added in [#93](https://github.com/EffortlessMetrics/shipper/issues/93); end-of-run consistency check
@@ -109,6 +114,15 @@ Common event types:
 
 **Field path caveat**: package state lives at `.packages[].state.state` (nested), **not** `.packages[].status`. Common misread.
 
+`plan_id` binds the registry API base and ordered package names/versions. It
+does not bind source bytes, workspace path, or a unique execution. Resume uses
+it as one guard, not as provenance for the checkout restored by an operator.
+
+Affirmative lock-holder liveness currently depends on Linux `/proc` process
+identity. Unsupported platforms, legacy locks, missing/corrupt locks, and
+cross-host evidence remain `Unknown`; PID or lock age alone is not equivalent
+proof.
+
 `attempt_history` is the per-attempt projection replayed from `events.jsonl` and is used by diagnostics and recovery workflows after interruption.
 
 Per-attempt recovery fields are under `.attempt_history[]`, keyed by:
@@ -146,7 +160,14 @@ Per-attempt recovery fields are under `.attempt_history[]`, keyed by:
 }
 ```
 
-`execution_result` is the aggregate run outcome: `"success"`, `"partial_failure"`, or `"complete_failure"`. It matches the process exit code (0 / 2 / 1) and the `execution_result` field in the `--format json` envelope. The field is `#[serde(default)]` — receipts written before it existed deserialize as `"success"`.
+`execution_result` is the aggregate receipt outcome: `"success"`,
+`"partial_failure"`, or the compatibility-retained `"complete_failure"` value.
+Current finalized publish/resume runs emit `success` (exit `0`) or
+`partial_failure` (exit `2`); `complete_failure` is not currently reachable
+from receipt finalization. Exit `1` means the command errored before a receipt
+was finalized, so do not infer it from `receipt.json`. The field is
+`#[serde(default)]` — receipts written before it existed deserialize as
+`"success"`.
 
 ## jq one-liners
 
@@ -154,7 +175,7 @@ Per-attempt recovery fields are under `.attempt_history[]`, keyed by:
 # All packages that published successfully
 jq -r 'select(.event_type.type == "package_published") | .package' .shipper/events.jsonl | sort -u
 
-# Last event (is the run alive?)
+# Last durable event (this does not prove that the process is live)
 jq -c '.' .shipper/events.jsonl | tail -1
 
 # Package states from state.json

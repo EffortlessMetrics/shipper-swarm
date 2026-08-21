@@ -16,7 +16,7 @@ and classifies the error into one of three classes
 |---|---|---|
 | **Retryable** | Transient — likely to succeed on retry | Retry with backoff |
 | **Permanent** | Requires human intervention | Stop retrying, record failure |
-| **Ambiguous** | Outcome unclear (upload may have succeeded) | Verify against registry, then retry or accept |
+| **Ambiguous** | Outcome unclear (upload may have succeeded) | Reconcile against registry truth; accept `Published`, retry only a proved `NotPublished`, or stop on `StillUnknown` |
 
 ### Retryable patterns
 
@@ -41,8 +41,9 @@ Matched case-insensitively in cargo output:
 ### Ambiguous fallback
 
 If **no** pattern matches, the error is classified as **Ambiguous**. Shipper
-then checks the registry to determine whether the version was actually uploaded
-before deciding to retry.
+then checks the registry to determine whether the version was actually
+uploaded. It never converts an inconclusive `StillUnknown` result into a blind
+retry.
 
 ---
 
@@ -152,7 +153,7 @@ completes. This file enables `shipper resume` to skip already-published crates.
 | Field | Purpose |
 |---|---|
 | `state_version` | Schema version (`shipper.state.v1`); used for forward-compatibility |
-| `plan_id` | Deterministic hash of the publish plan; `shipper resume` refuses to continue if the workspace changed |
+| `plan_id` | Deterministic hash of the registry API base and ordered package names/versions; resume refuses a stored/current mismatch, but this is not source or workspace provenance |
 | `registry` | Target registry name, API base URL, and optional sparse-index URL |
 | `packages` | `BTreeMap<"name@version", PackageProgress>` — one entry per planned crate |
 
@@ -182,37 +183,42 @@ Each package in the state file has one of these states:
    `max_attempts`. If all retries fail, the state is saved as `failed`.
 3. `cli@0.3.0` remains `pending`.
 
-**Recovery:**
+**Recovery:** inspect the typed local posture before choosing a command:
 ```bash
-# Fix the network, then resume from where you left off:
-shipper resume
-
-# Or equivalently, re-run publish (it detects existing state):
-shipper publish
+shipper status --durable
+shipper inspect-events
+shipper inspect-receipt --format json
 ```
 
-Shipper reads `state.json`, confirms the `plan_id` matches the current
-workspace, skips `core` (already `published`), and retries from `macros`.
+Resume only when the durable outcome reports a coherent interrupted run and its
+typed next action recommends `resume`. Shipper then confirms the current
+`plan_id`, skips terminal packages, and continues from eligible pending or
+retryable work. A different checkout can produce the same plan ID, so verify
+the restored source independently.
 
 ---
 
-## Failure mode: Ambiguous timeout
+## Failure mode: Ambiguous upload result
 
-**Scenario:** `cargo publish -p macros` times out after 30 s. The upload may
-or may not have reached the registry.
+**Scenario:** `cargo publish -p macros` exits unsuccessfully after an upload,
+but its output does not establish whether the registry accepted the crate.
 
 **What happens:**
-1. No retryable/permanent pattern matches the stderr — classified as **Ambiguous**.
+1. No retryable/permanent pattern matches the output — classified as **Ambiguous**.
 2. Shipper queries the registry API: does `macros@0.3.0` exist?
-3. **If found:** marks `published`, continues to next crate.
-4. **If not found:** retries with backoff.
+3. **If `Published`:** marks `published`, continues to the next crate.
+4. **If `NotPublished`:** the proved-absent upload may retry under policy.
+5. **If `StillUnknown`:** persists reconciliation evidence and stops before
+   another Cargo attempt.
 
 **Recovery:**
 ```bash
-# Usually no action needed — Shipper self-heals by checking the registry.
-# If all retries are exhausted:
-shipper resume
+shipper status --durable
+shipper inspect-events
 ```
+
+Do not resume while registry truth is inconclusive. Follow the typed
+`reconcile` posture and retain `reconciliation.json` for diagnosis.
 
 **Inspect evidence:**
 ```bash
@@ -233,11 +239,13 @@ shipper inspect-receipt    # structured receipt with attempt details
 4. After 6 attempts (default), the package is marked `failed` with class
    `retryable` and the run continues with remaining crates.
 
-**Recovery:**
+**Recovery:** after the rate limit clears, classify the retained run first:
 ```bash
-# Wait a few minutes for the rate limit to clear, then:
-shipper resume
+shipper status --durable
 ```
+
+Run `shipper resume` only when the returned next action recommends it; a
+retryable label or elapsed delay alone is not authorization.
 
 **Tuning for large workspaces:**
 ```bash
@@ -257,97 +265,50 @@ new push) after `core` and `macros` are published but before `cli`.
    state (state is saved after each crate completes).
 2. `core` and `macros` show `published`; `cli` shows `pending`.
 
-**Recovery:** Re-run the CI job. Shipper detects the existing state and resumes:
+**Recovery:** restore the complete `.shipper/` artifact into the exact intended
+checkout, use the matching candidate binary, then classify the run before
+dispatch:
 ```bash
-shipper publish   # or: shipper resume
+shipper status --durable
 ```
+
+Only a coherent `interrupted` outcome can recommend `shipper resume`. Missing,
+legacy, cross-host, corrupt, or mismatched identity evidence remains fail
+closed; cancellation by itself does not prove that the old process is gone.
 
 ### Lock file safety
 
-Shipper writes `.shipper/lock` to prevent concurrent runs. If a CI runner is
-killed without cleanup, the lock may become stale. Shipper automatically
-expires stale locks (default: 1 h).
+Shipper writes `.shipper/lock` to prevent concurrent runs. On supported Linux
+hosts, current locks may carry `/proc`-derived process identity evidence. Other
+platforms, legacy or missing/corrupt locks, and cross-host evidence remain
+`Unknown`. Age alone — including the configured timeout — does not prove that a
+process is dead.
 
 ```bash
-# Force-clear a stale lock
-shipper publish --force
+# Inspect the correlated local evidence first
+shipper status --durable
 
-# Adjust lock timeout
+# Configure the age threshold used by lock acquisition; this is not liveness proof
 shipper publish --lock-timeout 30m
 ```
+
+Current publish lock acquisition can replace a lock older than
+`--lock-timeout` using age alone; it does not consult durable status's stronger
+process-liveness classification. Treat a reduced timeout as a destructive
+operational choice, not proof of interruption. `--force` sets that threshold to
+zero and is an even stronger override. Use either path only after an independent
+operational decision establishes that no concurrent publisher can still mutate
+the release.
 
 ---
 
 ## CI-specific guidance
 
-### GitHub Actions
-
-```yaml
-name: Publish
-on:
-  push:
-    tags: ['v*']
-jobs:
-  publish:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo install shipper --locked
-
-      # Restore state from a previous (possibly failed) run
-      - uses: actions/download-artifact@v7
-        with:
-          name: shipper-state
-          path: .shipper
-        continue-on-error: true  # first run has no artifact
-
-      - run: shipper publish --quiet
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-      # Always save state — even on failure — so the next run can resume
-      - uses: actions/upload-artifact@v6
-        if: always()
-        with:
-          name: shipper-state
-          path: .shipper
-```
-
-**Key patterns:**
-- `continue-on-error: true` on the download step so the first run doesn't fail.
-- `if: always()` on the upload step so state is saved even when publish fails.
-- Re-running the job automatically resumes from the saved state.
-
-### GitLab CI
-
-```yaml
-publish:
-  image: rust:latest
-  stage: publish
-  rules:
-    - if: $CI_COMMIT_TAG
-  cache:
-    key: ${CI_COMMIT_REF_SLUG}
-    paths:
-      - .shipper/
-      - target/
-  script:
-    - cargo install shipper --locked
-    - shipper publish --quiet
-  variables:
-    CARGO_REGISTRY_TOKEN: $CARGO_REGISTRY_TOKEN
-  artifacts:
-    paths:
-      - .shipper/
-    expire_in: 1 day
-    when: always  # save state on failure too
-```
-
-**Key patterns:**
-- `cache` persists `.shipper/` across pipeline retries on the same branch/tag.
-- `when: always` on artifacts ensures state survives failed jobs.
-- Click **Retry** in the GitLab UI and Shipper picks up where it left off.
+Use [Run a release in GitHub Actions](how-to/run-in-github-actions.md) for the
+maintained CI sequence, artifact boundaries, typed exit handling, and
+release-authority fence. Do not copy an old “retry the job and it resumes”
+snippet: CI must retain the complete evidence set and classify it from the
+matching workspace before choosing a recovery command.
 
 ---
 
@@ -366,7 +327,7 @@ Append-only, one JSON object per line:
 
 ### Receipt (`.shipper/receipt.json`)
 
-Written after the run completes. Contains per-package evidence (every attempt's
+Written only after the run finalizes. Contains per-package evidence (every attempt's
 command, exit code, stdout/stderr tail, and timing) plus git context and
 environment fingerprint. See [the types in `crates/shipper-types`](../crates/shipper-types/src/lib.rs)
 for the full schema.
@@ -378,8 +339,15 @@ shipper inspect-events                 # human-readable event timeline
 shipper inspect-receipt                # formatted receipt summary
 shipper inspect-receipt --format json  # machine-readable for scripts
 shipper status                         # compare local versions vs registry
+shipper status --watch                 # watch local persisted progress
+shipper status --durable               # correlate retained recovery evidence
 shipper doctor                         # check environment, auth, tools
 ```
+
+`inspect-events` is authoritative history, not process-liveness proof.
+`inspect-receipt` fails when no finalized receipt exists. Durable status is the
+read-only local classifier; malformed evidence exits `1` before it can render a
+durable result.
 
 ### Cleaning up
 
@@ -395,5 +363,7 @@ shipper clean --keep-receipt  # keep receipt.json for auditing
 If you encounter a failure not covered above:
 
 1. Run `shipper doctor` to check your environment.
-2. Inspect `.shipper/events.jsonl` and `.shipper/receipt.json` for evidence.
-3. File an issue with the event log and receipt attached.
+2. Inspect `.shipper/events.jsonl`, durable status, and any finalized receipt.
+3. Redact workspace/package-sensitive context as required, then file an issue
+   with the relevant evidence paths and typed outcome. Never attach registry
+   tokens, passphrases, credentials, or unreviewed raw environment data.

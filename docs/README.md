@@ -52,7 +52,9 @@ Exhaustive, precise, stable specs.
 - [`.shipper.toml` configuration](configuration.md)
 - [Preflight checks](preflight.md)
 - [Readiness verification](readiness.md)
-- [Failure modes](failure-modes.md)
+- [Failure modes and typed recovery decisions](failure-modes.md) — retry classes, exit vocabulary, durable evidence, and fail-closed recovery
+- [Support tiers](status/SUPPORT_TIERS.md) — claim maturity, release-lifecycle qualifiers, and proof ownership
+- [JSON evidence contracts](specs/SHIPPER-SPEC-0004-json-evidence-contracts.md) — canonical command schema and compatibility map
 - [0.5.0 scheduler conformance ledger](../plans/0.5.0-scheduler-conformance.md)
 
 ## Explanation
@@ -84,5 +86,5 @@ The following live at the repo root because they carry repo-wide authority:
 
 Internal inventories and upkeep docs for contributor and assistant context.
 
-- [Status docs](status/README.md) — support tiers and swarm operation policy
+- [Status docs](status/README.md) — claim maturity, release lifecycle, support tiers, and swarm operation policy
 - [Crate local-doc coverage](reference/crate-coverage.md) — maintenance matrix for crate `README.md`, `CLAUDE.md`, and `AGENTS.md` files

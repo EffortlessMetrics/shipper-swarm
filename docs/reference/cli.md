@@ -1,6 +1,8 @@
 # CLI reference
 
-**Canonical source:** `shipper --help` and `shipper <subcommand> --help`. The help output is generated from the same source as the CLI behavior, so it never drifts.
+**Canonical source:** `shipper --help` and `shipper <subcommand> --help`. Help
+snapshots are the executable command-surface authority; this page organizes the
+stable operator contracts around that surface.
 
 This page is a topical map, not an exhaustive flag listing. For exhaustive flags, use `--help`.
 
@@ -42,7 +44,7 @@ evidence for each targeted registry.
 | `shipper publish` | Publish missing workspace versions; skip already-published `name@version` pairs | Yes |
 | `shipper resume` | Continue from the last persisted state | Yes |
 | `shipper rehearse` | Publish the plan to an alternate registry and verify it there | Yes (`rehearsal.json`, events) |
-| `shipper status` | Compare local workspace versions to the registry | No |
+| `shipper status` | Compare local versions to the registry; `--watch` and `--durable` are separate local-evidence modes | No |
 | `shipper doctor` | Environment / auth / connectivity diagnostics | No |
 | `shipper inspect-events` | View the event log | No |
 | `shipper inspect-receipt` | View the end-of-run receipt | No |
@@ -65,7 +67,7 @@ evidence for each targeted registry.
 - `--registry <name>` — Cargo registry name (default `crates-io`)
 - `--state-dir <path>` — directory for `.shipper/` state
 - `--format <text|json>` — output format for structured commands
-- `-v/--verbose`, `-q/--quiet` — verbosity controls
+- `--verbose`, `-q/--quiet` — verbosity controls
 
 ### Publish safety
 
@@ -94,6 +96,32 @@ top-level fields. Ambiguous registry truth stops for reconciliation, uploaded
 work waits for registry visibility, permanent failures require repair, and
 only durable pending or retryable work recommends resume.
 
+Resume's plan guard compares the stored and recomputed `plan_id`. That ID is a
+hash of the registry API base and ordered package names/versions. It does not
+prove source bytes, workspace path, or run identity; restore and independently
+verify the intended checkout before recovery.
+
+### Status modes
+
+The three status modes have independent contracts:
+
+| Mode | Reads | Schema | Registry access |
+|---|---|---|---|
+| `shipper status` | workspace plan and registry observations | `shipper.status.v1` | yes |
+| `shipper status --watch` | local state and events | `shipper.status.watch.v1` | no |
+| `shipper status --durable` | local events/state/receipt/reconciliation plus lock evidence | `shipper.status.durable.v1` | no |
+
+`--watch` and `--durable` conflict. Durable mode also rejects the multi-registry
+selectors because it must not guess which segregated state directory represents
+the run; singular `--registry` remains available to select the matching plan.
+Durable status reports one of `no_evidence`, `terminal`, `interrupted`,
+`ambiguous`, `identity_mismatch`, `live`, `unknown`, or
+`evidence_disagreement`. All but a coherent `interrupted` result are commandless
+and fail closed. A `NotLive` process
+observation is necessary but is not by itself permission to resume. Corrupt or
+unreadable evidence is a command error (exit `1`, empty stdout, diagnostic on
+stderr) before a durable envelope can be classified.
+
 ### Parallel
 
 - `--parallel`, `--max-concurrent <N>` — parallelize within dependency levels
@@ -107,6 +135,31 @@ only durable pending or retryable work recommends resume.
 | `balanced` | `package` | `api` | Regular releases when you want speed without skipping essentials |
 | `fast` | `none` | none | Dev / sandbox registries only — not recommended for crates.io |
 
+## Shared operator outcome vocabulary
+
+Each primary command owns its typed outcome and compatibility-frozen fields.
+Where a command supports both human and JSON output, the two views preserve the
+same command-owned decision without implying one uniform cross-command schema.
+Depending on what that command can actually establish, the outcome may carry:
+
+- a typed result/status;
+- failure class or finishability where the command can establish it;
+- `safe_to_rerun` or `safe_to_resume`, including the reason rather than a bare
+  Boolean;
+- one typed next action and its reason;
+- plan/package/registry identity that the command actually observed; and
+- paths to evidence the command actually retained.
+
+`doctor` summarizes passed, failed, skipped, and unknown checks, then chooses a
+reason-bearing next action. `preflight` reports `PROVEN`, `NOT PROVEN`, or
+`FAILED`; no label alone authorizes a live publish, so follow its typed next
+action and the release-authority process. `publish`, `resume`, and durable
+status render their human guidance from the same private outcome object used by
+their JSON envelope. Non-watch status deliberately does not claim durable
+evidence or rerun safety; plan likewise cannot invent execution evidence.
+Human/JSON parity is semantic within each command, not byte-for-byte prose
+identity or a shared wire shape.
+
 ## Exit codes
 
 For canonical command-level behavior, `shipper --help` remains authoritative.
@@ -117,14 +170,16 @@ workspace publishing and recovery.
 |---|---|---:|
 | `shipper publish` | All package versions already exist | `0` |
 | `shipper publish` | Mixed skipped-existing and successful publishes | `0` |
-| `shipper publish` | Permanent publish failure | non-zero |
-| `shipper publish` | Retry budget exhausted | non-zero |
+| `shipper publish` | Finalized permanent failure | `2` |
+| `shipper publish` | Finalized retry budget exhaustion | `2` |
 | `shipper publish` | Ambiguous cargo result reconciled to published | `0` |
-| `shipper publish` | Ambiguous cargo result remains unknown | non-zero |
+| `shipper publish` | Ambiguous cargo result remains `StillUnknown` before receipt finalization | `1` |
 | `shipper resume` | All packages already terminal | `0` |
-| `shipper resume` | Plan/state mismatch | non-zero unless forced |
+| `shipper resume` | Plan/state mismatch | `1` unless forced |
 | `shipper status` | Mixed registry state read succeeds | `0` |
-| `shipper status` | Registry/query failure | non-zero |
+| `shipper status` | Registry/query failure | `1` |
+| `shipper status --durable` | Valid local evidence posture, including fail-closed classified outcomes | `0` |
+| `shipper status --durable` | Malformed or unreadable evidence | `1` |
 
 Non-watch `status` is a read-only registry observation. Its additive
 `shipper.status.v1.outcome` reports `all_published`, `partially_published`,

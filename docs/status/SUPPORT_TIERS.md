@@ -27,6 +27,21 @@ make stronger claims than this file supports.
 | experimental | Behavior exists, but is not yet a user promise. |
 | planned | Roadmap intent only. |
 
+Support maturity and release lifecycle are separate axes. A `stable` command
+claim means the named behavior has implementation and proof; it does not prove
+that an unreleased source snapshot is available from crates.io. Use these
+lifecycle qualifiers when a claim depends on an artifact:
+
+| Lifecycle qualifier | Meaning |
+|---|---|
+| historical public | Proved by an already-published tag/crate/asset, currently the 0.4.0 line |
+| candidate | Present on an exact reviewed swarm source identity; not public release proof |
+| release-authority preparation | Promotion/rehearsal evidence in `EffortlessMetrics/shipper`; still not publication authorization |
+| public | Proved after tag, crates.io/GitHub Release, and public-install verification |
+
+Repository source, a README, a green swarm run, or a `stable/internal` row must
+never be used alone to advance a claim to a later lifecycle state.
+
 ## Claim Map
 
 | Claim | Tier | Proof / Source | Owner |
@@ -53,6 +68,9 @@ make stronger claims than this file supports.
 | Durable local status outcome | stable/internal | `cargo test -p shipper-cli status_durable::tests --lib`; `cargo test -p shipper-cli --test e2e_status durable_status_no_evidence_has_human_json_parity_without_registry_access`; `cargo test -p shipper-cli --test e2e_status_durable --locked`; `shipper status --durable --format json` emits `shipper.status.durable.v1` from local events/state/receipt/reconciliation (including configured encrypted state/receipt) and affirmative core liveness evidence without registry access or publication; the doc-hidden `shipper_core::cli_bridge` is an additive unsupported CLI-integration seam and is not re-exported by `shipper` | engine/cli |
 | Release black-box recorder hardening | stable/internal | `docs/specs/SHIPPER-SPEC-0005-release-operator-visibility-and-survive-proof.md`; `plans/0.4.0/release-operator-visibility-and-survive-proof.md`; `cargo test -p shipper-cli inspect_events --lib --locked`; `cargo test -p shipper-core drift --lib --locked`; `cargo test -p shipper-core rebuild --lib --locked`; GitHub Actions `Live runner interruption rehearsal` run 26051581056 with `shipper-live-interruption-seed-26051581056` and `shipper-live-interruption-resume-26051581056` artifacts | engine/cli |
 | Doctor JSON diagnostics | stable | `cargo test -p shipper-cli --test e2e_doctor doctor_json_format_reports_diagnostics_without_token_value`; `shipper doctor --format json` emits `shipper.doctor.v1` without token values | cli/integrations |
+| Command-owned operator outcomes | stable | `docs/specs/SHIPPER-SPEC-0004-json-evidence-contracts.md`; `cargo test -p shipper-cli --test e2e_publish completed_partial_publish_human_and_json_have_semantic_parity`; `cargo test -p shipper-cli --test e2e_status status_completed_outcome_has_human_json_parity_without_side_effect_claims`; `cargo test -p shipper-cli --test e2e_status durable_status_no_evidence_has_human_json_parity_without_registry_access`; doctor, plan, preflight, publish, resume, non-watch status, and durable status each preserve their own typed result/status and human/JSON next-action semantics where present; identity, safety, and evidence fields remain command-specific, and non-watch status does not claim durable evidence or rerun safety | cli/integrations |
+| Read-only evidence inspection | stable | `cargo test -p shipper-cli inspect_events --lib --locked`; `cargo test -p shipper-cli --test cli_e2e inspect_receipt_command_displays_new_fields`; `cargo test -p shipper-cli --test e2e_expanded help_inspect_events_snapshot`; `cargo test -p shipper-cli --test e2e_expanded help_inspect_receipt_snapshot`; `shipper inspect-events`, `shipper inspect-receipt`, and the three status modes remain separate contracts; event history alone is not liveness proof, and durable status bypasses registry access | cli/integrations |
+| Publish/resume process exit vocabulary | stable | `cargo test -p shipper-cli --test e2e_publish --locked`; `cargo test -p shipper-cli --test bdd_resume --locked`; finalized success exits `0`, finalized partial result exits `2` with receipt evidence, and pre-receipt errors exit `1`; Clap usage also exits `2` but creates no execution evidence | cli/integrations |
 | Idempotent workspace publish | stable | `docs/specs/SHIPPER-SPEC-0007-idempotent-workspace-publish.md`; `plans/0.4.0/idempotent-workspace-publish.md`; `docs/how-to/publish-missing-workspace-crates.md`; `cargo test -p shipper-cli --test bdd_publish --locked`; `cargo test -p shipper-cli --test e2e_publish --locked` proves all-existing skip, mixed existing/missing success, failure preservation, and publish JSON package-state counts; this is registry `name@version` idempotency, not source-diff or changed-crate detection | cli/integrations |
 | Publish JSON command envelope | stable | `cargo test -p shipper-cli --test e2e_publish publish_json_format_writes_command_envelope_to_stdout`; `shipper publish --format json` emits `shipper.publish.v1` with package summary, safe rerun posture, artifact paths, and nested receipt evidence for the targeted registry | cli/integrations |
 | Resume JSON command envelope | stable | `cargo test -p shipper-cli --test bdd_resume given_pending_state_when_resume_json_then_stdout_is_command_envelope`; `shipper resume --format json` emits `shipper.resume.v1` with safety summary, package counts, artifact paths, and nested receipt evidence for the targeted registry | cli/integrations |
