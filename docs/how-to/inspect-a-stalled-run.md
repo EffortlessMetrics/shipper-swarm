@@ -100,9 +100,11 @@ retry command while registry truth is inconclusive.
 ## 5. Decide whether resume is allowed
 
 Run `shipper resume` only when `status --durable` reports agreeing retained
-evidence and a safe rerun posture. Resume recomputes the plan, checks source,
-workspace, registry, and run identity, skips terminal packages, and reconciles
-ambiguous outcomes before new Cargo activity.
+evidence and a safe rerun posture. Resume recomputes the plan and refuses a
+stored `plan_id` mismatch before it skips terminal packages or reconciles
+ambiguous outcomes. The plan ID covers the registry API base and ordered
+package names/versions; it does not bind source bytes, workspace path, or run
+identity.
 
 Do not use `--force-resume` as routine recovery. It overrides a plan guard and
 requires a separate operator risk decision.

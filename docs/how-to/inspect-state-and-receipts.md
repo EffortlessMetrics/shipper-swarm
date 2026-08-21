@@ -26,10 +26,16 @@ shipper status --durable
 ```
 
 This local, registry-bypassing mode correlates the authoritative event segment
-with state, receipt, reconciliation, plan, workspace, and lock evidence. It
-fails closed: disagreement, corruption, missing identity, cross-host liveness,
-or an unavailable process probe remains unknown. A `NotLive` observation by
-itself is not permission to resume; use the reported rerun posture and reason.
+with state, receipt, reconciliation, plan, workspace, and lock evidence. For
+parseable evidence, disagreement gets its own fail-closed status; missing
+identity, cross-host liveness, or an unavailable process probe can remain
+`unknown`. A `NotLive` observation by itself is not permission to resume; use
+the reported rerun posture and reason.
+
+Corrupt JSON or JSONL is a command error, not an `unknown` status. Evidence
+loading stops before the durable envelope is rendered: the command exits `1`,
+keeps stdout empty, and reports the parse failure on stderr. Preserve the
+original file for diagnosis instead of expecting a rerun posture.
 
 ## Reading events
 

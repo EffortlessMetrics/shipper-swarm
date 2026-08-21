@@ -15,7 +15,7 @@ creating public registry versions.
 - Which `.shipper/` files are retained across an interruption.
 - Why events are authoritative and state is a projection.
 - How `status --durable` fails closed on disagreement or uncertain liveness.
-- How plan, workspace, registry, and run identity guard resume.
+- How the deterministic `plan_id` guards resume, and what it does not bind.
 - Why `StillUnknown` never supplies a blind retry command.
 
 ## 1. Run the safe rehearsal
@@ -116,16 +116,19 @@ shipper inspect-events
 
 Run `shipper resume` only when the durable result and retained evidence say the
 run is interrupted and safe to resume. Resume recomputes the current plan and
-refuses mismatched plan, source, workspace, registry, or run identity.
+refuses when its `plan_id` differs from the stored value. That ID covers the
+registry API base and ordered package names/versions; it does not bind source
+bytes, workspace path, or run identity. Restore and independently verify the
+exact checkout rather than treating the plan-ID check as source provenance.
 
 The durable result is intentionally fail-closed. `no_evidence` means no durable
-run was found; `identity_mismatch` means source, plan, registry, or evidence
-identity differs; `evidence_disagreement` means the retained sources
-contradict each other; and `unknown` means an unfinished run's liveness cannot
-be established. None authorizes resume. On Linux, `Live` requires an exact
-local boot, PID namespace, PID, and process-start match. `NotLive` means the
-process was absent inside the same proven scope; it is not by itself permission
-to resume.
+run was found; `identity_mismatch` means the current plan ID, registry, or
+retained evidence identity differs; `evidence_disagreement` means the retained
+sources contradict each other; and `unknown` means an unfinished run's
+liveness cannot be established. None authorizes resume. On Linux, `Live`
+requires an exact local boot, PID namespace, PID, and process-start match.
+`NotLive` means the process was absent inside the same proven scope; it is not
+by itself permission to resume.
 
 Do not use `--force-resume` as a normal recovery step. It overrides a plan
 guard and requires a separate operator risk decision.
