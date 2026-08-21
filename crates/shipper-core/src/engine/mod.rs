@@ -72,6 +72,60 @@ pub(crate) struct PublishRecoverableStopError {
     evidence_consistent: bool,
 }
 
+#[derive(Debug)]
+struct ResumeRetryBudgetError {
+    package: String,
+    current_attempts: u32,
+    requested_max_attempts: u32,
+    minimum_max_attempts: Option<u32>,
+}
+
+impl std::fmt::Display for ResumeRetryBudgetError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "resume retry ceiling exhausted for {}: persisted attempts {}, requested --max-attempts {}",
+            self.package, self.current_attempts, self.requested_max_attempts
+        )?;
+        match self.minimum_max_attempts {
+            Some(minimum) => write!(
+                formatter,
+                "; use --max-attempts {minimum} or greater to permit another attempt"
+            ),
+            None => formatter.write_str(
+                "; persisted attempts cannot be increased within the supported retry-ceiling range",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ResumeRetryBudgetError {}
+
+/// CLI-facing identity for a resume rejected before mutation because its
+/// cumulative per-package retry ceiling cannot permit another attempt.
+#[doc(hidden)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResumeRetryBudgetClassification {
+    pub package: String,
+    pub current_attempts: u32,
+    pub requested_max_attempts: u32,
+    pub minimum_max_attempts: Option<u32>,
+}
+
+#[doc(hidden)]
+pub fn classify_resume_retry_budget(
+    error: &anyhow::Error,
+) -> Option<ResumeRetryBudgetClassification> {
+    error
+        .downcast_ref::<ResumeRetryBudgetError>()
+        .map(|budget| ResumeRetryBudgetClassification {
+            package: budget.package.clone(),
+            current_attempts: budget.current_attempts,
+            requested_max_attempts: budget.requested_max_attempts,
+            minimum_max_attempts: budget.minimum_max_attempts,
+        })
+}
+
 /// CLI-facing classification for publish stops whose safety posture must not
 /// be inferred from human-readable error text.
 #[doc(hidden)]
@@ -603,8 +657,67 @@ pub fn run_resume(
             reconciliation.as_ref(),
         )
         .context("controlled-stop evidence does not authorize resume")?;
+        publish::bootstrap::validate_resume_target(ws, opts)?;
+        reject_exhausted_resume_retry_ceiling(ws, opts, &existing_state)?;
     }
     run_publish(ws, opts, reporter)
+}
+
+fn reject_exhausted_resume_retry_ceiling(
+    ws: &PlannedWorkspace,
+    opts: &RuntimeOptions,
+    state: &ExecutionState,
+) -> Result<()> {
+    let reject_package = |package: &shipper_types::PlannedPackage| -> Result<()> {
+        let key = pkg_key(&package.name, &package.version);
+        let Some(progress) = state.packages.get(&key) else {
+            return Ok(());
+        };
+        if matches!(
+            progress.state,
+            PackageState::Failed {
+                class: ErrorClass::Retryable,
+                ..
+            }
+        ) && progress.attempts >= opts.max_attempts
+        {
+            Err(ResumeRetryBudgetError {
+                package: key,
+                current_attempts: progress.attempts,
+                requested_max_attempts: opts.max_attempts,
+                minimum_max_attempts: progress.attempts.checked_add(1),
+            }
+            .into())
+        } else {
+            Ok(())
+        }
+    };
+
+    if opts.parallel.enabled {
+        let levels = ws.plan.group_by_levels();
+        let start_level = crate::engine::parallel::parallel_resume_start_level(
+            &levels,
+            opts.resume_from.as_deref(),
+        )
+        .ok_or_else(|| anyhow::anyhow!("validated resume target has no publish level"))?;
+        for level in levels.iter().skip(start_level) {
+            for package in &level.packages {
+                reject_package(package)?;
+            }
+        }
+    } else {
+        let mut reached_resume_target = opts.resume_from.is_none();
+        for package in &ws.plan.packages {
+            if !reached_resume_target {
+                reached_resume_target = opts.resume_from.as_deref() == Some(package.name.as_str());
+                if !reached_resume_target {
+                    continue;
+                }
+            }
+            reject_package(package)?;
+        }
+    }
+    Ok(())
 }
 
 /// Outcome of a rehearsal run. Sufficient for callers (CLI, future hard gate)
@@ -3288,6 +3401,89 @@ mod tests {
             drop(live_lock);
         }
 
+        let budget_state_before =
+            std::fs::read(state::state_path(&state_dir)).expect("state before budget rejection");
+        let budget_events_before =
+            std::fs::read(&controlled_events_path).expect("events before budget rejection");
+        let budget_reconciliation_before =
+            std::fs::read(&reconciliation_path).expect("reconciliation before budget rejection");
+        let budget_cargo_before =
+            std::fs::read(&cargo_log).expect("cargo log before budget rejection");
+        let mut invalid_target_opts = opts.clone();
+        invalid_target_opts.resume_from = Some("missing-package".to_string());
+        let invalid_target_error = run_resume(
+            &ws,
+            &invalid_target_opts,
+            &mut CollectingReporter::default(),
+        )
+        .expect_err("invalid resume target must precede budget admission");
+        assert!(
+            format!("{invalid_target_error:#}")
+                .contains("resume-from package 'missing-package' not found")
+        );
+        assert_eq!(
+            std::fs::read(state::state_path(&state_dir))
+                .expect("state after invalid-target rejection"),
+            budget_state_before
+        );
+        assert_eq!(
+            std::fs::read(&controlled_events_path).expect("events after invalid-target rejection"),
+            budget_events_before
+        );
+        assert_eq!(
+            std::fs::read(&reconciliation_path)
+                .expect("reconciliation after invalid-target rejection"),
+            budget_reconciliation_before
+        );
+        assert_eq!(
+            std::fs::read(&cargo_log).expect("cargo after invalid-target rejection"),
+            budget_cargo_before
+        );
+        let budget_error = run_resume(&ws, &opts, &mut CollectingReporter::default())
+            .expect_err("same cumulative retry ceiling must reject before mutation");
+        assert_eq!(
+            classify_resume_retry_budget(&budget_error),
+            Some(ResumeRetryBudgetClassification {
+                package: "demo@0.1.0".to_string(),
+                current_attempts: 1,
+                requested_max_attempts: 1,
+                minimum_max_attempts: Some(2),
+            })
+        );
+        assert_eq!(
+            std::fs::read(state::state_path(&state_dir)).expect("state after budget rejection"),
+            budget_state_before,
+            "budget rejection must not mutate state"
+        );
+        assert_eq!(
+            std::fs::read(&controlled_events_path).expect("events after budget rejection"),
+            budget_events_before,
+            "budget rejection must not append a new run segment"
+        );
+        assert_eq!(
+            std::fs::read(&reconciliation_path).expect("reconciliation after budget rejection"),
+            budget_reconciliation_before,
+            "budget rejection must not mutate reconciliation evidence"
+        );
+        assert_eq!(
+            std::fs::read(&cargo_log).expect("cargo log after budget rejection"),
+            budget_cargo_before,
+            "budget rejection must not dispatch Cargo"
+        );
+        assert!(!state::receipt_path(&state_dir).exists());
+        let stopped_state = state::load_state(&state_dir)
+            .expect("load state after budget rejection")
+            .expect("stopped state exists after budget rejection");
+        crate::state::consistency::verify_controlled_stop_consistency(
+            &controlled_events_path,
+            &stopped_state,
+            Some(
+                &serde_json::from_slice(&budget_reconciliation_before)
+                    .expect("parse reconciliation after budget rejection"),
+            ),
+        )
+        .expect("budget rejection must preserve controlled-stop authorization");
+
         let mut resume_env = fake_program_env_vars(&bin);
         resume_env.extend([
             ("SHIPPER_CARGO_EXIT", Some("0".to_string())),
@@ -4218,6 +4414,121 @@ mod tests {
         let mut reporter = CollectingReporter::default();
         let err = run_resume(&ws, &opts, &mut reporter).expect_err("must fail");
         assert!(format!("{err:#}").contains("no existing state found"));
+    }
+
+    #[test]
+    fn resume_retry_ceiling_reports_first_blocker_in_plan_order() {
+        let td = tempdir().expect("tempdir");
+        let mut ws = planned_workspace(td.path(), "http://127.0.0.1:9".to_string());
+        let mut first = ws.plan.packages[0].clone();
+        first.name = "zeta".to_string();
+        let mut second = first.clone();
+        second.name = "alpha".to_string();
+        ws.plan.packages = vec![first, second];
+
+        let failed = |name: &str, attempts| PackageProgress {
+            name: name.to_string(),
+            version: "0.1.0".to_string(),
+            attempts,
+            state: PackageState::Failed {
+                class: ErrorClass::Retryable,
+                message: "registry confirmed NotPublished".to_string(),
+            },
+            last_updated_at: Utc::now(),
+        };
+        let mut state = ExecutionState {
+            state_version: crate::state::execution_state::CURRENT_STATE_VERSION.to_string(),
+            plan_id: ws.plan.plan_id.clone(),
+            registry: ws.plan.registry.clone(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            attempt_history: Vec::new(),
+            packages: BTreeMap::from([
+                ("alpha@0.1.0".to_string(), failed("alpha", 1)),
+                ("zeta@0.1.0".to_string(), failed("zeta", 3)),
+            ]),
+        };
+        let mut opts = default_opts(PathBuf::from(".shipper"));
+        opts.max_attempts = 1;
+
+        let error = reject_exhausted_resume_retry_ceiling(&ws, &opts, &state)
+            .expect_err("both packages exhaust the requested ceiling");
+        assert_eq!(
+            classify_resume_retry_budget(&error),
+            Some(ResumeRetryBudgetClassification {
+                package: "zeta@0.1.0".to_string(),
+                current_attempts: 3,
+                requested_max_attempts: 1,
+                minimum_max_attempts: Some(4),
+            }),
+            "the plan order, not state-map order, owns deterministic reporting"
+        );
+
+        opts.resume_from = Some("alpha".to_string());
+        let selected_error = reject_exhausted_resume_retry_ceiling(&ws, &opts, &state)
+            .expect_err("the selected package also exhausts the ceiling");
+        assert_eq!(
+            classify_resume_retry_budget(&selected_error),
+            Some(ResumeRetryBudgetClassification {
+                package: "alpha@0.1.0".to_string(),
+                current_attempts: 1,
+                requested_max_attempts: 1,
+                minimum_max_attempts: Some(2),
+            }),
+            "packages before --resume-from must not participate in admission"
+        );
+
+        let evidence_paths = [
+            td.path().join("state.json"),
+            td.path().join("events.jsonl"),
+            td.path().join("reconciliation.json"),
+            td.path().join("cargo-and-registry.log"),
+        ];
+        for (index, path) in evidence_paths.iter().enumerate() {
+            std::fs::write(path, format!("parallel-admission-sentinel-{index}"))
+                .expect("write admission sentinel");
+        }
+        let evidence_before = evidence_paths
+            .iter()
+            .map(|path| std::fs::read(path).expect("read admission sentinel"))
+            .collect::<Vec<_>>();
+        opts.parallel.enabled = true;
+        let same_level_error = reject_exhausted_resume_retry_ceiling(&ws, &opts, &state)
+            .expect_err("parallel resume selects the target's entire dependency level");
+        assert_eq!(
+            classify_resume_retry_budget(&same_level_error),
+            Some(ResumeRetryBudgetClassification {
+                package: "zeta@0.1.0".to_string(),
+                current_attempts: 3,
+                requested_max_attempts: 1,
+                minimum_max_attempts: Some(4),
+            }),
+            "the earlier exhausted sibling in the selected level must block deterministically"
+        );
+        for (path, before) in evidence_paths.iter().zip(evidence_before) {
+            assert_eq!(
+                std::fs::read(path).expect("read sentinel after parallel rejection"),
+                before,
+                "parallel admission rejection must precede state, event, reconciliation, Cargo, and registry mutation"
+            );
+        }
+
+        opts.resume_from = None;
+        opts.parallel.enabled = false;
+        opts.max_attempts = u32::MAX;
+        let zeta = state.packages.get_mut("zeta@0.1.0").expect("zeta progress");
+        zeta.attempts = u32::MAX;
+        let overflow_error = reject_exhausted_resume_retry_ceiling(&ws, &opts, &state)
+            .expect_err("the maximum representable ceiling cannot increase");
+        assert_eq!(
+            classify_resume_retry_budget(&overflow_error),
+            Some(ResumeRetryBudgetClassification {
+                package: "zeta@0.1.0".to_string(),
+                current_attempts: u32::MAX,
+                requested_max_attempts: u32::MAX,
+                minimum_max_attempts: None,
+            })
+        );
     }
 
     #[test]

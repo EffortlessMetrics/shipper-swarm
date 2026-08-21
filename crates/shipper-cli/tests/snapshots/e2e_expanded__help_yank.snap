@@ -69,7 +69,7 @@ Options:
           Pass --no-verify to cargo publish
 
       --max-attempts <MAX_ATTEMPTS>
-          Max attempts per crate publish step (default: 6)
+          Cumulative max attempts per crate across publish and resume (default: 6)
 
       --base-delay <BASE_DELAY>
           Base backoff delay (e.g. 2s, 500ms; default: 2s)
@@ -144,7 +144,7 @@ Options:
           Publish to all configured registries
 
       --resume-from <RESUME_FROM>
-          Optional package name to resume from
+          Select where resume begins: sequential uses the named package and later plan entries; parallel uses its whole dependency level and later levels
 
       --rehearsal-registry <REHEARSAL_REGISTRY>
           Name of a registry (from `[[registries]]` in `.shipper.toml`) to rehearse the publish against before live dispatch.

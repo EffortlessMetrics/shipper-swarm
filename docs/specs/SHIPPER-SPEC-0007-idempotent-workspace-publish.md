@@ -97,6 +97,17 @@ For `shipper publish --format json`, the command envelope must carry:
   separate commandless next action may be `resume`. Missing, malformed,
   incomplete, disagreeing, or latest-`StillUnknown` evidence remains
   fail-closed.
+- Retry attempts are cumulative per package across publish and resume segments.
+  After controlled-stop evidence authorizes resume, a requested
+  `--max-attempts` ceiling that is not greater than a selected retryable
+  package's retained attempt count must be rejected before a new run segment,
+  Cargo publish attempt, registry request, or evidence mutation. Human stderr and
+  `shipper.resume.error.v1` JSON stderr identify the package and current,
+  requested, and minimum usable ceilings; they preserve
+  `safe_to_resume.value: true` and the retained commandless resume action when
+  a larger ceiling exists because the rejection does not consume the
+  controlled-stop authorization. An exhausted numeric ceiling range is
+  fail-closed instead.
 - Artifact paths for `.shipper/state.json`, `.shipper/events.jsonl`, and
   `.shipper/receipt.json` (plus reconciliation artifact when present).
 - A nested receipt that remains the detailed package-outcome authority.

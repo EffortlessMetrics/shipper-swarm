@@ -164,6 +164,7 @@ exit 0\n";
 
 struct RegistryHandles {
     never_flip: Arc<Mutex<Vec<&'static str>>>,
+    per_path_hits: Arc<Mutex<HashMap<String, usize>>>,
 }
 
 impl RegistryHandles {
@@ -172,6 +173,9 @@ impl RegistryHandles {
     }
     fn clear_pins(&self) {
         self.never_flip.lock().expect("lock").clear();
+    }
+    fn total_hits(&self) -> usize {
+        self.per_path_hits.lock().expect("lock").values().sum()
     }
 }
 
@@ -232,7 +236,14 @@ fn spawn_registry_at(addr: &str) -> (String, std::sync::mpsc::Sender<()>, Regist
         }
     });
 
-    (base_url, stop_tx, RegistryHandles { never_flip })
+    (
+        base_url,
+        stop_tx,
+        RegistryHandles {
+            never_flip,
+            per_path_hits,
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -482,6 +493,8 @@ fn rehearsal_interrupted_publish_then_resume_preserves_invariants() {
     let state_dir = root.join(".shipper");
     let state_path = state_dir.join("state.json");
     let events_path = state_dir.join("events.jsonl");
+    let reconciliation_path = state_dir.join("reconciliation.json");
+    let cargo_log = state_dir.join("fake-cargo.log");
 
     // ── Run 1: publish with crate-c failing ──────────────────────────────
     // This is the "interrupted run" — a + b succeed, c fails. Shipper
@@ -496,6 +509,7 @@ fn rehearsal_interrupted_publish_then_resume_preserves_invariants() {
         &fake_cargo,
     );
     cmd.arg("publish")
+        .env("SHIPPER_FAKE_CARGO_LOG", &cargo_log)
         .env("SHIPPER_FAKE_EXIT_FOR_A", "0")
         .env("SHIPPER_FAKE_EXIT_FOR_B", "0")
         .env("SHIPPER_FAKE_EXIT_FOR_C", "1");
@@ -540,6 +554,118 @@ fn rehearsal_interrupted_publish_then_resume_preserves_invariants() {
         "PackagePublished events after run 1 should equal succeeded crates (2 = a + b); got {published_r1}"
     );
 
+    // A resume with the same cumulative ceiling cannot make another attempt.
+    // It must reject before appending a new run segment, touching retained
+    // evidence, dispatching Cargo, or querying the registry. Human and JSON
+    // envelopes expose the same typed current/requested/minimum values.
+    let state_before_budget_rejection = fs::read(&state_path).expect("state before rejection");
+    let events_before_budget_rejection = fs::read(&events_path).expect("events before rejection");
+    let reconciliation_before_budget_rejection =
+        fs::read(&reconciliation_path).expect("reconciliation before rejection");
+    let cargo_before_budget_rejection = fs::read(&cargo_log).expect("cargo before rejection");
+    let requests_before_budget_rejection = registry.total_hits();
+    let secret = "issue346-retry-budget-secret";
+
+    let mut same_ceiling_human = loopback_shipper_cmd();
+    common_args(
+        &mut same_ceiling_human,
+        &root.join("Cargo.toml"),
+        &registry_url,
+        &state_dir,
+        &fake_cargo,
+    );
+    let human_output = same_ceiling_human
+        .arg("resume")
+        .env("SHIPPER_FAKE_CARGO_LOG", &cargo_log)
+        .env("SHIPPER_FAKE_EXIT_FOR_C", "0")
+        .env("CARGO_REGISTRY_TOKEN", secret)
+        .output()
+        .expect("run same-ceiling human resume");
+    assert!(!human_output.status.success());
+    let human_stderr = String::from_utf8_lossy(&human_output.stderr);
+    for expected in [
+        "crate-c@0.1.0",
+        "persisted attempts 1",
+        "requested --max-attempts 1",
+        "--max-attempts 2 or greater",
+        "Safe to resume: yes",
+    ] {
+        assert!(
+            human_stderr.contains(expected),
+            "missing {expected:?} from human error: {human_stderr}"
+        );
+    }
+    assert!(!human_stderr.contains(secret));
+
+    let mut same_ceiling_json = loopback_shipper_cmd();
+    common_args(
+        &mut same_ceiling_json,
+        &root.join("Cargo.toml"),
+        &registry_url,
+        &state_dir,
+        &fake_cargo,
+    );
+    let json_output = same_ceiling_json
+        .args(["--format", "json", "resume"])
+        .env("SHIPPER_FAKE_CARGO_LOG", &cargo_log)
+        .env("SHIPPER_FAKE_EXIT_FOR_C", "0")
+        .env("CARGO_REGISTRY_TOKEN", secret)
+        .output()
+        .expect("run same-ceiling JSON resume");
+    assert!(!json_output.status.success());
+    let json_stderr = String::from_utf8_lossy(&json_output.stderr);
+    let json: serde_json::Value =
+        serde_json::from_str(&json_stderr).expect("same-ceiling error is JSON");
+    assert_eq!(json["schema_version"], "shipper.resume.error.v1");
+    assert_eq!(json["package"], "crate-c@0.1.0");
+    assert_eq!(json["current_attempts"], 1);
+    assert_eq!(json["requested_max_attempts"], 1);
+    assert_eq!(json["minimum_max_attempts"], 2);
+    assert_eq!(json["safe_to_resume"]["value"], true);
+    assert_eq!(json["next_action"]["kind"], "resume");
+    let safe_reason = json["safe_to_resume"]["reason"]
+        .as_str()
+        .expect("JSON safe-to-resume reason");
+    assert!(human_stderr.contains(safe_reason));
+    assert!(!json_stderr.contains(secret));
+
+    assert_eq!(
+        fs::read(&state_path).expect("state after rejection"),
+        state_before_budget_rejection
+    );
+    assert_eq!(
+        fs::read(&events_path).expect("events after rejection"),
+        events_before_budget_rejection
+    );
+    assert_eq!(
+        fs::read(&reconciliation_path).expect("reconciliation after rejection"),
+        reconciliation_before_budget_rejection
+    );
+    assert_eq!(
+        fs::read(&cargo_log).expect("cargo after rejection"),
+        cargo_before_budget_rejection
+    );
+    assert_eq!(registry.total_hits(), requests_before_budget_rejection);
+    assert!(!state_dir.join("receipt.json").exists());
+
+    let mut durable = loopback_shipper_cmd();
+    let durable_output = durable
+        .args(["--format", "json"])
+        .arg("--manifest-path")
+        .arg(root.join("Cargo.toml"))
+        .arg("--api-base")
+        .arg(&registry_url)
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .args(["status", "--durable"])
+        .output()
+        .expect("run durable status after budget rejection");
+    assert!(durable_output.status.success());
+    let durable_json: serde_json::Value = serde_json::from_slice(&durable_output.stdout)
+        .expect("durable status JSON after budget rejection");
+    assert_eq!(durable_json["outcome"]["status"], "interrupted");
+    assert_eq!(durable_json["outcome"]["safe_to_resume"]["value"], true);
+
     // ── Run 2: resume with crate-c succeeding ────────────────────────────
     // Unpin crate-c; keep per-path hit counters intact. Since crate-c's
     // preflight already fired in run 1 (counter > 1), run 2's post-publish
@@ -559,6 +685,7 @@ fn rehearsal_interrupted_publish_then_resume_preserves_invariants() {
         "2",
     );
     resume.arg("resume").env("SHIPPER_FAKE_EXIT_FOR_C", "0");
+    resume.env("SHIPPER_FAKE_CARGO_LOG", &cargo_log);
     resume.assert().success();
 
     let _ = registry_stop.send(());

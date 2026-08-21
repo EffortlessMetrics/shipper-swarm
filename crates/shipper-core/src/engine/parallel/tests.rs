@@ -3638,7 +3638,7 @@ fn skipped_level_resume_action_reports_poisoned_state_lock() {
         regime: None,
     }];
 
-    let action_err = match determine_level_resume_action(&packages, &st_arc, Some("dependent")) {
+    let action_err = match is_level_already_complete(&packages, &st_arc) {
         Ok(_) => panic!("poisoned state lock should fail resume action selection"),
         Err(err) => err,
     };

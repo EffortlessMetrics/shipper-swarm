@@ -27,7 +27,8 @@ pub(crate) mod webhook;
 /// Re-exported for parallel publish wave planning.
 pub use crate::plan::chunking::chunk_by_max_concurrent;
 
-use flow::{LevelResumeAction, determine_level_resume_action, init_send_reporter};
+pub(crate) use flow::parallel_resume_start_level;
+use flow::{init_send_reporter, is_level_already_complete};
 use scheduler::run_publish_level;
 #[cfg(test)]
 use webhook::{WebhookEvent, maybe_send_event};
@@ -317,45 +318,25 @@ pub(crate) fn run_publish_parallel_inner(
 
     let mut all_receipts: Vec<PackageReceipt> = Vec::new();
 
-    // Track if we've reached the resume point if one was specified
-    let mut reached_resume_point = opts.resume_from.is_none();
+    let resume_start_level = parallel_resume_start_level(&levels, opts.resume_from.as_deref());
 
-    for level in &levels {
-        // If we haven't reached the resume point, check if it's in this level
-        if !reached_resume_point {
-            match determine_level_resume_action(
-                &level.packages,
-                &st_arc,
-                opts.resume_from.as_deref(),
-            )? {
-                LevelResumeAction::ReachedResumePoint => reached_resume_point = true,
-                LevelResumeAction::SkipAlreadyComplete => {
-                    reporter.info(&format!(
-                        "Level {}: already complete (skipping)",
-                        level.level
-                    ));
-                    record_terminal_resume_skips(
-                        &level.packages,
-                        &st_arc,
-                        &event_log,
-                        &events_path,
-                    )?;
-                    continue;
-                }
-                LevelResumeAction::SkipBeforeResumePoint(resume_point) => {
-                    reporter.warn(&format!(
-                        "Level {}: skipping (before resume point {})",
-                        level.level, resume_point
-                    ));
-                    record_terminal_resume_skips(
-                        &level.packages,
-                        &st_arc,
-                        &event_log,
-                        &events_path,
-                    )?;
-                    continue;
-                }
-            };
+    for (level_index, level) in levels.iter().enumerate() {
+        let before_resume_level = resume_start_level.is_none_or(|start| level_index < start);
+        if before_resume_level {
+            if is_level_already_complete(&level.packages, &st_arc)? {
+                reporter.info(&format!(
+                    "Level {}: already complete (skipping)",
+                    level.level
+                ));
+            } else {
+                reporter.warn(&format!(
+                    "Level {}: skipping (before resume point {})",
+                    level.level,
+                    opts.resume_from.as_deref().unwrap_or("<none>")
+                ));
+            }
+            record_terminal_resume_skips(&level.packages, &st_arc, &event_log, &events_path)?;
+            continue;
         }
 
         let level_receipts = run_publish_level(
