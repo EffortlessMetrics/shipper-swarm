@@ -1977,7 +1977,7 @@ fn block_has_untrusted_checkout(block: &str) -> bool {
             || lower.contains("head.sha"))
 }
 
-fn uncommented_workflow_text(text: &str) -> String {
+pub(crate) fn uncommented_workflow_text(text: &str) -> String {
     text.lines()
         .map(strip_yaml_inline_comment)
         .filter(|line| !line.trim_start().starts_with('#'))
@@ -2001,7 +2001,7 @@ fn workflow_jobs_missing_repository_guard(
         .collect()
 }
 
-fn workflow_job_blocks(yaml_text: &str) -> Vec<(String, String)> {
+pub(crate) fn workflow_job_blocks(yaml_text: &str) -> Vec<(String, String)> {
     let mut jobs = Vec::new();
     let mut in_jobs = false;
     let mut jobs_indent = 0usize;
@@ -2067,7 +2067,7 @@ fn block_has_repository_guard(block: &str, required_repository: &str) -> bool {
     expression.contains(&single_quoted) || expression.contains(&double_quoted)
 }
 
-fn job_level_if_expression(block: &str) -> Option<String> {
+pub(crate) fn job_level_if_expression(block: &str) -> Option<String> {
     let lines: Vec<&str> = block.lines().collect();
     let job_indent = lines.iter().find_map(|line| {
         let without_comment = strip_yaml_inline_comment(line);

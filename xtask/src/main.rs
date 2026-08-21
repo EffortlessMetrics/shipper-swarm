@@ -13,6 +13,7 @@ use clap::{Args, Parser, Subcommand};
 mod authority_exceptions;
 mod check_file_policy;
 mod checks;
+mod ci_labels;
 mod clippy_checks;
 mod doc_contracts;
 mod file_policy;
@@ -99,6 +100,10 @@ enum Command {
     /// Validate source-of-truth document contracts.
     #[command(name = "check-doc-contracts")]
     CheckDocContracts(DocContractsArgs),
+
+    /// Validate or synchronize the source-owned opt-in CI label taxonomy.
+    #[command(subcommand, name = "ci-labels")]
+    CiLabels(CiLabelsCommand),
 
     /// Run or manage the repository-owned local pre-commit gate.
     #[command(name = "precommit")]
@@ -218,6 +223,34 @@ enum PrecommitAction {
     Uninstall,
 }
 
+#[derive(Subcommand, Debug)]
+enum CiLabelsCommand {
+    /// Validate the manifest and workflow contract without network access.
+    Check,
+    /// Compare configured metadata to live GitHub labels without mutation.
+    #[command(name = "check-live")]
+    CheckLive(CiLabelsRepoArgs),
+    /// Create/update configured labels; requires the explicit --apply flag.
+    Sync(CiLabelsSyncArgs),
+}
+
+#[derive(Args, Debug)]
+struct CiLabelsSyncArgs {
+    /// Repository whose labels may be synchronized; must match policy.
+    #[arg(long)]
+    repo: String,
+    /// Confirm the bounded live GitHub label mutation.
+    #[arg(long)]
+    apply: bool,
+}
+
+#[derive(Args, Debug)]
+struct CiLabelsRepoArgs {
+    /// Repository to compare; must match the source-owned policy.
+    #[arg(long)]
+    repo: String,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
@@ -244,6 +277,11 @@ fn main() -> Result<()> {
         Command::CheckLintPolicy => clippy_checks::check_lint_policy()?,
         Command::CheckClippyExceptions => clippy_checks::check_clippy_exceptions()?,
         Command::CheckDocContracts(args) => doc_contracts::check(args.mode)?,
+        Command::CiLabels(command) => match command {
+            CiLabelsCommand::Check => ci_labels::check()?,
+            CiLabelsCommand::CheckLive(args) => ci_labels::check_live(&args.repo)?,
+            CiLabelsCommand::Sync(args) => ci_labels::sync(&args.repo, args.apply)?,
+        },
         Command::Precommit(args) => match args.action.unwrap_or(PrecommitAction::Run) {
             PrecommitAction::Run => precommit::run()?,
             PrecommitAction::Install => precommit::install()?,

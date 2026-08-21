@@ -63,7 +63,6 @@ impl OperatorAction {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn with_confirmation(mut self) -> Self {
         self.requires_confirmation = true;
         self

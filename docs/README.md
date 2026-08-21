@@ -36,6 +36,9 @@ Task-oriented recipes. Each solves one focused problem.
 ## Release preparation
 
 - [Release preparation and evidence index](release/README.md) — authority, exact-identity rules, and current release-line posture
+- [0.5.0 release notes](../RELEASE_NOTES_v0.5.0.md) — reviewed GitHub Release publication input; the file alone is not publication evidence
+- [0.5.0 migration guide](release/0.5.0-migration.md) — source, config, artifact, command, and recovery changes for the candidate
+- [0.5.0 change ledger](release/0.5.0-change-ledger.md) — complete editorial source inventory and compatibility dispositions
 - [Release operator runbook](release-runbook.md) — ordered candidate, promotion, rehearsal, publication, resume, and backfill procedure
 - [Release preparation checklist](release/release-preparation-checklist.md) — copy per candidate and record exact SHAs, trees, workflow runs, artifacts, and authorization
 - [0.5.0 release-candidate readiness](release/0.5.0-readiness.md) — retained product and historical candidate evidence for the 0.5 line; a later source change requires a fresh candidate identity before publication
@@ -49,7 +52,9 @@ Exhaustive, precise, stable specs.
 - [`.shipper.toml` configuration](configuration.md)
 - [Preflight checks](preflight.md)
 - [Readiness verification](readiness.md)
-- [Failure modes](failure-modes.md)
+- [Failure modes and typed recovery decisions](failure-modes.md) — retry classes, exit vocabulary, durable evidence, and fail-closed recovery
+- [Support tiers](status/SUPPORT_TIERS.md) — claim maturity, release-lifecycle qualifiers, and proof ownership
+- [JSON evidence contracts](specs/SHIPPER-SPEC-0004-json-evidence-contracts.md) — canonical command schema and compatibility map
 - [0.5.0 scheduler conformance ledger](../plans/0.5.0-scheduler-conformance.md)
 
 ## Explanation
@@ -81,5 +86,5 @@ The following live at the repo root because they carry repo-wide authority:
 
 Internal inventories and upkeep docs for contributor and assistant context.
 
-- [Status docs](status/README.md) — support tiers and swarm operation policy
+- [Status docs](status/README.md) — claim maturity, release lifecycle, support tiers, and swarm operation policy
 - [Crate local-doc coverage](reference/crate-coverage.md) — maintenance matrix for crate `README.md`, `CLAUDE.md`, and `AGENTS.md` files

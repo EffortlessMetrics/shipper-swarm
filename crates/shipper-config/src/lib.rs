@@ -78,7 +78,7 @@ pub struct RetryConfig {
     #[serde(default)]
     pub policy: RetryPolicy,
 
-    /// Max attempts per crate publish step (used when policy is custom or as fallback)
+    /// Cumulative max attempts per crate across publish and resume (used when policy is custom or as fallback)
     #[serde(default = "default_max_attempts")]
     pub max_attempts: u32,
 
@@ -581,8 +581,10 @@ fn default_output_lines() -> usize {
     50
 }
 
+const CONFIG_SCHEMA_VERSION: &str = "shipper.config.v1";
+
 fn default_schema_version() -> String {
-    "shipper.config.v1".to_string()
+    CONFIG_SCHEMA_VERSION.to_string()
 }
 
 fn default_lock_timeout() -> Duration {
@@ -616,11 +618,22 @@ impl ShipperConfig {
     /// Load a workspace configuration for diagnostic reporting without
     /// applying value or registry-destination validation.
     pub fn load_from_workspace_for_diagnostics(workspace_root: &Path) -> Result<Option<Self>> {
+        Self::load_from_workspace_without_value_validation(workspace_root)
+    }
+
+    /// Parse a workspace configuration without applying value or registry-
+    /// destination validation.
+    ///
+    /// Callers must apply [`ShipperConfig::validate_with_loopback`] before
+    /// using the returned configuration for execution.
+    pub fn load_from_workspace_without_value_validation(
+        workspace_root: &Path,
+    ) -> Result<Option<Self>> {
         let config_path = workspace_root.join(".shipper.toml");
         if !config_path.exists() {
             return Ok(None);
         }
-        Self::load_from_file_for_diagnostics(&config_path).map(Some)
+        Self::load_from_file_without_value_validation(&config_path).map(Some)
     }
 
     /// Load configuration from a specific file path
@@ -635,6 +648,16 @@ impl ShipperConfig {
     /// without using it as a trusted destination. Callers must validate the
     /// returned configuration before using it for execution.
     pub fn load_from_file_for_diagnostics(path: &Path) -> Result<Self> {
+        Self::load_from_file_without_value_validation(path)
+    }
+
+    /// Parse configuration without applying value or registry-destination
+    /// validation.
+    ///
+    /// TOML decoding and schema-version validation remain fail closed. Callers
+    /// must apply [`ShipperConfig::validate_with_loopback`] before using the
+    /// returned configuration for execution.
+    pub fn load_from_file_without_value_validation(path: &Path) -> Result<Self> {
         Self::load_from_file_with_validation(path, false)
     }
 
@@ -645,13 +668,15 @@ impl ShipperConfig {
         let config: ShipperConfig = toml::from_str(&content)
             .with_context(|| format!("Failed to parse config file: {}", path.display()))?;
 
-        // Validate schema version
-        if let Err(e) = shipper_types::schema::validate_schema_version(
-            &config.schema_version,
-            "shipper.config.v1",
-            "config",
-        ) {
-            bail!("{} in file: {}", e, path.display());
+        // Config decoding is not forward-compatible by default: a future
+        // schema may assign different meaning to fields this binary ignores.
+        if config.schema_version != CONFIG_SCHEMA_VERSION {
+            bail!(
+                "unsupported config schema version '{}'; expected {} in file: {}",
+                config.schema_version,
+                CONFIG_SCHEMA_VERSION,
+                path.display()
+            );
         }
 
         // Validate configuration values (output, retry, lock, readiness,
@@ -868,7 +893,7 @@ timeout = "1h"
 # - conservative: linear backoff with 3 attempts, 5s base, 60s max
 # - custom: uses explicit strategy settings below
 policy = "default"
-# Max attempts per crate publish step (used when policy is custom)
+# Cumulative max attempts per crate across publish and resume (used when policy is custom)
 max_attempts = 6
 # Base backoff delay
 base_delay = "2s"

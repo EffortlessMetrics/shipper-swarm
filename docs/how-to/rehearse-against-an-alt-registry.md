@@ -22,16 +22,20 @@ publish shape has changed, rehearse.
 
 ## Prerequisites
 
-- An **alternate registry**. Options, rough-ordered by effort:
+- An **isolated, non-live registry endpoint and namespace** whose rehearsal
+  artifacts can be discarded without public impact. Options, rough-ordered by
+  effort:
   - **kellnr** (recommended for CI): self-host a registry sidecar per
     release. [kellnr docs](https://kellnr.io/documentation). Short-
     lived instance — spin up, rehearse, tear down.
-  - **Throwaway crates.io account**: works but pollutes the real
-    registry with rehearsal versions. Use different crate names if
-    you go this route.
-  - **Your existing private registry**: if your org already has one
-    (cloudsmith / Artifactory / JFrog / Cargo-hosted), a dedicated
-    `rehearsal-*` namespace works.
+  - **A non-production private registry**: if your organization already has
+    one (Cloudsmith, Artifactory, JFrog, or Cargo-hosted), use a dedicated
+    disposable `rehearsal-*` namespace that cannot publish to production.
+
+> **Destructive target fence:** crates.io is not a rehearsal registry. A
+> throwaway account or different crate name still creates permanent public
+> registry history. Testing against crates.io belongs only to a separately
+> authorized release-authority operation, not this default guide.
 
 - Registry URL + token configured in Cargo so `cargo publish --registry`
   works.
@@ -73,9 +77,10 @@ shipper rehearse
 
 What this does:
 
-1. Validates that the rehearsal registry is configured and differs
-   from the live target. (Rehearsing against crates.io would defeat
-   the point.)
+1. Validates that the rehearsal registry is configured and that its registry
+   **name** differs from the live target name. The current guard does not prove
+   endpoint isolation; before running the command, verify that the configured
+   API and index URLs resolve to the isolated non-live service you intended.
 2. For each crate in the plan (topological order):
    - Runs `cargo publish --registry rehearsal -p <crate>`.
    - Waits for the crate to appear on the rehearsal registry's
@@ -211,9 +216,13 @@ registries explicitly via `--registries X,crates-io`.
 
 ### "rehearsal registry must differ from the live target"
 
-You configured the rehearsal to point at crates.io. That defeats the
-point — rehearsal is supposed to be a sandbox. Point at a different
-registry.
+The configured rehearsal registry name matches the live target name. Point at
+a separately named, isolated non-live registry.
+
+This diagnostic is not yet an endpoint-authority check. A differently named
+alias can still point at crates.io or the live target, so review both API and
+index URLs before any rehearsal. [Issue #336](https://github.com/EffortlessMetrics/shipper-swarm/issues/336)
+tracks fail-closed endpoint comparison before Cargo or network execution.
 
 ### "rehearsal receipt is stale: plan_id mismatch"
 

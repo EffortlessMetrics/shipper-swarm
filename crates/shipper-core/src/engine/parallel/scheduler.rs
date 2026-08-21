@@ -24,6 +24,58 @@ struct WorkerHandle {
     join_should_fail: bool,
 }
 
+fn finish_publish_errors(mut errors: Vec<anyhow::Error>) -> Result<()> {
+    if errors.is_empty() {
+        return Ok(());
+    }
+    let summary = errors
+        .iter()
+        .map(|error| format!("{error:#}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    if let Some(index) = errors.iter().position(|error| {
+        error
+            .downcast_ref::<crate::engine::PublishStillUnknownError>()
+            .is_some()
+    }) {
+        let still_unknown = errors.swap_remove(index);
+        return Err(still_unknown.context(format!(
+            "parallel publish failed for {} package(s): {summary}",
+            errors.len() + 1
+        )));
+    }
+    if let Some(index) = errors.iter().position(|error| {
+        error
+            .downcast_ref::<crate::engine::PublishRecoverableStopError>()
+            .is_none()
+    }) {
+        let blocker = errors.swap_remove(index);
+        return Err(blocker.context(format!(
+            "parallel publish failed for {} package(s): {summary}",
+            errors.len() + 1
+        )));
+    }
+    let package = errors
+        .iter()
+        .find_map(|error| {
+            error
+                .downcast_ref::<crate::engine::PublishRecoverableStopError>()
+                .map(|stop| stop.package.clone())
+        })
+        .unwrap_or_else(|| "workspace".to_string());
+    Err(crate::engine::PublishRecoverableStopError {
+        message: format!(
+            "parallel publish stopped recoverably for {} package(s): {summary}",
+            errors.len()
+        ),
+        package,
+        // A worker-local bit can never authorize the run. Only run_publish's
+        // post-join, post-marker full consistency predicate may promote this.
+        evidence_consistent: false,
+    }
+    .into())
+}
+
 impl WorkerHandle {
     fn is_finished(&self) -> bool {
         self.handle.is_finished()
@@ -88,7 +140,7 @@ pub(crate) fn run_publish_level(
     ));
 
     let mut all_receipts: Vec<PackageReceipt> = Vec::new();
-    let mut errors: Vec<String> = Vec::new();
+    let mut errors: Vec<anyhow::Error> = Vec::new();
 
     for chunk in chunk_by_max_concurrent(&level.packages, max_concurrent) {
         let mut handles: Vec<WorkerHandle> = Vec::new();
@@ -136,7 +188,7 @@ pub(crate) fn run_publish_level(
             match handle.join() {
                 Ok(result) => match result.result {
                     Ok(receipt) => all_receipts.push(receipt),
-                    Err(e) => errors.push(format!("{e:#}")),
+                    Err(error) => errors.push(error),
                 },
                 Err(_) => join_failures += 1,
             }
@@ -147,13 +199,93 @@ pub(crate) fn run_publish_level(
         }
     }
 
-    if !errors.is_empty() {
-        bail!(
-            "parallel publish failed for {} package(s): {}",
-            errors.len(),
-            errors.join("; ")
+    finish_publish_errors(errors)?;
+    Ok(all_receipts)
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::{Result, anyhow, bail, ensure};
+
+    use super::finish_publish_errors;
+
+    #[test]
+    fn still_unknown_identity_survives_parallel_error_aggregation() -> Result<()> {
+        let errors = vec![
+            anyhow!("unrelated worker failure"),
+            crate::engine::PublishStillUnknownError {
+                message: "demo@0.1.0: reconciliation inconclusive".to_string(),
+                reconciliation_written: true,
+            }
+            .into(),
+        ];
+        let Err(error) = finish_publish_errors(errors) else {
+            bail!("parallel aggregation unexpectedly succeeded");
+        };
+        ensure!(
+            error
+                .downcast_ref::<crate::engine::PublishStillUnknownError>()
+                .is_some(),
+            "typed StillUnknown identity was lost: {error:#}"
         );
+        ensure!(format!("{error:#}").contains("unrelated worker failure"));
+        Ok(())
     }
 
-    Ok(all_receipts)
+    #[test]
+    fn all_recoverable_aggregation_erases_mixed_worker_authorization() -> Result<()> {
+        let errors = vec![
+            crate::engine::PublishRecoverableStopError {
+                message: "a stopped recoverably".to_string(),
+                package: "a@1.0.0".to_string(),
+                evidence_consistent: true,
+            }
+            .into(),
+            crate::engine::PublishRecoverableStopError {
+                message: "b stopped recoverably".to_string(),
+                package: "b@1.0.0".to_string(),
+                evidence_consistent: false,
+            }
+            .into(),
+        ];
+        let Err(error) = finish_publish_errors(errors) else {
+            bail!("parallel aggregation unexpectedly succeeded");
+        };
+        ensure!(
+            matches!(
+                crate::engine::classify_publish_stop(&error),
+                Some(
+                    crate::engine::PublishStopClassification::RecoverableNotPublished {
+                        evidence_consistent: false
+                    }
+                )
+            ),
+            "typed recoverable stop identity was lost: {error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ordinary_blocker_outranks_parallel_recoverable_stop() -> Result<()> {
+        let errors = vec![
+            crate::engine::PublishRecoverableStopError {
+                message: "a stopped recoverably".to_string(),
+                package: "a@1.0.0".to_string(),
+                evidence_consistent: false,
+            }
+            .into(),
+            anyhow!("permanent worker blocker"),
+        ];
+        let Err(error) = finish_publish_errors(errors) else {
+            bail!("parallel aggregation unexpectedly succeeded");
+        };
+        ensure!(
+            error
+                .downcast_ref::<crate::engine::PublishRecoverableStopError>()
+                .is_none(),
+            "recoverable identity incorrectly outranked blocker: {error:#}"
+        );
+        ensure!(format!("{error:#}").contains("permanent worker blocker"));
+        Ok(())
+    }
 }

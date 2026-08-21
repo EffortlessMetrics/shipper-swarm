@@ -148,7 +148,7 @@ Shipper uses a lock file to prevent concurrent publish operations. If a lock is 
 policy = "default"
 # Retry strategy: immediate, exponential (default), linear, constant
 strategy = "exponential"
-# Max attempts per crate publish step
+# Cumulative max attempts per crate across publish and resume
 max_attempts = 6
 # Base backoff delay
 base_delay = "2s"
@@ -175,13 +175,13 @@ Controls retry behavior for failed publish operations.
 allow_dirty = false
 # Skip owners/permissions preflight (not recommended)
 skip_ownership_check = false
-# Fail preflight if ownership checks fail (recommended for production)
+# Require a token during strict preflight and before publish execution
 strict_ownership = false
 ```
 
 - **allow_dirty**: Allow publishing even with uncommitted changes. Not recommended for production.
 - **skip_ownership_check**: Skip checking if you have permission to publish to the registry. Not recommended for production.
-- **strict_ownership**: Fail preflight immediately if ownership checks fail or if no token is available. Recommended for production.
+- **strict_ownership**: Require a registry token during preflight and before publish execution. Preflight also fails when ownership verification fails; publish checks every selected registry before creating execution state but does not repeat preflight's registry ownership query. Recommended for production.
 
 ### Parallel
 
@@ -295,7 +295,7 @@ timeout = "1h"
 policy = "default"
 # Retry strategy: immediate, exponential (default), linear, constant
 strategy = "exponential"
-# Max attempts per crate publish step
+# Cumulative max attempts per crate across publish and resume
 max_attempts = 6
 # Base backoff delay
 base_delay = "2s"
@@ -309,7 +309,7 @@ jitter = 0.5
 allow_dirty = false
 # Skip owners/permissions preflight (not recommended)
 skip_ownership_check = false
-# Fail preflight if ownership checks fail (recommended)
+# Require a token during strict preflight and before publish execution
 strict_ownership = false
 
 [parallel]

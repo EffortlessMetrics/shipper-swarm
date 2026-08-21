@@ -556,6 +556,10 @@ fn status_command_snapshot() {
 plan_id: <PLAN_ID>
 
 demo@0.1.0: missing
+
+Result: not published
+Publication performed: no
+Next: run preflight in the same workspace and registry context before publishing
 "#
     );
     registry.join();
@@ -644,12 +648,8 @@ Proof explanation:
   Live-release evidence:
     - registry acceptance and post-publish visibility are recorded during publish/resume.
 
-What to do next:
------------------
-⚠ Preflight did not prove every release prerequisite.
-  - configure registry auth or Trusted Publishing if ownership is unverified
-  - rerun `shipper preflight`
-  - if you accept the uncertainty, run `shipper publish` with an explicit policy choice
+Result: preflight completed with advisory proof gaps; no packages were published
+Next: ownership cannot be verified before a first publish; review the advisory gaps, then deliberately publish or rehearse with the same selection
 "#
     );
     registry.join();
@@ -743,6 +743,18 @@ fn preflight_command_with_json_flag() {
     assert!(json["proofs"].is_array());
     assert!(json["gaps"].is_array());
     assert!(json["failed_checks"].is_array());
+    assert_eq!(json["outcome"]["status"], "not_proven");
+    assert_eq!(json["outcome"]["publication_performed"], false);
+    assert_eq!(json["outcome"]["next_action"]["kind"], "publish");
+    assert_eq!(
+        json["outcome"]["next_action"]["requires_confirmation"],
+        true
+    );
+    assert!(json["outcome"]["next_action"].get("command").is_none());
+    assert_eq!(
+        json["outcome"]["next_action"]["reason"],
+        "ownership cannot be verified before a first publish; review the advisory gaps, then deliberately publish or rehearse with the same selection"
+    );
     registry.join();
 }
 
@@ -1100,7 +1112,7 @@ fn preflight_command_finishability_failed() {
     let td = tempdir().expect("tempdir");
     create_workspace(td.path());
     fs::create_dir_all(td.path().join("cargo-home")).expect("mkdir");
-    let registry = spawn_registry(vec![404], 2);
+    let registry = spawn_registry(vec![404], 4);
 
     // Set up fake cargo to fail dry-run
     let bin = td.path().join("bin");
@@ -1152,8 +1164,8 @@ fn preflight_command_finishability_failed() {
         .arg("--allow-dirty")
         .arg("--skip-ownership-check")
         .arg("preflight")
-        .env("PATH", new_path)
-        .env("REAL_CARGO", real_cargo)
+        .env("PATH", &new_path)
+        .env("REAL_CARGO", &real_cargo)
         .env("SHIPPER_CARGO_BIN", &fake_cargo_path)
         .env("CARGO_HOME", td.path().join("cargo-home"))
         .env_remove("CARGO_REGISTRY_TOKEN")
@@ -1166,6 +1178,44 @@ fn preflight_command_finishability_failed() {
 
     let stdout = String::from_utf8(out).expect("utf8");
     assert!(stdout.contains("FAILED"));
+    assert!(stdout.contains("Result: preflight found blocking checks; no packages were published"));
+    assert!(stdout.contains(
+        "Next: resolve the failed checks above, then rerun preflight with the same selection"
+    ));
+
+    let out = loopback_shipper_cmd()
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--api-base")
+        .arg(&registry.base_url)
+        .arg("--allow-dirty")
+        .arg("--skip-ownership-check")
+        .arg("preflight")
+        .arg("--format")
+        .arg("json")
+        .env("PATH", &new_path)
+        .env("REAL_CARGO", &real_cargo)
+        .env("SHIPPER_CARGO_BIN", &fake_cargo_path)
+        .env("CARGO_HOME", td.path().join("cargo-home"))
+        .env_remove("CARGO_REGISTRY_TOKEN")
+        .env_remove("CARGO_REGISTRIES_CRATES_IO_TOKEN")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: serde_json::Value =
+        serde_json::from_slice(&out).expect("failed preflight JSON remains parseable");
+    assert_eq!(json["finishability"], "failed");
+    assert_eq!(json["outcome"]["status"], "failed");
+    assert_eq!(json["outcome"]["publication_performed"], false);
+    assert_eq!(json["outcome"]["next_action"]["kind"], "resolve_blockers");
+    assert_eq!(
+        json["outcome"]["next_action"]["requires_confirmation"],
+        false
+    );
+    assert!(json["outcome"]["next_action"].get("command").is_none());
     registry.join();
 }
 

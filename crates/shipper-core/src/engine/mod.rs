@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 use chrono::Utc;
 
 use crate::cargo;
+use crate::ops::auth;
 use crate::plan::PlannedWorkspace;
 use crate::registry::{RegistryClient, RegistryPolicy};
 #[cfg(test)]
@@ -50,6 +51,129 @@ pub use preflight::PreflightRunOptions;
 #[cfg(test)]
 use test_readiness::verify_published;
 
+/// Typed identity for a publish attempt whose registry reconciliation remained
+/// inconclusive after durable evidence was written.
+///
+/// This is public only so the separate CLI adapter can preserve the safe-stop
+/// posture without parsing error prose. It is not a completed receipt.
+#[doc(hidden)]
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub struct PublishStillUnknownError {
+    message: String,
+    reconciliation_written: bool,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub(crate) struct PublishRecoverableStopError {
+    message: String,
+    package: String,
+    evidence_consistent: bool,
+}
+
+#[derive(Debug)]
+struct ResumeRetryBudgetError {
+    package: String,
+    current_attempts: u32,
+    requested_max_attempts: u32,
+    minimum_max_attempts: Option<u32>,
+}
+
+impl std::fmt::Display for ResumeRetryBudgetError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "resume retry ceiling exhausted for {}: persisted attempts {}, requested --max-attempts {}",
+            self.package, self.current_attempts, self.requested_max_attempts
+        )?;
+        match self.minimum_max_attempts {
+            Some(minimum) => write!(
+                formatter,
+                "; use --max-attempts {minimum} or greater to permit another attempt"
+            ),
+            None => formatter.write_str(
+                "; persisted attempts cannot be increased within the supported retry-ceiling range",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ResumeRetryBudgetError {}
+
+/// CLI-facing identity for a resume rejected before mutation because its
+/// cumulative per-package retry ceiling cannot permit another attempt.
+#[doc(hidden)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResumeRetryBudgetClassification {
+    pub package: String,
+    pub current_attempts: u32,
+    pub requested_max_attempts: u32,
+    pub minimum_max_attempts: Option<u32>,
+}
+
+#[doc(hidden)]
+pub fn classify_resume_retry_budget(
+    error: &anyhow::Error,
+) -> Option<ResumeRetryBudgetClassification> {
+    error
+        .downcast_ref::<ResumeRetryBudgetError>()
+        .map(|budget| ResumeRetryBudgetClassification {
+            package: budget.package.clone(),
+            current_attempts: budget.current_attempts,
+            requested_max_attempts: budget.requested_max_attempts,
+            minimum_max_attempts: budget.minimum_max_attempts,
+        })
+}
+
+/// CLI-facing classification for publish stops whose safety posture must not
+/// be inferred from human-readable error text.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PublishStopClassification {
+    StillUnknown { reconciliation_written: bool },
+    RecoverableNotPublished { evidence_consistent: bool },
+}
+
+#[doc(hidden)]
+pub fn classify_publish_stop(error: &anyhow::Error) -> Option<PublishStopClassification> {
+    if let Some(still_unknown) = error.downcast_ref::<PublishStillUnknownError>() {
+        return Some(PublishStopClassification::StillUnknown {
+            reconciliation_written: still_unknown.reconciliation_written,
+        });
+    }
+    error
+        .downcast_ref::<PublishRecoverableStopError>()
+        .map(
+            |recoverable| PublishStopClassification::RecoverableNotPublished {
+                evidence_consistent: recoverable.evidence_consistent,
+            },
+        )
+}
+
+fn controlled_stop_evidence_consistent(
+    state_dir: &Path,
+    events_path: &Path,
+    state: &ExecutionState,
+) -> bool {
+    let reconciliation_path = state::reconciliation_path(state_dir);
+    let Ok(raw) = std::fs::read_to_string(reconciliation_path) else {
+        return false;
+    };
+    let Ok(report) = serde_json::from_str::<shipper_types::ReconciliationReport>(&raw) else {
+        return false;
+    };
+    crate::state::consistency::verify_controlled_stop_consistency(events_path, state, Some(&report))
+        .is_ok()
+}
+
+impl PublishStillUnknownError {
+    #[doc(hidden)]
+    pub fn reconciliation_written(&self) -> bool {
+        self.reconciliation_written
+    }
+}
+
 pub trait Reporter {
     fn info(&mut self, msg: &str);
     fn warn(&mut self, msg: &str);
@@ -90,6 +214,49 @@ pub trait Reporter {
 
 pub(crate) fn policy_effects(opts: &RuntimeOptions) -> crate::runtime::policy::PolicyEffects {
     crate::runtime::policy::policy_effects(opts)
+}
+
+pub(in crate::engine) fn require_strict_ownership_token(
+    effects: &crate::runtime::policy::PolicyEffects,
+    token: Option<&str>,
+) -> Result<()> {
+    if effects.strict_ownership && token.is_none_or(str::is_empty) {
+        bail!(
+            "strict ownership requested but no token found (set CARGO_REGISTRY_TOKEN or run cargo login)"
+        );
+    }
+    Ok(())
+}
+
+pub(in crate::engine) fn enforce_strict_ownership_for_registry(
+    registry_name: &str,
+    effects: &crate::runtime::policy::PolicyEffects,
+) -> Result<()> {
+    if !effects.strict_ownership {
+        return Ok(());
+    }
+    let token = auth::resolve_token(registry_name)?;
+    require_strict_ownership_token(effects, token.as_deref())
+}
+
+/// Validate strict-ownership token presence for every registry selected for a
+/// publish command before any registry-specific execution begins.
+///
+/// This is exposed for the CLI adapter's atomic multi-registry boundary. The
+/// publish bootstrap invokes it again defensively before engine side effects.
+#[doc(hidden)]
+pub fn prevalidate_publish_registry_tokens(
+    ws: &PlannedWorkspace,
+    opts: &RuntimeOptions,
+) -> Result<()> {
+    let effects = policy_effects(opts);
+    if opts.registries.is_empty() {
+        return enforce_strict_ownership_for_registry(&ws.plan.registry.name, &effects);
+    }
+    for registry in &opts.registries {
+        enforce_strict_ownership_for_registry(&registry.name, &effects)?;
+    }
+    Ok(())
 }
 
 fn init_registry_client(
@@ -272,9 +439,39 @@ pub fn run_publish(
 
     // Check for parallel mode
     if opts.parallel.enabled {
-        let parallel_receipts = crate::engine::parallel::run_publish_parallel_without_start(
+        let parallel_receipts = match crate::engine::parallel::run_publish_parallel_without_start(
             ws, opts, &mut st, &state_dir, &reg, reporter,
-        )?;
+        ) {
+            Ok(receipts) => receipts,
+            Err(error) => {
+                if let Some(stop) = error.downcast_ref::<PublishRecoverableStopError>() {
+                    let package = stop.package.clone();
+                    event_log.record(PublishEvent {
+                        timestamp: Utc::now(),
+                        event_type: EventType::ExecutionStopped {
+                            reason: shipper_types::ControlledStopReason::NotPublishedRetryBudgetExhausted,
+                        },
+                        package: package.clone(),
+                    });
+                    event_log.write_to_file(&events_path)?;
+                    publish::finalize::record_consistency_drift(
+                        &events_path,
+                        &st,
+                        &mut event_log,
+                        reporter,
+                    );
+                    let evidence_consistent =
+                        controlled_stop_evidence_consistent(&state_dir, &events_path, &st);
+                    return Err(PublishRecoverableStopError {
+                        message: format!("{error:#}"),
+                        package,
+                        evidence_consistent,
+                    }
+                    .into());
+                }
+                return Err(error);
+            }
+        };
 
         publish::finalize::record_consistency_drift(&events_path, &st, &mut event_log, reporter);
         return publish::finalize::finish_parallel_run(
@@ -292,7 +489,7 @@ pub fn run_publish(
         );
     }
 
-    let receipts = execute_package::run_sequential_scheduler(
+    let receipts = match execute_package::run_sequential_scheduler(
         ws,
         opts,
         &mut st,
@@ -301,7 +498,38 @@ pub fn run_publish(
         &mut event_log,
         &events_path,
         reporter,
-    )?;
+    ) {
+        Ok(receipts) => receipts,
+        Err(error) => {
+            if let Some(stop) = error.downcast_ref::<PublishRecoverableStopError>() {
+                let package = stop.package.clone();
+                event_log.record(PublishEvent {
+                    timestamp: Utc::now(),
+                    event_type: EventType::ExecutionStopped {
+                        reason:
+                            shipper_types::ControlledStopReason::NotPublishedRetryBudgetExhausted,
+                    },
+                    package: package.clone(),
+                });
+                event_log.write_to_file(&events_path)?;
+                publish::finalize::record_consistency_drift(
+                    &events_path,
+                    &st,
+                    &mut event_log,
+                    reporter,
+                );
+                let evidence_consistent =
+                    controlled_stop_evidence_consistent(&state_dir, &events_path, &st);
+                return Err(PublishRecoverableStopError {
+                    message: format!("{error:#}"),
+                    package,
+                    evidence_consistent,
+                }
+                .into());
+            }
+            return Err(error);
+        }
+    };
     publish::finalize::record_consistency_drift(&events_path, &st, &mut event_log, reporter);
     publish::finalize::finish_sequential_run(
         ws,
@@ -360,13 +588,136 @@ pub fn run_resume(
 ) -> Result<Receipt> {
     let workspace_root = &ws.workspace_root;
     let state_dir = resolve_state_dir(workspace_root, &opts.state_dir);
-    if state::load_state(&state_dir)?.is_none() {
+    let Some(existing_state) = state::load_state(&state_dir)? else {
         bail!(
             "no existing state found in {}; run shipper publish first",
             state_dir.display()
         );
+    };
+    publish::bootstrap::validate_existing_plan_id(&existing_state, ws, opts)?;
+    let observation = crate::state::run_observation::observe_run(&state_dir, Some(workspace_root))?;
+    let reconciliation_path = state::reconciliation_path(&state_dir);
+    let reconciliation = if reconciliation_path.exists() {
+        Some(
+            std::fs::read_to_string(&reconciliation_path)
+                .with_context(|| {
+                    format!(
+                        "failed to read reconciliation evidence {}",
+                        reconciliation_path.display()
+                    )
+                })
+                .and_then(|raw| {
+                    serde_json::from_str::<shipper_types::ReconciliationReport>(&raw).with_context(
+                        || {
+                            format!(
+                                "failed to parse reconciliation evidence {}",
+                                reconciliation_path.display()
+                            )
+                        },
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
+    let derived_recoverable = crate::state::consistency::has_not_published_retryable_posture(
+        &existing_state,
+        reconciliation.as_ref(),
+    );
+    let marker_present = matches!(
+        &observation,
+        crate::cli_bridge::RunObservation::Stopped { .. }
+    );
+    if derived_recoverable || marker_present {
+        match observation {
+            crate::cli_bridge::RunObservation::Stopped {
+                liveness: None | Some(crate::cli_bridge::RunLiveness::NotLive),
+                ..
+            } => {}
+            crate::cli_bridge::RunObservation::Stopped {
+                liveness: Some(crate::cli_bridge::RunLiveness::Live),
+                ..
+            } => bail!("controlled-stop publisher is still live; resume is blocked"),
+            crate::cli_bridge::RunObservation::Stopped {
+                liveness: Some(crate::cli_bridge::RunLiveness::Unknown(reason)),
+                ..
+            } => bail!(
+                "controlled-stop lock liveness is inconclusive ({reason:?}); resume is blocked"
+            ),
+            _ => bail!(
+                "retryable NotPublished posture lacks the current controlled-stop marker; resume is blocked"
+            ),
+        }
+        if state::receipt_path(&state_dir).exists() {
+            bail!("controlled-stop evidence unexpectedly includes a receipt");
+        }
+        crate::state::consistency::verify_controlled_stop_consistency(
+            &events::events_path(&state_dir),
+            &existing_state,
+            reconciliation.as_ref(),
+        )
+        .context("controlled-stop evidence does not authorize resume")?;
+        publish::bootstrap::validate_resume_target(ws, opts)?;
+        reject_exhausted_resume_retry_ceiling(ws, opts, &existing_state)?;
     }
     run_publish(ws, opts, reporter)
+}
+
+fn reject_exhausted_resume_retry_ceiling(
+    ws: &PlannedWorkspace,
+    opts: &RuntimeOptions,
+    state: &ExecutionState,
+) -> Result<()> {
+    let reject_package = |package: &shipper_types::PlannedPackage| -> Result<()> {
+        let key = pkg_key(&package.name, &package.version);
+        let Some(progress) = state.packages.get(&key) else {
+            return Ok(());
+        };
+        if matches!(
+            progress.state,
+            PackageState::Failed {
+                class: ErrorClass::Retryable,
+                ..
+            }
+        ) && progress.attempts >= opts.max_attempts
+        {
+            Err(ResumeRetryBudgetError {
+                package: key,
+                current_attempts: progress.attempts,
+                requested_max_attempts: opts.max_attempts,
+                minimum_max_attempts: progress.attempts.checked_add(1),
+            }
+            .into())
+        } else {
+            Ok(())
+        }
+    };
+
+    if opts.parallel.enabled {
+        let levels = ws.plan.group_by_levels();
+        let start_level = crate::engine::parallel::parallel_resume_start_level(
+            &levels,
+            opts.resume_from.as_deref(),
+        )
+        .ok_or_else(|| anyhow::anyhow!("validated resume target has no publish level"))?;
+        for level in levels.iter().skip(start_level) {
+            for package in &level.packages {
+                reject_package(package)?;
+            }
+        }
+    } else {
+        let mut reached_resume_target = opts.resume_from.is_none();
+        for package in &ws.plan.packages {
+            if !reached_resume_target {
+                reached_resume_target = opts.resume_from.as_deref() == Some(package.name.as_str());
+                if !reached_resume_target {
+                    continue;
+                }
+            }
+            reject_package(package)?;
+        }
+    }
+    Ok(())
 }
 
 /// Outcome of a rehearsal run. Sufficient for callers (CLI, future hard gate)
@@ -1452,6 +1803,101 @@ mod tests {
                 assert!(
                     format!("{err:#}").contains("strict ownership requested but no token found")
                 );
+            },
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn run_publish_rejects_missing_strict_token_before_state_for_both_schedulers() {
+        let td = tempdir().expect("tempdir");
+        let ws = planned_workspace(td.path(), "http://127.0.0.1:9".to_string());
+        temp_env::with_vars(
+            [
+                (
+                    "CARGO_HOME",
+                    Some(td.path().join("cargo-home").display().to_string()),
+                ),
+                ("CARGO_REGISTRY_TOKEN", None::<String>),
+                ("CARGO_REGISTRIES_CRATES_IO_TOKEN", None::<String>),
+            ],
+            || {
+                for parallel in [false, true] {
+                    let state_dir = td.path().join(if parallel {
+                        "parallel-state"
+                    } else {
+                        "sequential-state"
+                    });
+                    let mut opts = default_opts(state_dir.clone());
+                    opts.strict_ownership = true;
+                    opts.skip_ownership_check = false;
+                    opts.parallel.enabled = parallel;
+
+                    let mut reporter = CollectingReporter::default();
+                    let error = run_publish(&ws, &opts, &mut reporter).expect_err("must fail");
+                    assert!(
+                        format!("{error:#}")
+                            .contains("strict ownership requested but no token found")
+                    );
+                    assert!(
+                        !state_dir.exists(),
+                        "strict token gate must run before {parallel:?} scheduler state"
+                    );
+                    assert!(reporter.infos.is_empty());
+                    assert!(reporter.warns.is_empty());
+                    assert!(reporter.errors.is_empty());
+                }
+            },
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn strict_token_gate_preserves_token_policy_and_skip_opposites() {
+        let td = tempdir().expect("tempdir");
+        temp_env::with_vars(
+            [
+                (
+                    "CARGO_HOME",
+                    Some(td.path().join("cargo-home").display().to_string()),
+                ),
+                ("CARGO_REGISTRY_TOKEN", Some("test-token".to_string())),
+                ("CARGO_REGISTRIES_CRATES_IO_TOKEN", None::<String>),
+            ],
+            || {
+                let mut opts = default_opts(PathBuf::from(".shipper"));
+                opts.strict_ownership = true;
+                let effects = policy_effects(&opts);
+                assert!(require_strict_ownership_token(&effects, Some("test-token")).is_ok());
+            },
+        );
+
+        temp_env::with_vars(
+            [
+                (
+                    "CARGO_HOME",
+                    Some(td.path().join("empty-cargo-home").display().to_string()),
+                ),
+                ("CARGO_REGISTRY_TOKEN", None::<String>),
+                ("CARGO_REGISTRIES_CRATES_IO_TOKEN", None::<String>),
+            ],
+            || {
+                for policy in [
+                    crate::types::PublishPolicy::Balanced,
+                    crate::types::PublishPolicy::Fast,
+                ] {
+                    let mut opts = default_opts(PathBuf::from(".shipper"));
+                    opts.policy = policy;
+                    opts.strict_ownership = true;
+                    let effects = policy_effects(&opts);
+                    assert!(!effects.strict_ownership);
+                    assert!(require_strict_ownership_token(&effects, None).is_ok());
+                }
+
+                let mut skip_only = default_opts(PathBuf::from(".shipper"));
+                skip_only.skip_ownership_check = true;
+                skip_only.strict_ownership = false;
+                assert!(require_strict_ownership_token(&policy_effects(&skip_only), None).is_ok());
             },
         );
     }
@@ -2619,6 +3065,470 @@ mod tests {
         });
     }
 
+    fn assert_sequential_not_published_controlled_stop(
+        max_attempts: u32,
+        expected_registry_requests: usize,
+    ) {
+        let td = tempdir().expect("tempdir");
+        let bin = td.path().join("bin");
+        write_fake_tools(&bin);
+        let cargo_log = td.path().join("cargo-calls.log");
+        let mut env_vars = fake_program_env_vars(&bin);
+        env_vars.extend([
+            ("SHIPPER_CARGO_EXIT", Some("1".to_string())),
+            ("SHIPPER_CARGO_STDERR", Some(String::new())),
+            ("SHIPPER_CARGO_STDOUT", Some(String::new())),
+            (
+                "SHIPPER_CARGO_ARGS_LOG",
+                Some(cargo_log.to_string_lossy().to_string()),
+            ),
+        ]);
+        temp_env::with_vars(env_vars, || {
+            let server = spawn_registry_server(
+                std::collections::BTreeMap::from([(
+                    "/api/v1/crates/demo/0.1.0".to_string(),
+                    std::iter::repeat_n((404, "{}".to_string()), expected_registry_requests)
+                        .collect(),
+                )]),
+                expected_registry_requests,
+            );
+            let ws = planned_workspace(td.path(), server.base_url.clone());
+            let state_dir = td.path().join(".shipper");
+            let mut opts = default_opts(state_dir.clone());
+            opts.max_attempts = max_attempts;
+            opts.readiness.enabled = false;
+
+            let mut reporter = CollectingReporter::default();
+            let error = run_publish(&ws, &opts, &mut reporter).expect_err("controlled stop");
+            assert!(
+                error
+                    .downcast_ref::<PublishRecoverableStopError>()
+                    .is_some(),
+                "typed stop identity lost: {error:#}"
+            );
+            let state = state::load_state(&state_dir)
+                .expect("load state")
+                .expect("state exists");
+            assert!(matches!(
+                state.packages.get("demo@0.1.0").map(|p| &p.state),
+                Some(PackageState::Failed {
+                    class: ErrorClass::Retryable,
+                    ..
+                })
+            ));
+            assert!(!state::receipt_path(&state_dir).exists());
+            let event_log =
+                events::EventLog::read_from_file(&events::events_path(&state_dir)).expect("events");
+            assert!(matches!(
+                event_log.all_events().last().map(|event| &event.event_type),
+                Some(EventType::ExecutionStopped {
+                    reason: shipper_types::ControlledStopReason::NotPublishedRetryBudgetExhausted
+                })
+            ));
+            let reconciliation: shipper_types::ReconciliationReport = serde_json::from_str(
+                &std::fs::read_to_string(state::reconciliation_path(&state_dir))
+                    .expect("reconciliation report"),
+            )
+            .expect("parse reconciliation report");
+            crate::state::consistency::verify_controlled_stop_consistency(
+                &events::events_path(&state_dir),
+                &state,
+                Some(&reconciliation),
+            )
+            .expect("controlled stop is consistent");
+            let cargo_invocations = std::fs::read_to_string(&cargo_log)
+                .map(|raw| raw.lines().filter(|line| !line.trim().is_empty()).count())
+                .unwrap_or(0);
+            assert_eq!(
+                cargo_invocations, max_attempts as usize,
+                "must dispatch Cargo exactly once per allowed attempt"
+            );
+            server.join();
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn sequential_not_published_budget_exhaustion_records_controlled_stop() {
+        assert_sequential_not_published_controlled_stop(1, 2);
+    }
+
+    #[test]
+    #[serial]
+    fn sequential_repeated_not_published_exhaustion_records_one_controlled_stop() {
+        assert_sequential_not_published_controlled_stop(2, 3);
+    }
+
+    #[test]
+    #[serial]
+    fn resume_consumes_consistent_controlled_stop_and_finalizes_receipt() {
+        let td = tempdir().expect("tempdir");
+        let bin = td.path().join("bin");
+        write_fake_tools(&bin);
+        let cargo_log = td.path().join("cargo-calls.log");
+        let server = spawn_registry_server(
+            std::collections::BTreeMap::from([(
+                "/api/v1/crates/demo/0.1.0".to_string(),
+                vec![
+                    (404, "{}".to_string()),
+                    (404, "{}".to_string()),
+                    (200, "{}".to_string()),
+                ],
+            )]),
+            3,
+        );
+        let ws = planned_workspace(td.path(), server.base_url.clone());
+        let state_dir = td.path().join(".shipper");
+        let mut opts = default_opts(state_dir.clone());
+        opts.max_attempts = 1;
+        opts.readiness.enabled = false;
+
+        let mut first_env = fake_program_env_vars(&bin);
+        first_env.extend([
+            ("SHIPPER_CARGO_EXIT", Some("1".to_string())),
+            ("SHIPPER_CARGO_STDERR", Some(String::new())),
+            ("SHIPPER_CARGO_STDOUT", Some(String::new())),
+            (
+                "SHIPPER_CARGO_ARGS_LOG",
+                Some(cargo_log.to_string_lossy().to_string()),
+            ),
+        ]);
+        temp_env::with_vars(first_env, || {
+            let mut reporter = CollectingReporter::default();
+            run_publish(&ws, &opts, &mut reporter).expect_err("controlled stop");
+        });
+
+        let reconciliation_path = state::reconciliation_path(&state_dir);
+        let reconciliation_before =
+            std::fs::read(&reconciliation_path).expect("reconciliation before marker negatives");
+        let mut report: crate::types::ReconciliationReport =
+            serde_json::from_slice(&reconciliation_before)
+                .expect("parse reconciliation for marker negatives");
+        let mut other = report
+            .records
+            .first()
+            .cloned()
+            .expect("controlled-stop reconciliation record");
+        other.package = "other@1.0.0".to_string();
+        other.name = "other".to_string();
+        other.version = "1.0.0".to_string();
+        other.outcome = ReconciliationOutcome::StillUnknown {
+            attempts: 1,
+            elapsed_ms: 1,
+            reason: "other package remains ambiguous".to_string(),
+        };
+        other.operator_action = crate::types::ReconciliationOperatorAction::OperatorActionRequired;
+        report.records.push(other);
+        state::write_reconciliation_report(&state_dir, &report)
+            .expect("write mixed reconciliation for marker negatives");
+
+        let controlled_events_path = events::events_path(&state_dir);
+        let complete_events =
+            std::fs::read_to_string(&controlled_events_path).expect("complete events");
+        let mut event_lines = complete_events.lines().collect::<Vec<_>>();
+        let removed = event_lines.pop().expect("controlled-stop marker line");
+        assert!(removed.contains("execution_stopped"));
+        std::fs::write(
+            &controlled_events_path,
+            format!("{}\n", event_lines.join("\n")),
+        )
+        .expect("remove marker for negative");
+        let markerless_events_before =
+            std::fs::read(&controlled_events_path).expect("markerless events before rejection");
+        let state_before_rejection =
+            std::fs::read(state::state_path(&state_dir)).expect("state before rejection");
+        let cargo_before_rejection = std::fs::read(&cargo_log).expect("cargo log before rejection");
+        let markerless_error = run_resume(&ws, &opts, &mut CollectingReporter::default())
+            .expect_err("markerless derived posture must be rejected");
+        assert!(
+            format!("{markerless_error:#}").contains("lacks the current controlled-stop marker")
+        );
+        assert_eq!(
+            std::fs::read(state::state_path(&state_dir)).expect("state after rejection"),
+            state_before_rejection,
+            "rejected resume must not mutate state"
+        );
+        assert_eq!(
+            std::fs::read(&controlled_events_path).expect("events after markerless rejection"),
+            markerless_events_before,
+            "markerless rejection must not mutate events"
+        );
+        assert_eq!(
+            std::fs::read(&cargo_log).expect("cargo log after rejection"),
+            cargo_before_rejection,
+            "rejected resume must not dispatch Cargo"
+        );
+        std::fs::write(&controlled_events_path, complete_events)
+            .expect("restore controlled-stop marker");
+
+        let complete_events =
+            std::fs::read_to_string(&controlled_events_path).expect("restored events");
+        let mut reordered = complete_events.lines().collect::<Vec<_>>();
+        let marker = reordered.pop().expect("controlled-stop marker");
+        reordered.insert(1, marker);
+        std::fs::write(
+            &controlled_events_path,
+            format!("{}\n", reordered.join("\n")),
+        )
+        .expect("write reordered marker");
+        let reordered_events_before =
+            std::fs::read(&controlled_events_path).expect("reordered events before rejection");
+        let reordered_error = run_resume(&ws, &opts, &mut CollectingReporter::default())
+            .expect_err("non-terminal marker must be rejected");
+        assert!(
+            format!("{reordered_error:#}").contains("controlled-stop"),
+            "unexpected reordered-marker error: {reordered_error:#}"
+        );
+        assert_eq!(
+            std::fs::read(state::state_path(&state_dir)).expect("state after reordered rejection"),
+            state_before_rejection,
+            "reordered marker rejection must not mutate state"
+        );
+        assert_eq!(
+            std::fs::read(&controlled_events_path).expect("events after reordered rejection"),
+            reordered_events_before,
+            "reordered marker rejection must not mutate events"
+        );
+        assert_eq!(
+            std::fs::read(&cargo_log).expect("cargo log after reordered rejection"),
+            cargo_before_rejection,
+            "reordered marker rejection must not dispatch Cargo"
+        );
+        std::fs::write(&controlled_events_path, &complete_events)
+            .expect("restore terminal marker after reordered negative");
+        std::fs::write(&reconciliation_path, &reconciliation_before)
+            .expect("restore reconciliation after marker negatives");
+
+        let mut corrupt_identity: crate::types::ReconciliationReport =
+            serde_json::from_slice(&reconciliation_before)
+                .expect("parse reconciliation for identity negative");
+        let mut duplicate = corrupt_identity
+            .records
+            .last()
+            .cloned()
+            .expect("controlled-stop reconciliation record");
+        duplicate.name = "forged-package-name".to_string();
+        corrupt_identity.records.push(duplicate);
+        state::write_reconciliation_report(&state_dir, &corrupt_identity)
+            .expect("write corrupt duplicate identity");
+        let stopped_state = state::load_state(&state_dir)
+            .expect("load stopped state")
+            .expect("stopped state exists");
+        assert!(
+            !controlled_stop_evidence_consistent(
+                &state_dir,
+                &controlled_events_path,
+                &stopped_state
+            ),
+            "corrupt duplicate identity must not authorize the initial stop envelope or durable status"
+        );
+        let corrupt_state_before =
+            std::fs::read(state::state_path(&state_dir)).expect("state before identity rejection");
+        let corrupt_events_before =
+            std::fs::read(&controlled_events_path).expect("events before identity rejection");
+        let corrupt_cargo_before =
+            std::fs::read(&cargo_log).expect("cargo log before identity rejection");
+        let corrupt_error = run_resume(&ws, &opts, &mut CollectingReporter::default())
+            .expect_err("corrupt duplicate identity must reject resume");
+        assert!(
+            format!("{corrupt_error:#}").contains("reconciliation package identity disagrees"),
+            "unexpected corrupt-identity error: {corrupt_error:#}"
+        );
+        assert_eq!(
+            std::fs::read(state::state_path(&state_dir)).expect("state after identity rejection"),
+            corrupt_state_before,
+            "identity rejection must not mutate state"
+        );
+        assert_eq!(
+            std::fs::read(&controlled_events_path).expect("events after identity rejection"),
+            corrupt_events_before,
+            "identity rejection must not mutate events"
+        );
+        assert_eq!(
+            std::fs::read(&cargo_log).expect("cargo log after identity rejection"),
+            corrupt_cargo_before,
+            "identity rejection must not dispatch Cargo"
+        );
+        std::fs::write(&reconciliation_path, &reconciliation_before)
+            .expect("restore reconciliation after identity negative");
+
+        let reconciliation_before =
+            std::fs::read(&reconciliation_path).expect("reconciliation before cross-run negative");
+        let mut cross_run: serde_json::Value = serde_json::from_slice(&reconciliation_before)
+            .expect("parse reconciliation for cross-run negative");
+        cross_run["plan_id"] = serde_json::Value::String("different-run-plan".to_string());
+        std::fs::write(
+            &reconciliation_path,
+            serde_json::to_vec_pretty(&cross_run).expect("serialize cross-run reconciliation"),
+        )
+        .expect("write cross-run reconciliation");
+        let _cross_run_error = run_resume(&ws, &opts, &mut CollectingReporter::default())
+            .expect_err("cross-run reconciliation must be rejected");
+        assert_eq!(
+            std::fs::read(state::state_path(&state_dir)).expect("state after cross-run rejection"),
+            state_before_rejection,
+            "cross-run rejection must not mutate state"
+        );
+        assert_eq!(
+            std::fs::read(&cargo_log).expect("cargo log after cross-run rejection"),
+            cargo_before_rejection,
+            "cross-run rejection must not dispatch Cargo"
+        );
+        std::fs::write(&reconciliation_path, reconciliation_before)
+            .expect("restore reconciliation after cross-run negative");
+
+        #[cfg(target_os = "linux")]
+        {
+            let live_lock = crate::lock::LockFile::acquire(&state_dir, Some(&ws.workspace_root))
+                .expect("acquire matching live lock");
+            live_lock
+                .set_plan_id(&ws.plan.plan_id)
+                .expect("set matching live-lock plan");
+            let live_error = run_resume(&ws, &opts, &mut CollectingReporter::default())
+                .expect_err("matching live publisher must block resume");
+            assert!(format!("{live_error:#}").contains("still live"));
+            assert_eq!(
+                std::fs::read(state::state_path(&state_dir))
+                    .expect("state after matching live-lock rejection"),
+                state_before_rejection,
+                "live-lock rejection must not mutate state"
+            );
+            assert_eq!(
+                std::fs::read(&cargo_log).expect("cargo log after live-lock rejection"),
+                cargo_before_rejection,
+                "live-lock rejection must not dispatch Cargo"
+            );
+            drop(live_lock);
+        }
+
+        let budget_state_before =
+            std::fs::read(state::state_path(&state_dir)).expect("state before budget rejection");
+        let budget_events_before =
+            std::fs::read(&controlled_events_path).expect("events before budget rejection");
+        let budget_reconciliation_before =
+            std::fs::read(&reconciliation_path).expect("reconciliation before budget rejection");
+        let budget_cargo_before =
+            std::fs::read(&cargo_log).expect("cargo log before budget rejection");
+        let mut invalid_target_opts = opts.clone();
+        invalid_target_opts.resume_from = Some("missing-package".to_string());
+        let invalid_target_error = run_resume(
+            &ws,
+            &invalid_target_opts,
+            &mut CollectingReporter::default(),
+        )
+        .expect_err("invalid resume target must precede budget admission");
+        assert!(
+            format!("{invalid_target_error:#}")
+                .contains("resume-from package 'missing-package' not found")
+        );
+        assert_eq!(
+            std::fs::read(state::state_path(&state_dir))
+                .expect("state after invalid-target rejection"),
+            budget_state_before
+        );
+        assert_eq!(
+            std::fs::read(&controlled_events_path).expect("events after invalid-target rejection"),
+            budget_events_before
+        );
+        assert_eq!(
+            std::fs::read(&reconciliation_path)
+                .expect("reconciliation after invalid-target rejection"),
+            budget_reconciliation_before
+        );
+        assert_eq!(
+            std::fs::read(&cargo_log).expect("cargo after invalid-target rejection"),
+            budget_cargo_before
+        );
+        let budget_error = run_resume(&ws, &opts, &mut CollectingReporter::default())
+            .expect_err("same cumulative retry ceiling must reject before mutation");
+        assert_eq!(
+            classify_resume_retry_budget(&budget_error),
+            Some(ResumeRetryBudgetClassification {
+                package: "demo@0.1.0".to_string(),
+                current_attempts: 1,
+                requested_max_attempts: 1,
+                minimum_max_attempts: Some(2),
+            })
+        );
+        assert_eq!(
+            std::fs::read(state::state_path(&state_dir)).expect("state after budget rejection"),
+            budget_state_before,
+            "budget rejection must not mutate state"
+        );
+        assert_eq!(
+            std::fs::read(&controlled_events_path).expect("events after budget rejection"),
+            budget_events_before,
+            "budget rejection must not append a new run segment"
+        );
+        assert_eq!(
+            std::fs::read(&reconciliation_path).expect("reconciliation after budget rejection"),
+            budget_reconciliation_before,
+            "budget rejection must not mutate reconciliation evidence"
+        );
+        assert_eq!(
+            std::fs::read(&cargo_log).expect("cargo log after budget rejection"),
+            budget_cargo_before,
+            "budget rejection must not dispatch Cargo"
+        );
+        assert!(!state::receipt_path(&state_dir).exists());
+        let stopped_state = state::load_state(&state_dir)
+            .expect("load state after budget rejection")
+            .expect("stopped state exists after budget rejection");
+        crate::state::consistency::verify_controlled_stop_consistency(
+            &controlled_events_path,
+            &stopped_state,
+            Some(
+                &serde_json::from_slice(&budget_reconciliation_before)
+                    .expect("parse reconciliation after budget rejection"),
+            ),
+        )
+        .expect("budget rejection must preserve controlled-stop authorization");
+
+        let mut resume_env = fake_program_env_vars(&bin);
+        resume_env.extend([
+            ("SHIPPER_CARGO_EXIT", Some("0".to_string())),
+            (
+                "SHIPPER_CARGO_ARGS_LOG",
+                Some(cargo_log.to_string_lossy().to_string()),
+            ),
+        ]);
+        temp_env::with_vars(resume_env, || {
+            let mut reporter = CollectingReporter::default();
+            let mut resume_opts = opts.clone();
+            resume_opts.max_attempts = 2;
+            let receipt = run_resume(&ws, &resume_opts, &mut reporter).expect("resume succeeds");
+            assert!(matches!(receipt.execution_result, ExecutionResult::Success));
+        });
+
+        let final_state = state::load_state(&state_dir)
+            .expect("load final state")
+            .expect("final state exists");
+        assert!(matches!(
+            final_state
+                .packages
+                .get("demo@0.1.0")
+                .map(|progress| &progress.state),
+            Some(PackageState::Published)
+        ));
+        assert!(state::receipt_path(&state_dir).exists());
+        let events =
+            events::EventLog::read_from_file(&events::events_path(&state_dir)).expect("events");
+        assert_eq!(
+            events
+                .all_events()
+                .iter()
+                .filter(|event| matches!(event.event_type, EventType::ExecutionStarted))
+                .count(),
+            2,
+            "resume must create a new run segment"
+        );
+        let cargo_invocations = std::fs::read_to_string(&cargo_log)
+            .map(|raw| raw.lines().filter(|line| !line.trim().is_empty()).count())
+            .unwrap_or(0);
+        assert_eq!(cargo_invocations, 2, "one initial attempt and one resume");
+        server.join();
+    }
+
     #[test]
     #[serial]
     fn sequential_ambiguous_publish_still_unknown_stops_without_retry() {
@@ -3504,6 +4414,121 @@ mod tests {
         let mut reporter = CollectingReporter::default();
         let err = run_resume(&ws, &opts, &mut reporter).expect_err("must fail");
         assert!(format!("{err:#}").contains("no existing state found"));
+    }
+
+    #[test]
+    fn resume_retry_ceiling_reports_first_blocker_in_plan_order() {
+        let td = tempdir().expect("tempdir");
+        let mut ws = planned_workspace(td.path(), "http://127.0.0.1:9".to_string());
+        let mut first = ws.plan.packages[0].clone();
+        first.name = "zeta".to_string();
+        let mut second = first.clone();
+        second.name = "alpha".to_string();
+        ws.plan.packages = vec![first, second];
+
+        let failed = |name: &str, attempts| PackageProgress {
+            name: name.to_string(),
+            version: "0.1.0".to_string(),
+            attempts,
+            state: PackageState::Failed {
+                class: ErrorClass::Retryable,
+                message: "registry confirmed NotPublished".to_string(),
+            },
+            last_updated_at: Utc::now(),
+        };
+        let mut state = ExecutionState {
+            state_version: crate::state::execution_state::CURRENT_STATE_VERSION.to_string(),
+            plan_id: ws.plan.plan_id.clone(),
+            registry: ws.plan.registry.clone(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            attempt_history: Vec::new(),
+            packages: BTreeMap::from([
+                ("alpha@0.1.0".to_string(), failed("alpha", 1)),
+                ("zeta@0.1.0".to_string(), failed("zeta", 3)),
+            ]),
+        };
+        let mut opts = default_opts(PathBuf::from(".shipper"));
+        opts.max_attempts = 1;
+
+        let error = reject_exhausted_resume_retry_ceiling(&ws, &opts, &state)
+            .expect_err("both packages exhaust the requested ceiling");
+        assert_eq!(
+            classify_resume_retry_budget(&error),
+            Some(ResumeRetryBudgetClassification {
+                package: "zeta@0.1.0".to_string(),
+                current_attempts: 3,
+                requested_max_attempts: 1,
+                minimum_max_attempts: Some(4),
+            }),
+            "the plan order, not state-map order, owns deterministic reporting"
+        );
+
+        opts.resume_from = Some("alpha".to_string());
+        let selected_error = reject_exhausted_resume_retry_ceiling(&ws, &opts, &state)
+            .expect_err("the selected package also exhausts the ceiling");
+        assert_eq!(
+            classify_resume_retry_budget(&selected_error),
+            Some(ResumeRetryBudgetClassification {
+                package: "alpha@0.1.0".to_string(),
+                current_attempts: 1,
+                requested_max_attempts: 1,
+                minimum_max_attempts: Some(2),
+            }),
+            "packages before --resume-from must not participate in admission"
+        );
+
+        let evidence_paths = [
+            td.path().join("state.json"),
+            td.path().join("events.jsonl"),
+            td.path().join("reconciliation.json"),
+            td.path().join("cargo-and-registry.log"),
+        ];
+        for (index, path) in evidence_paths.iter().enumerate() {
+            std::fs::write(path, format!("parallel-admission-sentinel-{index}"))
+                .expect("write admission sentinel");
+        }
+        let evidence_before = evidence_paths
+            .iter()
+            .map(|path| std::fs::read(path).expect("read admission sentinel"))
+            .collect::<Vec<_>>();
+        opts.parallel.enabled = true;
+        let same_level_error = reject_exhausted_resume_retry_ceiling(&ws, &opts, &state)
+            .expect_err("parallel resume selects the target's entire dependency level");
+        assert_eq!(
+            classify_resume_retry_budget(&same_level_error),
+            Some(ResumeRetryBudgetClassification {
+                package: "zeta@0.1.0".to_string(),
+                current_attempts: 3,
+                requested_max_attempts: 1,
+                minimum_max_attempts: Some(4),
+            }),
+            "the earlier exhausted sibling in the selected level must block deterministically"
+        );
+        for (path, before) in evidence_paths.iter().zip(evidence_before) {
+            assert_eq!(
+                std::fs::read(path).expect("read sentinel after parallel rejection"),
+                before,
+                "parallel admission rejection must precede state, event, reconciliation, Cargo, and registry mutation"
+            );
+        }
+
+        opts.resume_from = None;
+        opts.parallel.enabled = false;
+        opts.max_attempts = u32::MAX;
+        let zeta = state.packages.get_mut("zeta@0.1.0").expect("zeta progress");
+        zeta.attempts = u32::MAX;
+        let overflow_error = reject_exhausted_resume_retry_ceiling(&ws, &opts, &state)
+            .expect_err("the maximum representable ceiling cannot increase");
+        assert_eq!(
+            classify_resume_retry_budget(&overflow_error),
+            Some(ResumeRetryBudgetClassification {
+                package: "zeta@0.1.0".to_string(),
+                current_attempts: u32::MAX,
+                requested_max_attempts: u32::MAX,
+                minimum_max_attempts: None,
+            })
+        );
     }
 
     #[test]

@@ -52,6 +52,119 @@ pub struct LockInfo {
     pub plan_id: Option<String>,
 }
 
+#[cfg(all(test, target_os = "linux"))]
+mod process_identity_tests {
+    use std::cell::Cell;
+    use std::io;
+    use std::path::PathBuf;
+
+    use anyhow::{Result, ensure};
+
+    use tempfile::tempdir;
+
+    use super::{LockFile, process_identity, read_lock_record_from_path};
+
+    fn stat(start_ticks: u64) -> String {
+        format!(
+            "42 (cargo ) hostile (name)) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 {start_ticks}"
+        )
+    }
+
+    #[test]
+    fn stable_process_sample_returns_identity() -> Result<()> {
+        let identity = super::process_identity_with(
+            || Ok(stat(77)),
+            || Ok("boot-a\n".to_owned()),
+            || Ok(PathBuf::from("pid:[100]")),
+        )?
+        .ok_or_else(|| anyhow::anyhow!("stable process must be present"))?;
+        ensure!(identity.process_start_ticks == 77);
+        ensure!(identity.boot_id == "boot-a");
+        ensure!(identity.pid_namespace == "pid:[100]");
+        Ok(())
+    }
+
+    #[test]
+    fn acquire_persists_matching_current_process_identity() -> Result<()> {
+        let td = tempdir()?;
+        let lock = LockFile::acquire(td.path(), None)?;
+        let record = read_lock_record_from_path(&lock.path)?;
+        let persisted = record
+            .process_identity
+            .ok_or_else(|| anyhow::anyhow!("Linux lock must persist process identity"))?;
+        let observed = process_identity(std::process::id())?
+            .ok_or_else(|| anyhow::anyhow!("current Linux process must be observable"))?;
+        ensure!(persisted == observed);
+        lock.release()?;
+        Ok(())
+    }
+
+    #[test]
+    fn pid_reuse_between_samples_fails_closed() -> Result<()> {
+        let calls = Cell::new(0_u8);
+        let result = super::process_identity_with(
+            || {
+                let call = calls.get();
+                calls.set(call.saturating_add(1));
+                Ok(if call == 0 { stat(77) } else { stat(88) })
+            },
+            || Ok("boot-a\n".to_owned()),
+            || Ok(PathBuf::from("pid:[100]")),
+        );
+        ensure!(result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn process_disappearing_between_samples_is_absent() -> Result<()> {
+        let calls = Cell::new(0_u8);
+        let identity = super::process_identity_with(
+            || {
+                let call = calls.get();
+                calls.set(call.saturating_add(1));
+                if call == 0 {
+                    Ok(stat(77))
+                } else {
+                    Err(io::Error::new(io::ErrorKind::NotFound, "process exited"))
+                }
+            },
+            || Ok("boot-a\n".to_owned()),
+            || Ok(PathBuf::from("pid:[100]")),
+        )?;
+        ensure!(identity.is_none());
+        Ok(())
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct LockRecord {
+    #[serde(flatten)]
+    pub info: LockInfo,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_identity: Option<ProcessIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ProcessIdentity {
+    pub boot_id: String,
+    pub pid_namespace: String,
+    pub process_start_ticks: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProcessScope {
+    pub boot_id: String,
+    pub pid_namespace: String,
+}
+
+/// Non-mutating view of an existing lock file for core-owned diagnostics.
+#[derive(Debug)]
+pub(crate) enum LockContents {
+    Missing,
+    Present(LockRecord),
+    Corrupt,
+}
+
 /// Lock file handle that automatically releases on Drop
 #[derive(Debug)]
 pub struct LockFile {
@@ -100,16 +213,20 @@ impl LockFile {
         let pid = std::process::id();
         let hostname = gethostname::gethostname().to_string_lossy().to_string();
 
-        let info = LockInfo {
-            pid,
-            hostname,
-            acquired_at: Utc::now(),
-            plan_id: None,
+        let record = LockRecord {
+            info: LockInfo {
+                pid,
+                hostname,
+                acquired_at: Utc::now(),
+                plan_id: None,
+            },
+            process_identity: current_process_identity(pid),
         };
 
         // Write lock file atomically
         let tmp_path = lock_path.with_extension("tmp");
-        let json = serde_json::to_string_pretty(&info).context("failed to serialize lock info")?;
+        let json =
+            serde_json::to_string_pretty(&record).context("failed to serialize lock info")?;
 
         {
             let mut file = File::create(&tmp_path).with_context(|| {
@@ -212,10 +329,11 @@ impl LockFile {
             bail!("lock file does not exist at {}", self.path.display());
         }
 
-        let mut info = read_lock_info_from_path(&self.path)?;
-        info.plan_id = Some(plan_id.to_string());
+        let mut record = read_lock_record_from_path(&self.path)?;
+        record.info.plan_id = Some(plan_id.to_string());
 
-        let json = serde_json::to_string_pretty(&info).context("failed to serialize lock info")?;
+        let json =
+            serde_json::to_string_pretty(&record).context("failed to serialize lock info")?;
 
         let tmp_path = self.path.with_extension("tmp");
         {
@@ -244,6 +362,110 @@ impl LockFile {
     }
 }
 
+fn current_process_identity(pid: u32) -> Option<ProcessIdentity> {
+    process_identity(pid).ok().flatten()
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn process_identity(pid: u32) -> Result<Option<ProcessIdentity>> {
+    let stat_path = PathBuf::from(format!("/proc/{pid}/stat"));
+    process_identity_with(
+        || fs::read_to_string(&stat_path),
+        || fs::read_to_string("/proc/sys/kernel/random/boot_id"),
+        || fs::read_link(format!("/proc/{pid}/ns/pid")),
+    )
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn process_scope() -> Result<Option<ProcessScope>> {
+    let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .context("failed to read Linux boot identity")?
+        .trim()
+        .to_owned();
+    let pid_namespace = fs::read_link("/proc/self/ns/pid")
+        .context("failed to read current PID namespace")?
+        .to_string_lossy()
+        .into_owned();
+    Ok(Some(ProcessScope {
+        boot_id,
+        pid_namespace,
+    }))
+}
+
+#[cfg(target_os = "linux")]
+fn process_identity_with(
+    mut read_stat: impl FnMut() -> std::io::Result<String>,
+    read_boot_id: impl FnOnce() -> std::io::Result<String>,
+    read_pid_namespace: impl FnOnce() -> std::io::Result<PathBuf>,
+) -> Result<Option<ProcessIdentity>> {
+    let first = match read_stat() {
+        Ok(stat) => parse_process_start_ticks(&stat)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("failed to read process stat"),
+    };
+    let boot_id = read_boot_id()
+        .context("failed to read Linux boot identity")?
+        .trim()
+        .to_owned();
+    let pid_namespace = read_pid_namespace()
+        .context("failed to read PID namespace")?
+        .to_string_lossy()
+        .into_owned();
+    let second = match read_stat() {
+        Ok(stat) => parse_process_start_ticks(&stat)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("failed to re-read process stat"),
+    };
+    if first != second {
+        anyhow::bail!("process identity changed while it was observed");
+    }
+    Ok(Some(ProcessIdentity {
+        boot_id,
+        pid_namespace,
+        process_start_ticks: first,
+    }))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn process_identity(_pid: u32) -> Result<Option<ProcessIdentity>> {
+    Ok(None)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn process_scope() -> Result<Option<ProcessScope>> {
+    Ok(None)
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn parse_process_start_ticks(stat: &str) -> Result<u64> {
+    let close = stat
+        .rfind(')')
+        .ok_or_else(|| anyhow::anyhow!("process stat is missing command terminator"))?;
+    stat.get(close + 1..)
+        .and_then(|tail| tail.split_whitespace().nth(19))
+        .ok_or_else(|| anyhow::anyhow!("process stat is missing field 22"))?
+        .parse()
+        .context("process stat field 22 is not an integer")
+}
+
+pub(crate) fn read_lock_contents(path: &Path) -> Result<LockContents> {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(LockContents::Missing);
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to read lock file {}", path.display()));
+        }
+    };
+
+    Ok(match serde_json::from_str(&content) {
+        Ok(info) => LockContents::Present(info),
+        Err(_) => LockContents::Corrupt,
+    })
+}
+
 impl Drop for LockFile {
     fn drop(&mut self) {
         // Best effort to release the lock
@@ -253,11 +475,15 @@ impl Drop for LockFile {
 
 /// Read lock info from a specific path
 fn read_lock_info_from_path(path: &Path) -> Result<LockInfo> {
+    Ok(read_lock_record_from_path(path)?.info)
+}
+
+fn read_lock_record_from_path(path: &Path) -> Result<LockRecord> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("failed to read lock file {}", path.display()))?;
-    let info: LockInfo = serde_json::from_str(&content)
+    let record: LockRecord = serde_json::from_str(&content)
         .with_context(|| format!("failed to parse lock JSON from {}", path.display()))?;
-    Ok(info)
+    Ok(record)
 }
 
 /// Get the lock file path for a state directory and optional workspace root
@@ -1788,11 +2014,11 @@ mod hardened_tests {
     // ── Lock file JSON format stability ─────────────────────────────────
 
     #[test]
-    fn lock_file_json_has_exactly_four_keys() {
+    fn public_lock_info_json_has_exactly_four_keys() {
         let td = tempdir().unwrap();
         let _lock = LockFile::acquire(td.path(), None).unwrap();
-        let lp = lock_path(td.path(), None);
-        let content = fs::read_to_string(&lp).unwrap();
+        let info = LockFile::read_lock_info(td.path(), None).unwrap();
+        let content = serde_json::to_string(&info).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
         let obj = parsed.as_object().unwrap();
         assert_eq!(obj.len(), 4);

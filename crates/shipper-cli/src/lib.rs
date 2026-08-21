@@ -41,13 +41,14 @@ use shipper_core::engine::{self, Reporter};
 use shipper_core::plan;
 use shipper_core::runtime::execution::pkg_key;
 use shipper_core::types::{
-    EventType, ExecutionResult, ExecutionState, Finishability, PackageState, PlannedPackage,
-    PreflightPackage, PreflightReport, PublishEvent, Registry, ReleasePlan, ReleaseSpec,
-    RuntimeOptions,
+    ErrorClass, EventType, ExecutionResult, ExecutionState, Finishability, PackageState,
+    PlannedPackage, PreflightPackage, PreflightReport, PublishEvent, Registry, ReleasePlan,
+    ReleaseSpec, RuntimeOptions,
 };
 
 mod doctor;
 mod output;
+mod status_durable;
 
 use crate::output::outcome::{ActionKind, OperatorAction};
 use crate::output::progress::ProgressReporter;
@@ -88,7 +89,7 @@ struct Cli {
     manifest_path: PathBuf,
 
     /// Cargo registry name (default: crates-io)
-    #[arg(long, global = true)]
+    #[arg(long, global = true, conflicts_with = "all_registries")]
     registry: Option<String>,
 
     /// Registry API base URL (default: <https://crates.io>)
@@ -120,7 +121,8 @@ struct Cli {
     #[arg(long, global = true)]
     skip_ownership_check: bool,
 
-    /// Fail preflight if ownership checks fail or if no token is available.
+    /// Require a registry token during strict-ownership preflight and before publish execution.
+    /// Preflight also fails when ownership verification fails.
     ///
     /// Note: crates.io token scopes may not allow querying owners; this is best-effort.
     #[arg(long, global = true)]
@@ -130,7 +132,7 @@ struct Cli {
     #[arg(long, global = true)]
     no_verify: bool,
 
-    /// Max attempts per crate publish step (default: 6)
+    /// Cumulative max attempts per crate across publish and resume (default: 6)
     #[arg(long, global = true)]
     max_attempts: Option<u32>,
 
@@ -231,7 +233,8 @@ struct Cli {
     #[arg(long, global = true)]
     all_registries: bool,
 
-    /// Optional package name to resume from
+    /// Select where resume begins: sequential uses the named package and later plan entries;
+    /// parallel uses its whole dependency level and later levels
     #[arg(long, global = true)]
     resume_from: Option<String>,
 
@@ -370,6 +373,22 @@ fn hide_args_from_help(command: Command, hidden_ids: &[&str]) -> Command {
     })
 }
 
+fn validate_cli_combinations(cli: &Cli) -> std::result::Result<(), clap::Error> {
+    let durable_status = matches!(&cli.cmd, Some(Commands::Status { durable: true, .. }));
+    if durable_status && (cli.registries.is_some() || cli.all_registries) {
+        let selector = if cli.registries.is_some() {
+            "--registries"
+        } else {
+            "--all-registries"
+        };
+        return Err(cli_command().error(
+            clap::error::ErrorKind::ArgumentConflict,
+            format!("the argument '--durable' cannot be used with '{selector}'"),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Print the deterministic publish plan (dependency-first ordering).
@@ -428,8 +447,21 @@ every step.
 If `.shipper/state.json` already exists for this plan, `publish` picks
 up where the previous run left off — already-published crates are
 skipped, and the run continues from the first pending or failed
-package. On interruption (Ctrl-C, network drop, ambiguous registry
-response), rerun `shipper publish` or `shipper resume`.
+package.
+
+If a run stops (Ctrl-C, network drop, or ambiguous registry response),
+inspect retained evidence before another publish. For one registry, run
+`shipper status --durable` with the same manifest, singular `--registry`,
+and state directory. For a run started with `--registries` or
+`--all-registries`, inspect each registry separately with its matching
+singular `--registry` and registry-specific state directory; `--durable`
+rejects multi-registry selectors. With that same state directory selected,
+run `shipper inspect-events`; use `shipper inspect-receipt` only when a
+finalized receipt exists. Resume only when the typed retained-evidence
+posture explicitly authorizes it. The
+reconciliation outcome `StillUnknown`, durable status `unknown`, evidence
+disagreement, identity mismatch, malformed evidence, or inconclusive
+liveness must stop; preserve `reconciliation.json` when present.
 
 EXAMPLES:
     # Publish the whole workspace to crates.io:
@@ -452,8 +484,13 @@ EXAMPLES:
     # Continue the current workspace release from persisted state:
     shipper resume
 
-    # Resume from a specific crate after reviewing the saved state:
+    # Select a resume point after reviewing the saved state:
     shipper resume --resume-from shipper-core
+
+In sequential mode, `--resume-from` selects the named package and later plan
+entries. In parallel mode, it selects the target's whole dependency level and
+later levels; an earlier same-level sibling can therefore block retry-budget
+admission.
 
     # Force resume when the computed plan differs from saved state:
     shipper resume --force-resume
@@ -500,6 +537,9 @@ EXAMPLES:
         /// the last durable event, and the next scheduled wait/retry/poll.
         #[arg(long)]
         watch: bool,
+        /// Interpret authoritative local run evidence without querying a registry.
+        #[arg(long, conflicts_with = "watch")]
+        durable: bool,
     },
     /// Print environment and auth diagnostics.
     #[command(long_about = "\
@@ -850,6 +890,7 @@ enum ConfigCommands {
 
 struct CliReporter {
     quiet: bool,
+    suppress_errors: bool,
     /// Optional progress handle installed during `publish`/`resume` so
     /// [`CliReporter::retry_wait`] can render a live countdown via the
     /// existing `ProgressReporter::retry_countdown`. When `None`, retries
@@ -860,9 +901,10 @@ struct CliReporter {
 }
 
 impl CliReporter {
-    fn new(quiet: bool) -> Self {
+    fn new(quiet: bool, suppress_errors: bool) -> Self {
         Self {
             quiet,
+            suppress_errors,
             progress: None,
             package_positions: BTreeMap::new(),
         }
@@ -897,7 +939,9 @@ impl Reporter for CliReporter {
     }
 
     fn error(&mut self, msg: &str) {
-        eprintln!("[error] {msg}");
+        if !self.suppress_errors {
+            eprintln!("[error] {msg}");
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -958,8 +1002,426 @@ pub fn format_error(error: &anyhow::Error) -> String {
     format!("Error: {error:?}")
 }
 
+#[derive(Debug)]
+struct PublishEarlyError {
+    format: String,
+    category: &'static str,
+    summary: &'static str,
+    rendered_error: String,
+    safe_to_rerun: PublishEarlySafeRerun,
+    next_action: OperatorAction,
+    evidence: Vec<String>,
+}
+
+#[derive(Debug)]
+struct ResumeRetryBudgetError {
+    format: String,
+    rendered_error: String,
+    package: String,
+    current_attempts: u32,
+    requested_max_attempts: u32,
+    minimum_max_attempts: Option<u32>,
+    safe_to_resume: ResumeSafeToResume,
+    next_action: OperatorAction,
+    evidence: Vec<String>,
+}
+
+impl std::fmt::Display for ResumeRetryBudgetError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("the requested cumulative retry ceiling cannot permit another attempt")
+    }
+}
+
+impl std::error::Error for ResumeRetryBudgetError {}
+
+#[derive(Serialize)]
+struct ResumeRetryBudgetReport<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    status: &'static str,
+    category: &'static str,
+    summary: &'static str,
+    package: &'a str,
+    current_attempts: u32,
+    requested_max_attempts: u32,
+    minimum_max_attempts: Option<u32>,
+    safe_to_resume: ResumeSafeToResume,
+    next_action: &'a OperatorAction,
+    evidence: Vec<String>,
+}
+
+impl std::fmt::Display for PublishEarlyError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.summary)
+    }
+}
+
+impl std::error::Error for PublishEarlyError {}
+
+#[derive(Serialize)]
+struct PublishEarlyErrorReport<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    status: &'static str,
+    category: &'a str,
+    summary: &'a str,
+    safe_to_rerun: PublishEarlySafeRerun,
+    next_action: &'a OperatorAction,
+    evidence: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct PublishEarlySafeRerun {
+    value: Option<bool>,
+    reason: &'static str,
+}
+
+fn classify_publish_early_error(error: &anyhow::Error) -> (&'static str, &'static str, ActionKind) {
+    let normalized = error
+        .chain()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_ascii_lowercase();
+    if normalized.contains("manifest")
+        || normalized.contains("cargo metadata")
+        || normalized.contains("release plan")
+    {
+        (
+            "invalid_manifest",
+            "the publish plan could not be built",
+            ActionKind::ResolveBlockers,
+        )
+    } else if normalized.contains("dirty") || normalized.contains("git repository") {
+        (
+            "workspace_not_ready",
+            "the workspace is not ready for publication",
+            ActionKind::ResolveBlockers,
+        )
+    } else if normalized.contains("ownership")
+        || normalized.contains("token")
+        || normalized.contains("authoriz")
+    {
+        (
+            "authentication_required",
+            "publish authorization could not be proven",
+            ActionKind::ResolveBlockers,
+        )
+    } else if normalized.contains("lock") || normalized.contains("plan_id") {
+        (
+            "state_conflict",
+            "durable publish state conflicts with this invocation",
+            ActionKind::ResolveBlockers,
+        )
+    } else if normalized.contains("registry")
+        || normalized.contains("connect")
+        || normalized.contains("request failed")
+    {
+        (
+            "registry_unreachable",
+            "registry availability could not be proven",
+            ActionKind::StopAndInvestigate,
+        )
+    } else {
+        (
+            "publish_failed",
+            "publish stopped before a receipt was finalized",
+            ActionKind::StopAndInvestigate,
+        )
+    }
+}
+
+fn mark_publish_early_error(
+    error: anyhow::Error,
+    format: &str,
+    classification: (&'static str, &'static str, ActionKind),
+) -> anyhow::Error {
+    mark_publish_early_error_with_next_action(
+        error,
+        format,
+        classification,
+        "resolve the reported failure before deciding whether to run publish again",
+    )
+}
+
+fn still_unknown_evidence(state_dir: &Path, reconciliation_written: bool) -> Vec<String> {
+    let events_path = shipper_core::state::events::events_path(state_dir);
+    let mut paths = vec![
+        state_dir.join(shipper_core::state::execution_state::STATE_FILE),
+        events_path,
+    ];
+    if reconciliation_written {
+        paths.push(shipper_core::state::execution_state::reconciliation_path(
+            state_dir,
+        ));
+    }
+    paths
+        .into_iter()
+        .filter(|path| path.exists())
+        .map(|path| path.display().to_string())
+        .collect()
+}
+
+fn mark_recoverable_publish_stop(
+    error: anyhow::Error,
+    format: &str,
+    evidence_state_dir: &Path,
+    evidence_consistent: bool,
+) -> anyhow::Error {
+    let reconciliation_written =
+        shipper_core::state::execution_state::reconciliation_path(evidence_state_dir).is_file();
+    let evidence = still_unknown_evidence(evidence_state_dir, reconciliation_written);
+    let error = error.context(if evidence_consistent {
+        "publish stopped after registry truth proved the package absent and the retry budget was exhausted; retained evidence authorizes a controlled resume"
+    } else {
+        "publish stopped after registry truth proved the package absent, but retained recovery evidence is missing or inconsistent; recovery is not authorized"
+    });
+    let rendered_error = shipper_output_sanitizer::redact_sensitive(&format_error(&error))
+        .trim_end()
+        .to_string();
+    PublishEarlyError {
+        format: format.to_string(),
+        category: "recoverable_stop",
+        summary: "registry truth confirmed NotPublished after the retry budget was exhausted",
+        rendered_error,
+        safe_to_rerun: PublishEarlySafeRerun {
+            value: Some(false),
+            reason: if evidence_consistent {
+                "do not rerun publish; retained evidence authorizes controlled resume"
+            } else {
+                "retained recovery evidence is missing or inconsistent, so recovery safety is not proven"
+            },
+        },
+        next_action: OperatorAction::posture(
+            if evidence_consistent {
+                ActionKind::Resume
+            } else {
+                ActionKind::InspectEvents
+            },
+            if evidence_consistent {
+                "resume only with the same plan, registry, workspace, and state directory"
+            } else {
+                "inspect retained events, state, and reconciliation evidence; do not resume while evidence is missing or inconsistent"
+            },
+        ),
+        evidence,
+    }
+    .into()
+}
+
+fn mark_publish_engine_error(
+    error: anyhow::Error,
+    format: &str,
+    configured_state_dir: &Path,
+    evidence_state_dir: &Path,
+) -> anyhow::Error {
+    let Some(stop) = engine::classify_publish_stop(&error) else {
+        let classification = classify_publish_early_error(&error);
+        return mark_publish_early_error(
+            error.context(publish_failure_hint(configured_state_dir)),
+            format,
+            classification,
+        );
+    };
+    match stop {
+        engine::PublishStopClassification::StillUnknown {
+            reconciliation_written,
+        } => {
+            let evidence = still_unknown_evidence(evidence_state_dir, reconciliation_written);
+            let error = error.context(
+                "publish stopped because registry truth remains unknown; inspect the retained reconciliation evidence before any retry",
+            );
+            let rendered_error = shipper_output_sanitizer::redact_sensitive(&format_error(&error))
+                .trim_end()
+                .to_string();
+            PublishEarlyError {
+                format: format.to_string(),
+                category: "ambiguous",
+                summary: "registry truth remains unknown after an ambiguous publish attempt",
+                rendered_error,
+                safe_to_rerun: PublishEarlySafeRerun {
+                    value: Some(false),
+                    reason: "persisted reconciliation evidence does not prove that another upload is safe",
+                },
+                next_action: OperatorAction::posture(
+                    ActionKind::Reconcile,
+                    "inspect the retained reconciliation and event evidence before any retry",
+                ),
+                evidence,
+            }
+            .into()
+        }
+        engine::PublishStopClassification::RecoverableNotPublished {
+            evidence_consistent,
+        } => mark_recoverable_publish_stop(error, format, evidence_state_dir, evidence_consistent),
+    }
+}
+
+fn mark_resume_engine_error(
+    error: anyhow::Error,
+    format: &str,
+    configured_state_dir: &Path,
+    evidence_state_dir: &Path,
+) -> anyhow::Error {
+    let Some(budget) = engine::classify_resume_retry_budget(&error) else {
+        return error.context(resume_failure_hint(configured_state_dir));
+    };
+    let evidence = still_unknown_evidence(evidence_state_dir, true);
+    let (safe_to_resume, next_action, next_action_reason) = match budget.minimum_max_attempts {
+        Some(minimum) => (
+            true,
+            ActionKind::Resume,
+            format!(
+                "retry ceilings are cumulative; rerun resume with --max-attempts {minimum} or greater while preserving the same plan, registry, workspace, and state directory"
+            ),
+        ),
+        None => (
+            false,
+            ActionKind::StopAndInvestigate,
+            "the cumulative attempt count cannot be increased within the supported range; inspect retained evidence before acting".to_string(),
+        ),
+    };
+    let error = error.context(
+        "resume was rejected before changing retained evidence or dispatching a publish attempt",
+    );
+    let rendered_error = shipper_output_sanitizer::redact_sensitive(&format_error(&error))
+        .trim_end()
+        .to_string();
+    ResumeRetryBudgetError {
+        format: format.to_string(),
+        rendered_error,
+        package: budget.package,
+        current_attempts: budget.current_attempts,
+        requested_max_attempts: budget.requested_max_attempts,
+        minimum_max_attempts: budget.minimum_max_attempts,
+        safe_to_resume: ResumeSafeToResume {
+            value: safe_to_resume,
+            reason: if safe_to_resume {
+                "the rejected command did not consume or change the retained controlled-stop authorization".to_string()
+            } else {
+                "retained evidence is coherent, but no larger supported retry ceiling can authorize another attempt".to_string()
+            },
+        },
+        next_action: OperatorAction::posture(next_action, next_action_reason),
+        evidence,
+    }
+    .into()
+}
+
+fn mark_publish_early_error_with_next_action(
+    error: anyhow::Error,
+    format: &str,
+    classification: (&'static str, &'static str, ActionKind),
+    next_action_reason: &str,
+) -> anyhow::Error {
+    let rendered_error = shipper_output_sanitizer::redact_sensitive(&format_error(&error))
+        .trim_end()
+        .to_string();
+    let (category, summary, action) = classification;
+
+    PublishEarlyError {
+        format: format.to_string(),
+        category,
+        summary,
+        rendered_error,
+        safe_to_rerun: PublishEarlySafeRerun {
+            value: None,
+            reason: "no completed receipt exists to prove a safe rerun",
+        },
+        next_action: OperatorAction::posture(action, next_action_reason),
+        evidence: Vec::new(),
+    }
+    .into()
+}
+
 /// Render a top-level error to stderr via [`format_error`].
 pub fn report_error(error: &anyhow::Error) {
+    if let Some(resume_error) = error.downcast_ref::<ResumeRetryBudgetError>() {
+        if resume_error.format == "json" {
+            let report = ResumeRetryBudgetReport {
+                schema_version: "shipper.resume.error.v1",
+                command: "resume",
+                status: "failed",
+                category: "retry_budget_exhausted",
+                summary: "the requested cumulative retry ceiling cannot permit another attempt",
+                package: &resume_error.package,
+                current_attempts: resume_error.current_attempts,
+                requested_max_attempts: resume_error.requested_max_attempts,
+                minimum_max_attempts: resume_error.minimum_max_attempts,
+                safe_to_resume: ResumeSafeToResume {
+                    value: resume_error.safe_to_resume.value,
+                    reason: resume_error.safe_to_resume.reason.clone(),
+                },
+                next_action: &resume_error.next_action,
+                evidence: resume_error.evidence.clone(),
+            };
+            match serde_json::to_string_pretty(&report) {
+                Ok(json) => eprintln!("{json}"),
+                Err(_) => eprintln!("{}", resume_error.rendered_error),
+            }
+            return;
+        }
+
+        eprintln!("{}", resume_error.rendered_error);
+        eprintln!();
+        eprintln!(
+            "Result: failed — the requested cumulative retry ceiling cannot permit another attempt"
+        );
+        let safe_to_resume = if resume_error.safe_to_resume.value {
+            "yes"
+        } else {
+            "no"
+        };
+        eprintln!(
+            "Safe to resume: {safe_to_resume} — {}",
+            resume_error.safe_to_resume.reason
+        );
+        eprintln!("Next: {}", resume_error.next_action.reason);
+        eprintln!("Evidence: {}", resume_error.evidence.join(", "));
+        return;
+    }
+    if let Some(publish_error) = error.downcast_ref::<PublishEarlyError>() {
+        if publish_error.format == "json" {
+            let report = PublishEarlyErrorReport {
+                schema_version: "shipper.publish.error.v1",
+                command: "publish",
+                status: "failed",
+                category: publish_error.category,
+                summary: publish_error.summary,
+                safe_to_rerun: PublishEarlySafeRerun {
+                    value: publish_error.safe_to_rerun.value,
+                    reason: publish_error.safe_to_rerun.reason,
+                },
+                next_action: &publish_error.next_action,
+                evidence: publish_error.evidence.clone(),
+            };
+            match serde_json::to_string_pretty(&report) {
+                Ok(json) => eprintln!("{json}"),
+                Err(_) => eprintln!("{}", publish_error.rendered_error),
+            }
+            return;
+        }
+
+        eprintln!("{}", publish_error.rendered_error);
+        eprintln!();
+        eprintln!("Result: failed — {}", publish_error.summary);
+        let safe_to_rerun = match publish_error.safe_to_rerun.value {
+            Some(true) => "yes",
+            Some(false) => "no",
+            None => "unknown",
+        };
+        eprintln!(
+            "Safe to rerun: {safe_to_rerun} — {}",
+            publish_error.safe_to_rerun.reason
+        );
+        eprintln!("Next: {}", publish_error.next_action.reason);
+        if publish_error.evidence.is_empty() {
+            eprintln!("Evidence: none from a completed receipt");
+        } else {
+            eprintln!("Evidence: {}", publish_error.evidence.join(", "));
+        }
+        return;
+    }
     eprintln!("{}", format_error(error));
 }
 
@@ -987,6 +1449,10 @@ pub fn run() -> Result<std::process::ExitCode> {
     if cli.version {
         print_version(cli.verbose);
         return Ok(std::process::ExitCode::SUCCESS);
+    }
+
+    if let Err(error) = validate_cli_combinations(&cli) {
+        error.exit();
     }
 
     // Handle Config commands early (they don't need workspace plan)
@@ -1051,31 +1517,33 @@ pub fn run() -> Result<std::process::ExitCode> {
             )
         }
         Err(err) => {
-            return Err(err).with_context(|| {
-                plan_failure_hint(&spec.manifest_path, &cli.packages, command_name)
-            });
+            let classification = classify_publish_early_error(&err);
+            let error = err.context(plan_failure_hint(
+                &spec.manifest_path,
+                &cli.packages,
+                command_name,
+            ));
+            if matches!(cli.cmd.as_ref(), Some(Commands::Publish)) {
+                return Err(mark_publish_early_error(error, &cli.format, classification));
+            }
+            return Err(error);
         }
     };
 
     // Load configuration file
-    let diagnostic_command = matches!(cli.cmd.as_ref(), Some(Commands::Doctor));
     let config = if let Some(ref config_path) = cli.config {
-        // Use custom config file specified via --config
-        let load = if diagnostic_command {
-            ShipperConfig::load_from_file_for_diagnostics(config_path)
-        } else {
-            ShipperConfig::load_from_file(config_path)
-        };
+        // Parse first so the single validation boundary below can apply CLI
+        // trust flags such as --allow-loopback. The parser still rejects file,
+        // TOML, and schema errors before returning a configuration.
+        let load = ShipperConfig::load_from_file_without_value_validation(config_path);
         Some(
             load.with_context(|| format!("Failed to load config from: {}", config_path.display()))?,
         )
     } else {
-        // Try to load .shipper.toml from workspace root
-        let load = if diagnostic_command {
-            ShipperConfig::load_from_workspace_for_diagnostics(&planned.workspace_root)
-        } else {
-            ShipperConfig::load_from_workspace(&planned.workspace_root)
-        };
+        // Try to parse .shipper.toml from the workspace root. Value and
+        // destination validation belongs to the flag-aware boundary below.
+        let load =
+            ShipperConfig::load_from_workspace_without_value_validation(&planned.workspace_root);
         load.with_context(|| "Failed to load config from workspace")?
     };
 
@@ -1201,7 +1669,9 @@ pub fn run() -> Result<std::process::ExitCode> {
     let config_for_merge = config.clone().unwrap_or_default();
     let opts: RuntimeOptions = config_for_merge.build_runtime_options(cli_overrides);
 
-    let mut reporter = CliReporter::new(cli.quiet);
+    let structured_publish =
+        matches!(cli.cmd.as_ref(), Some(Commands::Publish)) && cli.format == "json";
+    let mut reporter = CliReporter::new(cli.quiet || structured_publish, structured_publish);
 
     match cli.cmd.expect("subcommand checked above") {
         Commands::Plan => {
@@ -1226,18 +1696,26 @@ pub fn run() -> Result<std::process::ExitCode> {
                 opts.registries.clone()
             };
 
+            if let Err(error) = engine::prevalidate_publish_registry_tokens(&planned, &opts) {
+                let classification = classify_publish_early_error(&error);
+                let error = error.context(
+                    "publish token prevalidation failed before execution; configure a token for every selected registry, then rerun publish",
+                );
+                return Err(mark_publish_early_error_with_next_action(
+                    error,
+                    &cli.format,
+                    classification,
+                    "configure a token for every selected registry, then rerun publish",
+                ));
+            }
+
             let mut worst_outcome: Option<ExecutionResult> = None;
             for reg in target_registries {
-                if opts.registries.len() > 1 {
-                    if cli.format == "json" {
-                        eprintln!();
-                        eprintln!("Publishing to registry: {} ({})", reg.name, reg.api_base);
-                    } else {
-                        println!(
-                            "\n🚀 Publishing to registry: {} ({})",
-                            reg.name, reg.api_base
-                        );
-                    }
+                if opts.registries.len() > 1 && !structured_publish {
+                    println!(
+                        "\n🚀 Publishing to registry: {} ({})",
+                        reg.name, reg.api_base
+                    );
                 }
 
                 let mut current_planned = planned.clone();
@@ -1250,7 +1728,8 @@ pub fn run() -> Result<std::process::ExitCode> {
                 }
 
                 let total_packages = current_planned.plan.packages.len();
-                let mut progress = ProgressReporter::new(total_packages, cli.quiet);
+                let mut progress =
+                    ProgressReporter::new(total_packages, cli.quiet || structured_publish);
                 let package_positions: BTreeMap<String, usize> = current_planned
                     .plan
                     .packages
@@ -1270,8 +1749,23 @@ pub fn run() -> Result<std::process::ExitCode> {
                 // countdown via ProgressReporter::retry_countdown.
                 reporter.install_progress(progress, package_positions);
 
-                let receipt = engine::run_publish(&current_planned, &current_opts, &mut reporter)
-                    .with_context(|| publish_failure_hint(&current_opts.state_dir))?;
+                let evidence_state_dir = publish_evidence_state_dir(
+                    &current_planned.workspace_root,
+                    &current_opts.state_dir,
+                );
+
+                let receipt =
+                    match engine::run_publish(&current_planned, &current_opts, &mut reporter) {
+                        Ok(receipt) => receipt,
+                        Err(error) => {
+                            return Err(mark_publish_engine_error(
+                                error,
+                                &cli.format,
+                                &current_opts.state_dir,
+                                &evidence_state_dir,
+                            ));
+                        }
+                    };
 
                 if let Some(progress) = reporter.take_progress() {
                     progress.finish();
@@ -1360,8 +1854,19 @@ pub fn run() -> Result<std::process::ExitCode> {
                 // countdown via ProgressReporter::retry_countdown.
                 reporter.install_progress(progress, package_positions);
 
+                let evidence_state_dir = shipper_core::runtime::execution::resolve_state_dir(
+                    &current_planned.workspace_root,
+                    &current_opts.state_dir,
+                );
                 let receipt = engine::run_resume(&current_planned, &current_opts, &mut reporter)
-                    .with_context(|| resume_failure_hint(&current_opts.state_dir))?;
+                    .map_err(|error| {
+                        mark_resume_engine_error(
+                            error,
+                            &cli.format,
+                            &current_opts.state_dir,
+                            &evidence_state_dir,
+                        )
+                    })?;
 
                 if let Some(progress) = reporter.take_progress() {
                     progress.finish();
@@ -1407,7 +1912,19 @@ pub fn run() -> Result<std::process::ExitCode> {
                 anyhow::bail!("rehearsal did not pass");
             }
         }
-        Commands::Status { watch } => {
+        Commands::Status { watch, durable } => {
+            if durable {
+                let state_dir = absolute_state_dir(&planned, &opts);
+                status_durable::run(
+                    &planned.plan,
+                    &planned.workspace_root,
+                    &opts.state_dir,
+                    &state_dir,
+                    &opts.encryption,
+                    &cli.format,
+                )?;
+                return Ok(std::process::ExitCode::SUCCESS);
+            }
             let target_registries = if opts.registries.is_empty() {
                 vec![planned.plan.registry.clone()]
             } else {
@@ -1425,20 +1942,23 @@ pub fn run() -> Result<std::process::ExitCode> {
             }
 
             let mut registry_reports = Vec::new();
+            let mut report_plan_id = None;
             for reg in target_registries {
-                let mut current_planned = planned.clone();
-                current_planned.plan.registry = reg;
+                let current_planned = build_status_plan(&spec, reg)?;
+                report_plan_id.get_or_insert_with(|| current_planned.plan.plan_id.clone());
                 registry_reports.push(build_status_registry_report(
                     &current_planned,
                     &mut reporter,
                     &opts,
                 )?);
             }
+            let outcome = build_status_operator_outcome(&registry_reports);
             let report = StatusReport {
                 schema_version: "shipper.status.v1",
-                plan_id: planned.plan.plan_id.clone(),
+                plan_id: report_plan_id.context("status requires at least one target registry")?,
                 workspace_root: planned.workspace_root.display().to_string(),
                 registries: registry_reports,
+                outcome,
             };
             write_status_report(&report, &cli.format)?;
         }
@@ -2113,7 +2633,7 @@ fn preflight_failure_hint(state_dir: &Path) -> String {
     with_common_blockers(
         hint,
         &[
-            "missing token/auth: run `cargo login <token>` or configure Trusted Publishing",
+            "missing token/auth: run `shipper doctor` for guidance scoped to the selected registry before changing credentials",
             "dirty git: commit or stash changes, or pass `--allow-dirty` only for intentional rehearsal",
             "version already exists: run `shipper status`, then bump or skip the crate version",
             "ownership failure: confirm the token can publish with `cargo owner --list <crate>`",
@@ -2359,7 +2879,9 @@ fn print_first_run_guidance() {
     eprintln!("  shipper doctor      check auth, git, tooling, and registry reachability");
     eprintln!("  shipper plan        preview the deterministic publish order");
     eprintln!("  shipper preflight   prove the release can finish before anything uploads");
-    eprintln!("  shipper publish     execute the plan — rerun (or `shipper resume`) to continue");
+    eprintln!(
+        "  shipper publish     execute the plan — after a stop, inspect retained evidence and follow its typed next action"
+    );
     eprintln!();
     eprintln!("Usage: shipper [OPTIONS] <COMMAND>");
     eprintln!();
@@ -2438,6 +2960,7 @@ struct PlanArtifactReport {
 #[derive(Debug, Serialize)]
 struct PreflightJsonReport<'a> {
     schema_version: &'static str,
+    outcome: PreflightOutcomeReport,
     #[serde(flatten)]
     report: &'a PreflightReport,
     proofs: Vec<PreflightEvidenceItem>,
@@ -2447,6 +2970,13 @@ struct PreflightJsonReport<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     registry_profile: Option<PreflightRegistryProfileReport>,
     artifacts: Vec<PreflightArtifactReport>,
+}
+
+#[derive(Debug, Serialize)]
+struct PreflightOutcomeReport {
+    status: Finishability,
+    publication_performed: bool,
+    next_action: OperatorAction,
 }
 
 #[derive(Debug, Serialize)]
@@ -2613,8 +3143,86 @@ fn plan_outcome_summary(outcome: &PlanOutcomeReport) -> &'static str {
 }
 
 #[cfg(test)]
-mod plan_outcome_tests {
+mod operator_outcome_tests {
     use super::*;
+
+    fn status_registry(exists: &[bool]) -> StatusRegistryReport {
+        StatusRegistryReport {
+            name: "test-registry".to_string(),
+            api_base: "https://registry.example.test".to_string(),
+            index_base: None,
+            packages: exists
+                .iter()
+                .enumerate()
+                .map(|(index, exists)| StatusPackageReport {
+                    name: format!("package-{index}"),
+                    version: "1.0.0".to_string(),
+                    status: if *exists { "published" } else { "missing" },
+                    exists: *exists,
+                })
+                .collect(),
+            plan_id: "test-plan".to_string(),
+        }
+    }
+
+    #[test]
+    fn status_outcome_maps_all_registry_observations_without_vacuous_success() -> Result<()> {
+        struct Case {
+            name: &'static str,
+            registries: Vec<StatusRegistryReport>,
+            status: StatusOutcomeStatus,
+            action: ActionKind,
+        }
+
+        let cases = [
+            Case {
+                name: "all published across registries",
+                registries: vec![status_registry(&[true]), status_registry(&[true, true])],
+                status: StatusOutcomeStatus::AllPublished,
+                action: ActionKind::NoneComplete,
+            },
+            Case {
+                name: "mixed across registries",
+                registries: vec![status_registry(&[true]), status_registry(&[false])],
+                status: StatusOutcomeStatus::PartiallyPublished,
+                action: ActionKind::Preflight,
+            },
+            Case {
+                name: "all missing across registries",
+                registries: vec![status_registry(&[false, false]), status_registry(&[false])],
+                status: StatusOutcomeStatus::NotPublished,
+                action: ActionKind::Preflight,
+            },
+            Case {
+                name: "zero observations",
+                registries: vec![status_registry(&[])],
+                status: StatusOutcomeStatus::NoPublishablePackages,
+                action: ActionKind::Plan,
+            },
+        ];
+
+        for case in cases {
+            let outcome = build_status_operator_outcome(&case.registries);
+            anyhow::ensure!(outcome.status == case.status, "{}: status", case.name);
+            anyhow::ensure!(
+                outcome.next_action.kind == case.action,
+                "{}: action",
+                case.name
+            );
+            anyhow::ensure!(
+                outcome.next_action.command.is_empty(),
+                "{}: action must not fabricate a command",
+                case.name
+            );
+            anyhow::ensure!(
+                !outcome.publication_performed,
+                "{}: read-only status cannot claim publication",
+                case.name
+            );
+        }
+
+        Ok(())
+    }
 
     #[test]
     fn publishable_plan_points_to_context_preserving_preflight() {
@@ -2800,9 +3408,9 @@ fn print_detailed_plan(ws: &plan::PlannedWorkspace) {
 }
 
 fn print_preflight(rep: &PreflightReport, format: &str) {
+    let report = build_preflight_json_report(rep);
     match format {
         "json" => {
-            let report = build_preflight_json_report(rep);
             let json = serde_json::to_string_pretty(&report).expect("serialize preflight report");
             println!("{}", json);
         }
@@ -2914,34 +3522,181 @@ fn print_preflight(rep: &PreflightReport, format: &str) {
 
             print_preflight_proof_explanation(rep, total, dry_run_passed);
 
-            // What to do next guidance
-            println!("What to do next:");
-            println!("-----------------");
-            match rep.finishability {
-                Finishability::Proven => {
-                    println!(
-                        "\x1b[32m✓ All local preflight checks passed. Next: shipper publish\x1b[0m"
-                    );
+            println!("Result: {}", preflight_outcome_summary(&report.outcome));
+            match report.outcome.next_action.command_line() {
+                Some(command) => {
+                    println!("Next: {command} — {}", report.outcome.next_action.reason)
                 }
-                Finishability::NotProven => {
-                    println!(
-                        "\x1b[33m⚠ Preflight did not prove every release prerequisite.\x1b[0m"
-                    );
-                    println!(
-                        "  - configure registry auth or Trusted Publishing if ownership is unverified"
-                    );
-                    println!("  - rerun `shipper preflight`");
-                    println!(
-                        "  - if you accept the uncertainty, run `shipper publish` with an explicit policy choice"
-                    );
-                }
-                Finishability::Failed => {
-                    println!(
-                        "\x1b[31m✗ Preflight failed. Fix the failed checks above, then rerun `shipper preflight`.\x1b[0m"
-                    );
-                }
+                None => println!("Next: {}", report.outcome.next_action.reason),
             }
         }
+    }
+}
+
+fn build_preflight_outcome(rep: &PreflightReport) -> PreflightOutcomeReport {
+    let next_action = match rep.finishability {
+        Finishability::Proven => OperatorAction::posture(
+            ActionKind::Publish,
+            "publish or rehearse with the same manifest, package, configuration, and registry selection",
+        )
+        .with_confirmation(),
+        Finishability::NotProven if all_packages_are_first_publish_candidates(rep) => {
+            OperatorAction::posture(
+                ActionKind::Publish,
+                "ownership cannot be verified before a first publish; review the advisory gaps, then deliberately publish or rehearse with the same selection",
+            )
+            .with_confirmation()
+        }
+        Finishability::NotProven => OperatorAction::posture(
+            ActionKind::InvestigateUnknowns,
+            "inspect the ownership and authentication gaps, correct configuration if needed, then rerun preflight with the same selection",
+        ),
+        Finishability::Failed => OperatorAction::posture(
+            ActionKind::ResolveBlockers,
+            "resolve the failed checks above, then rerun preflight with the same selection",
+        ),
+    };
+
+    PreflightOutcomeReport {
+        status: rep.finishability.clone(),
+        publication_performed: false,
+        next_action,
+    }
+}
+
+fn all_packages_are_first_publish_candidates(rep: &PreflightReport) -> bool {
+    !rep.packages.is_empty()
+        && rep
+            .packages
+            .iter()
+            .all(|package| package.is_new_crate && package.dry_run_passed)
+}
+
+fn preflight_outcome_summary(outcome: &PreflightOutcomeReport) -> &'static str {
+    match outcome.status {
+        Finishability::Proven => {
+            "preflight proved the selected release inputs; no packages were published"
+        }
+        Finishability::NotProven => {
+            "preflight completed with advisory proof gaps; no packages were published"
+        }
+        Finishability::Failed => "preflight found blocking checks; no packages were published",
+    }
+}
+
+#[cfg(test)]
+mod preflight_outcome_tests {
+    use super::*;
+    use anyhow::ensure;
+    use chrono::Utc;
+
+    fn report(
+        finishability: Finishability,
+        token_detected: bool,
+        packages: Vec<PreflightPackage>,
+    ) -> PreflightReport {
+        PreflightReport {
+            plan_id: "plan-test".to_string(),
+            token_detected,
+            finishability,
+            packages,
+            timestamp: Utc::now(),
+            estimated_publish_duration: None,
+            dry_run_output: None,
+        }
+    }
+
+    fn package(
+        name: &str,
+        is_new_crate: bool,
+        ownership_verified: bool,
+        dry_run_passed: bool,
+    ) -> PreflightPackage {
+        PreflightPackage {
+            name: name.to_string(),
+            version: "1.0.0".to_string(),
+            already_published: false,
+            is_new_crate,
+            auth_type: None,
+            ownership_verified,
+            dry_run_passed,
+            dry_run_output: None,
+        }
+    }
+
+    #[test]
+    fn proven_preflight_requires_deliberate_context_preserving_publish() -> Result<()> {
+        let outcome = build_preflight_outcome(&report(
+            Finishability::Proven,
+            true,
+            vec![package("existing", false, true, true)],
+        ));
+
+        ensure!(outcome.status == Finishability::Proven);
+        ensure!(!outcome.publication_performed);
+        ensure!(outcome.next_action.kind == ActionKind::Publish);
+        ensure!(outcome.next_action.command_line().is_none());
+        ensure!(outcome.next_action.requires_confirmation);
+        Ok(())
+    }
+
+    #[test]
+    fn first_publish_ownership_gap_remains_an_advisory_publish_posture() -> Result<()> {
+        let outcome = build_preflight_outcome(&report(
+            Finishability::NotProven,
+            false,
+            vec![package("new-crate", true, false, true)],
+        ));
+
+        ensure!(outcome.next_action.kind == ActionKind::Publish);
+        ensure!(outcome.next_action.command_line().is_none());
+        ensure!(outcome.next_action.requires_confirmation);
+        ensure!(outcome.next_action.reason.contains("first publish"));
+        Ok(())
+    }
+
+    #[test]
+    fn mixed_ownership_gap_does_not_recommend_blind_publish() -> Result<()> {
+        let outcome = build_preflight_outcome(&report(
+            Finishability::NotProven,
+            true,
+            vec![
+                package("new-crate", true, false, true),
+                package("existing", false, true, true),
+            ],
+        ));
+
+        ensure!(outcome.next_action.kind == ActionKind::InvestigateUnknowns);
+        ensure!(outcome.next_action.command_line().is_none());
+        ensure!(!outcome.next_action.requires_confirmation);
+        Ok(())
+    }
+
+    #[test]
+    fn existing_crate_ownership_gap_stays_investigative() -> Result<()> {
+        let outcome = build_preflight_outcome(&report(
+            Finishability::NotProven,
+            true,
+            vec![package("existing", false, false, true)],
+        ));
+
+        ensure!(outcome.next_action.kind == ActionKind::InvestigateUnknowns);
+        ensure!(!outcome.next_action.requires_confirmation);
+        Ok(())
+    }
+
+    #[test]
+    fn failed_preflight_resolves_blockers_without_suggesting_publish() -> Result<()> {
+        let outcome = build_preflight_outcome(&report(
+            Finishability::Failed,
+            false,
+            vec![package("broken", true, false, false)],
+        ));
+
+        ensure!(outcome.next_action.kind == ActionKind::ResolveBlockers);
+        ensure!(outcome.next_action.command_line().is_none());
+        ensure!(!outcome.next_action.requires_confirmation);
+        Ok(())
     }
 }
 
@@ -3058,6 +3813,7 @@ fn build_preflight_json_report(rep: &PreflightReport) -> PreflightJsonReport<'_>
 
     PreflightJsonReport {
         schema_version: "shipper.preflight.v1",
+        outcome: build_preflight_outcome(rep),
         report: rep,
         proofs,
         gaps,
@@ -3222,6 +3978,7 @@ struct PublishJsonReport<'a> {
     command: &'static str,
     execution_result: &'a ExecutionResult,
     safe_to_rerun: bool,
+    outcome: PublishOperatorOutcome,
     registry: String,
     plan_id: &'a str,
     state_dir: String,
@@ -3242,6 +3999,7 @@ struct ResumeJsonReport<'a> {
     command: &'static str,
     execution_result: &'a ExecutionResult,
     safe_to_resume: bool,
+    outcome: ResumeOperatorOutcome,
     registry: String,
     plan_id: &'a str,
     state_dir: String,
@@ -3257,6 +4015,7 @@ struct ResumeJsonReport<'a> {
     receipt: &'a shipper_core::types::Receipt,
 }
 
+#[derive(Default)]
 struct CommandJsonPackageCounts {
     published: usize,
     pending: usize,
@@ -3265,6 +4024,41 @@ struct CommandJsonPackageCounts {
     uploaded: usize,
     skipped: usize,
     next_package: Option<String>,
+    retryable_failures: usize,
+    permanent_failures: usize,
+    ambiguous_failures: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct PublishOperatorOutcome {
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure_class: Option<&'static str>,
+    safe_to_rerun: PublishSafeRerun,
+    next_action: OperatorAction,
+    evidence: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct PublishSafeRerun {
+    value: bool,
+    reason: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ResumeOperatorOutcome {
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure_class: Option<&'static str>,
+    safe_to_resume: ResumeSafeToResume,
+    next_action: OperatorAction,
+    evidence: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ResumeSafeToResume {
+    value: bool,
+    reason: String,
 }
 
 #[derive(Serialize)]
@@ -3312,8 +4106,12 @@ fn print_publish_output(
     state_dir: &Path,
     format: &str,
 ) -> Result<()> {
+    let counts = command_package_counts(receipt);
+    let evidence_state_dir = publish_evidence_state_dir(workspace_root, state_dir);
+    let outcome =
+        build_publish_operator_outcome(&receipt.execution_result, &counts, &evidence_state_dir);
     if format == "json" {
-        let report = build_publish_json_report(receipt, state_dir)?;
+        let report = build_publish_json_report(receipt, state_dir, &evidence_state_dir, outcome)?;
         let json = serde_json::to_string_pretty(&report)
             .context("failed to serialize publish JSON envelope")?;
         println!("{}", json);
@@ -3321,7 +4119,16 @@ fn print_publish_output(
     }
 
     print_receipt(receipt, workspace_root, state_dir, format);
+    print_publish_operator_outcome(&outcome);
     Ok(())
+}
+
+fn publish_evidence_state_dir(workspace_root: &Path, state_dir: &Path) -> PathBuf {
+    if state_dir.is_absolute() {
+        state_dir.to_path_buf()
+    } else {
+        workspace_root.join(state_dir)
+    }
 }
 
 fn print_resume_output(
@@ -3330,8 +4137,12 @@ fn print_resume_output(
     state_dir: &Path,
     format: &str,
 ) -> Result<()> {
+    let counts = command_package_counts(receipt);
+    let evidence_state_dir = publish_evidence_state_dir(workspace_root, state_dir);
+    let outcome =
+        build_resume_operator_outcome(&receipt.execution_result, &counts, &evidence_state_dir);
     if format == "json" {
-        let report = build_resume_json_report(receipt, state_dir)?;
+        let report = build_resume_json_report(receipt, state_dir, &evidence_state_dir, outcome)?;
         let json = serde_json::to_string_pretty(&report)
             .context("failed to serialize resume JSON envelope")?;
         println!("{}", json);
@@ -3339,24 +4150,27 @@ fn print_resume_output(
     }
 
     print_receipt(receipt, workspace_root, state_dir, format);
+    print_resume_operator_outcome(&outcome);
     Ok(())
 }
 
 fn build_publish_json_report<'a>(
     receipt: &'a shipper_core::types::Receipt,
     state_dir: &Path,
+    evidence_state_dir: &Path,
+    outcome: PublishOperatorOutcome,
 ) -> Result<PublishJsonReport<'a>> {
-    let reconciled = reconciled_packages(state_dir)?;
+    let reconciled = reconciled_packages(evidence_state_dir)?;
     let packages = command_package_reports(receipt, &reconciled);
     let counts = command_package_counts(receipt);
-    let safe_to_rerun =
-        counts.pending == 0 && counts.failed == 0 && counts.ambiguous == 0 && counts.uploaded == 0;
+    let safe_to_rerun = outcome.safe_to_rerun.value;
 
     Ok(PublishJsonReport {
         schema_version: "shipper.publish.v1",
         command: "publish",
         execution_result: &receipt.execution_result,
         safe_to_rerun,
+        outcome,
         registry: receipt.registry.name.clone(),
         plan_id: &receipt.plan_id,
         state_dir: state_dir.display().to_string(),
@@ -3367,7 +4181,7 @@ fn build_publish_json_report<'a>(
         uploaded: counts.uploaded,
         skipped: counts.skipped,
         packages,
-        artifacts: command_json_artifacts(state_dir),
+        artifacts: command_json_artifacts_with_lookup(state_dir, evidence_state_dir),
         receipt,
     })
 }
@@ -3375,17 +4189,20 @@ fn build_publish_json_report<'a>(
 fn build_resume_json_report<'a>(
     receipt: &'a shipper_core::types::Receipt,
     state_dir: &Path,
+    evidence_state_dir: &Path,
+    outcome: ResumeOperatorOutcome,
 ) -> Result<ResumeJsonReport<'a>> {
-    let reconciled = reconciled_packages(state_dir)?;
+    let reconciled = reconciled_packages(evidence_state_dir)?;
     let packages = command_package_reports(receipt, &reconciled);
     let counts = command_package_counts(receipt);
-    let safe_to_resume = counts.failed == 0 && counts.ambiguous == 0;
+    let safe_to_resume = legacy_safe_to_resume(&counts);
 
     Ok(ResumeJsonReport {
         schema_version: "shipper.resume.v1",
         command: "resume",
         execution_result: &receipt.execution_result,
         safe_to_resume,
+        outcome,
         registry: receipt.registry.name.clone(),
         plan_id: &receipt.plan_id,
         state_dir: state_dir.display().to_string(),
@@ -3397,9 +4214,13 @@ fn build_resume_json_report<'a>(
         skipped: counts.skipped,
         next_package: counts.next_package,
         packages,
-        artifacts: command_json_artifacts(state_dir),
+        artifacts: command_json_artifacts_with_lookup(state_dir, evidence_state_dir),
         receipt,
     })
+}
+
+fn legacy_safe_to_resume(counts: &CommandJsonPackageCounts) -> bool {
+    counts.failed == 0 && counts.ambiguous == 0
 }
 
 fn command_package_counts(receipt: &shipper_core::types::Receipt) -> CommandJsonPackageCounts {
@@ -3411,6 +4232,9 @@ fn command_package_counts(receipt: &shipper_core::types::Receipt) -> CommandJson
         uploaded: 0,
         skipped: 0,
         next_package: None,
+        retryable_failures: 0,
+        permanent_failures: 0,
+        ambiguous_failures: 0,
     };
 
     for package in &receipt.packages {
@@ -3433,8 +4257,13 @@ fn command_package_counts(receipt: &shipper_core::types::Receipt) -> CommandJson
             PackageState::Skipped { .. } => {
                 counts.skipped += 1;
             }
-            PackageState::Failed { .. } => {
+            PackageState::Failed { class, .. } => {
                 counts.failed += 1;
+                match class {
+                    ErrorClass::Retryable => counts.retryable_failures += 1,
+                    ErrorClass::Permanent => counts.permanent_failures += 1,
+                    ErrorClass::Ambiguous => counts.ambiguous_failures += 1,
+                }
                 counts
                     .next_package
                     .get_or_insert_with(|| package.name.clone());
@@ -3449,6 +4278,242 @@ fn command_package_counts(receipt: &shipper_core::types::Receipt) -> CommandJson
     }
 
     counts
+}
+
+fn build_publish_operator_outcome(
+    result: &ExecutionResult,
+    counts: &CommandJsonPackageCounts,
+    state_dir: &Path,
+) -> PublishOperatorOutcome {
+    let safe_to_rerun =
+        counts.pending == 0 && counts.failed == 0 && counts.ambiguous == 0 && counts.uploaded == 0;
+    let evidence = publish_outcome_evidence(state_dir);
+
+    let (failure_class, next_action, reason) = if counts.ambiguous > 0
+        || counts.ambiguous_failures > 0
+    {
+        (
+            Some("ambiguous"),
+            OperatorAction::posture(
+                ActionKind::Reconcile,
+                "registry truth remains unknown; inspect reconciliation and event evidence before any retry",
+            ),
+            "registry truth remains unknown for at least one package",
+        )
+    } else if counts.uploaded > 0 {
+        (
+            Some("ambiguous"),
+            OperatorAction::posture(
+                ActionKind::WaitForRegistry,
+                "an uploaded package has not reached verified registry visibility; inspect events and wait for registry truth",
+            ),
+            "at least one upload has not reached a verified terminal state",
+        )
+    } else if counts.permanent_failures > 0 {
+        (
+            Some("permanent"),
+            OperatorAction::posture(
+                ActionKind::ResolveBlockers,
+                "resolve the permanent publish failure recorded in the receipt before continuing",
+            ),
+            "a permanent failure must be resolved before more publication work",
+        )
+    } else if counts.retryable_failures > 0 || counts.pending > 0 {
+        (
+            counts.retryable_failures.gt(&0).then_some("retryable"),
+            OperatorAction::posture(
+                ActionKind::Resume,
+                format!(
+                    "resume from the durable state at {} using the same workspace, manifest, configuration, and registry selection",
+                    state_dir.display()
+                ),
+            ),
+            "unfinished work must continue through the durable resume path",
+        )
+    } else if matches!(result, ExecutionResult::Success) {
+        (
+            None,
+            OperatorAction::posture(
+                ActionKind::NoneComplete,
+                "publication is complete; retain the receipt and event evidence",
+            ),
+            "all packages reached a successful terminal state",
+        )
+    } else {
+        (
+            None,
+            OperatorAction::posture(
+                ActionKind::StopAndInvestigate,
+                "the aggregate result and package states disagree; inspect the retained evidence",
+            ),
+            "the completed receipt does not prove a safe rerun",
+        )
+    };
+
+    PublishOperatorOutcome {
+        status: execution_result_name(result),
+        failure_class,
+        safe_to_rerun: PublishSafeRerun {
+            value: safe_to_rerun,
+            reason: reason.to_string(),
+        },
+        next_action,
+        evidence,
+    }
+}
+
+fn build_resume_operator_outcome(
+    result: &ExecutionResult,
+    counts: &CommandJsonPackageCounts,
+    state_dir: &Path,
+) -> ResumeOperatorOutcome {
+    let evidence = publish_outcome_evidence(state_dir);
+
+    let (failure_class, safe_to_resume, next_action, reason) = if counts.ambiguous > 0
+        || counts.ambiguous_failures > 0
+    {
+        (
+            Some("ambiguous"),
+            false,
+            OperatorAction::posture(
+                ActionKind::Reconcile,
+                "registry truth remains unknown; inspect reconciliation and event evidence before resuming",
+            ),
+            "registry truth remains unknown for at least one package",
+        )
+    } else if counts.uploaded > 0 {
+        (
+            Some("ambiguous"),
+            false,
+            OperatorAction::posture(
+                ActionKind::WaitForRegistry,
+                "an uploaded package has not reached verified registry visibility; inspect events and wait for registry truth",
+            ),
+            "at least one upload has not reached a verified terminal state",
+        )
+    } else if counts.permanent_failures > 0 {
+        (
+            Some("permanent"),
+            false,
+            OperatorAction::posture(
+                ActionKind::ResolveBlockers,
+                "resolve the permanent failure recorded in the receipt before resuming",
+            ),
+            "a permanent failure must be resolved before resume is safe",
+        )
+    } else if counts.retryable_failures > 0 || counts.pending > 0 {
+        (
+            counts.retryable_failures.gt(&0).then_some("retryable"),
+            true,
+            OperatorAction::posture(
+                ActionKind::Resume,
+                format!(
+                    "resume from the durable state at {} using the same workspace, manifest, configuration, and registry selection",
+                    state_dir.display()
+                ),
+            ),
+            "durable state identifies unfinished work that can continue through resume",
+        )
+    } else if matches!(result, ExecutionResult::Success) {
+        (
+            None,
+            true,
+            OperatorAction::posture(
+                ActionKind::NoneComplete,
+                "resume completed the publish run; retain the receipt and event evidence",
+            ),
+            "all packages reached a successful terminal state",
+        )
+    } else {
+        (
+            None,
+            false,
+            OperatorAction::posture(
+                ActionKind::StopAndInvestigate,
+                "the aggregate result and package states disagree; inspect the retained evidence",
+            ),
+            "the completed receipt does not prove that resume is safe",
+        )
+    };
+
+    ResumeOperatorOutcome {
+        status: execution_result_name(result),
+        failure_class,
+        safe_to_resume: ResumeSafeToResume {
+            value: safe_to_resume,
+            reason: reason.to_string(),
+        },
+        next_action,
+        evidence,
+    }
+}
+
+fn execution_result_name(result: &ExecutionResult) -> &'static str {
+    match result {
+        ExecutionResult::Success => "success",
+        ExecutionResult::PartialFailure => "partial_failure",
+        ExecutionResult::CompleteFailure => "complete_failure",
+    }
+}
+
+fn publish_outcome_evidence(state_dir: &Path) -> Vec<String> {
+    let mut evidence = vec![
+        state_dir
+            .join(shipper_core::state::execution_state::STATE_FILE)
+            .display()
+            .to_string(),
+        state_dir
+            .join(shipper_core::state::events::EVENTS_FILE)
+            .display()
+            .to_string(),
+        state_dir
+            .join(shipper_core::state::execution_state::RECEIPT_FILE)
+            .display()
+            .to_string(),
+    ];
+    let reconciliation = state_dir.join(shipper_core::state::execution_state::RECONCILIATION_FILE);
+    if reconciliation.exists() {
+        evidence.push(reconciliation.display().to_string());
+    }
+    evidence
+}
+
+fn print_publish_operator_outcome(outcome: &PublishOperatorOutcome) {
+    println!();
+    println!("Result: {}", outcome.status.replace('_', " "));
+    println!(
+        "Safe to rerun: {} — {}",
+        if outcome.safe_to_rerun.value {
+            "yes"
+        } else {
+            "no"
+        },
+        outcome.safe_to_rerun.reason
+    );
+    match outcome.next_action.command_line() {
+        Some(command) => println!("Next: {command} — {}", outcome.next_action.reason),
+        None => println!("Next: {}", outcome.next_action.reason),
+    }
+    println!("Evidence: {}", outcome.evidence.join(", "));
+}
+
+fn print_resume_operator_outcome(outcome: &ResumeOperatorOutcome) {
+    println!();
+    println!("Result: {}", outcome.status.replace('_', " "));
+    println!(
+        "Safe to resume: {} — {}",
+        if outcome.safe_to_resume.value {
+            "yes"
+        } else {
+            "no"
+        },
+        outcome.safe_to_resume.reason
+    );
+    match outcome.next_action.command_line() {
+        Some(command) => println!("Next: {command} — {}", outcome.next_action.reason),
+        None => println!("Next: {}", outcome.next_action.reason),
+    }
+    println!("Evidence: {}", outcome.evidence.join(", "));
 }
 
 fn command_package_reports(
@@ -3468,20 +4533,33 @@ fn command_package_reports(
         .collect()
 }
 
-fn command_json_artifacts(state_dir: &Path) -> CommandJsonArtifacts {
+fn command_json_artifacts_with_lookup(
+    display_state_dir: &Path,
+    lookup_state_dir: &Path,
+) -> CommandJsonArtifacts {
     CommandJsonArtifacts {
-        state: json_artifact(state_dir.join(shipper_core::state::execution_state::STATE_FILE)),
-        events: json_artifact(state_dir.join(shipper_core::state::events::EVENTS_FILE)),
-        receipt: json_artifact(state_dir.join(shipper_core::state::execution_state::RECEIPT_FILE)),
-        reconciliation: json_artifact(
-            state_dir.join(shipper_core::state::execution_state::RECONCILIATION_FILE),
+        state: json_artifact_with_lookup(
+            display_state_dir.join(shipper_core::state::execution_state::STATE_FILE),
+            lookup_state_dir.join(shipper_core::state::execution_state::STATE_FILE),
+        ),
+        events: json_artifact_with_lookup(
+            display_state_dir.join(shipper_core::state::events::EVENTS_FILE),
+            lookup_state_dir.join(shipper_core::state::events::EVENTS_FILE),
+        ),
+        receipt: json_artifact_with_lookup(
+            display_state_dir.join(shipper_core::state::execution_state::RECEIPT_FILE),
+            lookup_state_dir.join(shipper_core::state::execution_state::RECEIPT_FILE),
+        ),
+        reconciliation: json_artifact_with_lookup(
+            display_state_dir.join(shipper_core::state::execution_state::RECONCILIATION_FILE),
+            lookup_state_dir.join(shipper_core::state::execution_state::RECONCILIATION_FILE),
         ),
     }
 }
 
-fn json_artifact(path: PathBuf) -> CommandJsonArtifact {
+fn json_artifact_with_lookup(path: PathBuf, lookup_path: PathBuf) -> CommandJsonArtifact {
     CommandJsonArtifact {
-        exists: path.exists(),
+        exists: lookup_path.exists(),
         path: path.display().to_string(),
     }
 }
@@ -3892,6 +4970,34 @@ struct StatusReport {
     plan_id: String,
     workspace_root: String,
     registries: Vec<StatusRegistryReport>,
+    outcome: StatusOperatorOutcome,
+}
+
+#[derive(Debug, Serialize)]
+struct StatusOperatorOutcome {
+    status: StatusOutcomeStatus,
+    publication_performed: bool,
+    next_action: OperatorAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum StatusOutcomeStatus {
+    AllPublished,
+    PartiallyPublished,
+    NotPublished,
+    NoPublishablePackages,
+}
+
+impl StatusOutcomeStatus {
+    fn human_label(self) -> &'static str {
+        match self {
+            Self::AllPublished => "all published",
+            Self::PartiallyPublished => "partially published",
+            Self::NotPublished => "not published",
+            Self::NoPublishablePackages => "no publishable packages",
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -3901,6 +5007,7 @@ struct StatusRegistryReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     index_base: Option<String>,
     packages: Vec<StatusPackageReport>,
+    plan_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -3909,6 +5016,17 @@ struct StatusPackageReport {
     version: String,
     status: &'static str,
     exists: bool,
+}
+
+fn build_status_plan(spec: &ReleaseSpec, registry: Registry) -> Result<plan::PlannedWorkspace> {
+    let registry_name = registry.name.clone();
+    let status_spec = ReleaseSpec {
+        manifest_path: spec.manifest_path.clone(),
+        registry,
+        selected_packages: spec.selected_packages.clone(),
+    };
+    plan::build_plan(&status_spec)
+        .with_context(|| format!("failed to build status plan for registry '{registry_name}'"))
 }
 
 fn build_status_registry_report(
@@ -3940,7 +5058,60 @@ fn build_status_registry_report(
         api_base: ws.plan.registry.api_base.clone(),
         index_base: ws.plan.registry.index_base.clone(),
         packages,
+        plan_id: ws.plan.plan_id.clone(),
     })
+}
+
+fn build_status_operator_outcome(registries: &[StatusRegistryReport]) -> StatusOperatorOutcome {
+    let observed = registries
+        .iter()
+        .map(|registry| registry.packages.len())
+        .sum::<usize>();
+    let published = registries
+        .iter()
+        .flat_map(|registry| &registry.packages)
+        .filter(|package| package.exists)
+        .count();
+
+    let (status, next_action) = if observed == 0 {
+        (
+            StatusOutcomeStatus::NoPublishablePackages,
+            OperatorAction::posture(
+                ActionKind::Plan,
+                "review the plan and package selection; status observed no publishable packages",
+            ),
+        )
+    } else if published == observed {
+        (
+            StatusOutcomeStatus::AllPublished,
+            OperatorAction::posture(
+                ActionKind::NoneComplete,
+                "every registry-eligible selected package version is visible in its effective target registry or registries",
+            ),
+        )
+    } else if published == 0 {
+        (
+            StatusOutcomeStatus::NotPublished,
+            OperatorAction::posture(
+                ActionKind::Preflight,
+                "run preflight in the same workspace and registry context before publishing",
+            ),
+        )
+    } else {
+        (
+            StatusOutcomeStatus::PartiallyPublished,
+            OperatorAction::posture(
+                ActionKind::Preflight,
+                "some selected package versions are missing; run preflight in the same workspace and registry context before publishing",
+            ),
+        )
+    };
+
+    StatusOperatorOutcome {
+        status,
+        publication_performed: false,
+        next_action,
+    }
 }
 
 fn write_status_report(report: &StatusReport, format: &str) -> Result<()> {
@@ -3967,6 +5138,14 @@ fn write_status_report(report: &StatusReport, format: &str) -> Result<()> {
         for package in &registry.packages {
             println!("{}@{}: {}", package.name, package.version, package.status);
         }
+    }
+
+    println!();
+    println!("Result: {}", report.outcome.status.human_label());
+    println!("Publication performed: no");
+    match report.outcome.next_action.command_line() {
+        Some(command) => println!("Next: {command} — {}", report.outcome.next_action.reason),
+        None => println!("Next: {}", report.outcome.next_action.reason),
     }
 
     Ok(())
@@ -4427,6 +5606,7 @@ fn event_type_name(event_type: &EventType) -> &'static str {
         EventType::PlanCreated { .. } => "plan_created",
         EventType::ExecutionStarted => "execution_started",
         EventType::ExecutionFinished { .. } => "execution_finished",
+        EventType::ExecutionStopped { .. } => "execution_stopped",
         EventType::AuthEvidenceRecorded { .. } => "auth_evidence_recorded",
         EventType::RegistryPolicyApplied { .. } => "registry_policy_applied",
         EventType::PackageStarted { .. } => "package_started",
@@ -4472,6 +5652,9 @@ fn summarize_event(event: &PublishEvent) -> String {
     match &event.event_type {
         EventType::ExecutionStarted => "execution started".to_string(),
         EventType::ExecutionFinished { result } => format!("execution finished: {:?}", result),
+        EventType::ExecutionStopped { reason } => {
+            format!("execution stopped: {:?}", reason)
+        }
         EventType::PackageStarted { name, version } => {
             format!("started {}@{}", name, version)
         }
@@ -4933,7 +6116,7 @@ fn run_config_with_loopback(cmd: ConfigCommands, allow_loopback: bool) -> Result
                     path.display()
                 );
             }
-            let config = ShipperConfig::load_from_file(&path)
+            let config = ShipperConfig::load_from_file_without_value_validation(&path)
                 .with_context(|| format!("Failed to load config file: {}", path.display()))?;
             config
                 .validate_with_loopback(allow_loopback)
@@ -5001,6 +6184,28 @@ mod tests {
         assert!(matches!(worst_result(Some(Success), &Success), Success));
     }
 
+    #[test]
+    fn generic_engine_error_does_not_borrow_stale_reconciliation_evidence() -> Result<()> {
+        let td = tempdir().context("create stale-evidence fixture")?;
+        for artifact in ["state.json", "events.jsonl", "reconciliation.json"] {
+            fs::write(td.path().join(artifact), "{}").context("write stale evidence marker")?;
+        }
+
+        let marked = mark_publish_engine_error(
+            anyhow::anyhow!("unrelated engine failure"),
+            "json",
+            Path::new("configured-state"),
+            td.path(),
+        );
+        let publish_error = marked
+            .downcast_ref::<PublishEarlyError>()
+            .context("generic publish error marker")?;
+        anyhow::ensure!(publish_error.category == "publish_failed");
+        anyhow::ensure!(publish_error.safe_to_rerun.value.is_none());
+        anyhow::ensure!(publish_error.evidence.is_empty());
+        Ok(())
+    }
+
     #[derive(Default)]
     struct TestReporter {
         infos: Vec<String>,
@@ -5049,6 +6254,322 @@ mod tests {
         );
     }
 
+    #[test]
+    fn publish_outcome_mapping_fails_closed_and_preserves_rerun_contract() {
+        use ExecutionResult::{CompleteFailure, PartialFailure, Success};
+
+        struct Case {
+            name: &'static str,
+            result: ExecutionResult,
+            counts: CommandJsonPackageCounts,
+            action: ActionKind,
+            safe_to_rerun: bool,
+            failure_class: Option<&'static str>,
+            has_command: bool,
+        }
+
+        let counts = |published,
+                      pending,
+                      failed,
+                      ambiguous,
+                      uploaded,
+                      retryable_failures,
+                      permanent_failures,
+                      ambiguous_failures| CommandJsonPackageCounts {
+            published,
+            pending,
+            failed,
+            ambiguous,
+            uploaded,
+            skipped: 0,
+            next_package: None,
+            retryable_failures,
+            permanent_failures,
+            ambiguous_failures,
+        };
+
+        let cases = [
+            Case {
+                name: "success is terminal",
+                result: Success,
+                counts: counts(1, 0, 0, 0, 0, 0, 0, 0),
+                action: ActionKind::NoneComplete,
+                safe_to_rerun: true,
+                failure_class: None,
+                has_command: false,
+            },
+            Case {
+                name: "pending partial resumes durable state",
+                result: PartialFailure,
+                counts: counts(1, 1, 0, 0, 0, 0, 0, 0),
+                action: ActionKind::Resume,
+                safe_to_rerun: false,
+                failure_class: None,
+                has_command: false,
+            },
+            Case {
+                name: "retryable failure resumes durable state",
+                result: PartialFailure,
+                counts: counts(0, 0, 1, 0, 0, 1, 0, 0),
+                action: ActionKind::Resume,
+                safe_to_rerun: false,
+                failure_class: Some("retryable"),
+                has_command: false,
+            },
+            Case {
+                name: "permanent failure requires repair",
+                result: CompleteFailure,
+                counts: counts(0, 0, 1, 0, 0, 0, 1, 0),
+                action: ActionKind::ResolveBlockers,
+                safe_to_rerun: false,
+                failure_class: Some("permanent"),
+                has_command: false,
+            },
+            Case {
+                name: "ambiguous state requires reconciliation",
+                result: PartialFailure,
+                counts: counts(0, 0, 0, 1, 0, 0, 0, 0),
+                action: ActionKind::Reconcile,
+                safe_to_rerun: false,
+                failure_class: Some("ambiguous"),
+                has_command: false,
+            },
+            Case {
+                name: "ambiguous failure also requires reconciliation",
+                result: PartialFailure,
+                counts: counts(0, 0, 1, 0, 0, 0, 0, 1),
+                action: ActionKind::Reconcile,
+                safe_to_rerun: false,
+                failure_class: Some("ambiguous"),
+                has_command: false,
+            },
+            Case {
+                name: "uploaded state waits for registry truth",
+                result: PartialFailure,
+                counts: counts(0, 0, 0, 0, 1, 0, 0, 0),
+                action: ActionKind::WaitForRegistry,
+                safe_to_rerun: false,
+                failure_class: Some("ambiguous"),
+                has_command: false,
+            },
+            Case {
+                name: "inconsistent complete result stops",
+                result: CompleteFailure,
+                counts: counts(1, 0, 0, 0, 0, 0, 0, 0),
+                action: ActionKind::StopAndInvestigate,
+                safe_to_rerun: true,
+                failure_class: None,
+                has_command: false,
+            },
+        ];
+
+        for case in cases {
+            let outcome =
+                build_publish_operator_outcome(&case.result, &case.counts, Path::new("run-state"));
+            assert_eq!(outcome.next_action.kind, case.action, "{}", case.name);
+            assert_eq!(
+                outcome.safe_to_rerun.value, case.safe_to_rerun,
+                "{}",
+                case.name
+            );
+            assert_eq!(outcome.failure_class, case.failure_class, "{}", case.name);
+            assert_eq!(
+                outcome.next_action.command_line().is_some(),
+                case.has_command,
+                "{}",
+                case.name
+            );
+        }
+    }
+
+    #[test]
+    fn publish_resume_action_preserves_state_identity_without_fabricating_context() {
+        let counts = CommandJsonPackageCounts {
+            pending: 1,
+            ..CommandJsonPackageCounts::default()
+        };
+        let outcome = build_publish_operator_outcome(
+            &ExecutionResult::PartialFailure,
+            &counts,
+            Path::new("custom-state"),
+        );
+
+        assert!(outcome.next_action.command.is_empty());
+        assert!(outcome.next_action.reason.contains("custom-state"));
+    }
+
+    #[test]
+    fn resume_outcome_mapping_fails_closed_and_preserves_resume_contract() -> Result<()> {
+        use ExecutionResult::{CompleteFailure, PartialFailure, Success};
+
+        struct Case {
+            name: &'static str,
+            result: ExecutionResult,
+            counts: CommandJsonPackageCounts,
+            action: ActionKind,
+            safe_to_resume: bool,
+            failure_class: Option<&'static str>,
+        }
+
+        let counts = |pending,
+                      failed,
+                      ambiguous,
+                      uploaded,
+                      retryable_failures,
+                      permanent_failures,
+                      ambiguous_failures| CommandJsonPackageCounts {
+            pending,
+            failed,
+            ambiguous,
+            uploaded,
+            retryable_failures,
+            permanent_failures,
+            ambiguous_failures,
+            ..CommandJsonPackageCounts::default()
+        };
+
+        let cases = [
+            Case {
+                name: "success is terminal",
+                result: Success,
+                counts: counts(0, 0, 0, 0, 0, 0, 0),
+                action: ActionKind::NoneComplete,
+                safe_to_resume: true,
+                failure_class: None,
+            },
+            Case {
+                name: "pending state resumes",
+                result: PartialFailure,
+                counts: counts(1, 0, 0, 0, 0, 0, 0),
+                action: ActionKind::Resume,
+                safe_to_resume: true,
+                failure_class: None,
+            },
+            Case {
+                name: "retryable failure resumes",
+                result: PartialFailure,
+                counts: counts(0, 1, 0, 0, 1, 0, 0),
+                action: ActionKind::Resume,
+                safe_to_resume: true,
+                failure_class: Some("retryable"),
+            },
+            Case {
+                name: "permanent failure requires repair",
+                result: CompleteFailure,
+                counts: counts(0, 1, 0, 0, 0, 1, 0),
+                action: ActionKind::ResolveBlockers,
+                safe_to_resume: false,
+                failure_class: Some("permanent"),
+            },
+            Case {
+                name: "ambiguous package requires reconciliation",
+                result: PartialFailure,
+                counts: counts(0, 0, 1, 0, 0, 0, 0),
+                action: ActionKind::Reconcile,
+                safe_to_resume: false,
+                failure_class: Some("ambiguous"),
+            },
+            Case {
+                name: "ambiguous failure requires reconciliation",
+                result: PartialFailure,
+                counts: counts(0, 1, 0, 0, 0, 0, 1),
+                action: ActionKind::Reconcile,
+                safe_to_resume: false,
+                failure_class: Some("ambiguous"),
+            },
+            Case {
+                name: "uploaded package waits for registry truth",
+                result: PartialFailure,
+                counts: counts(0, 0, 0, 1, 0, 0, 0),
+                action: ActionKind::WaitForRegistry,
+                safe_to_resume: false,
+                failure_class: Some("ambiguous"),
+            },
+            Case {
+                name: "result and terminal states disagree",
+                result: CompleteFailure,
+                counts: counts(0, 0, 0, 0, 0, 0, 0),
+                action: ActionKind::StopAndInvestigate,
+                safe_to_resume: false,
+                failure_class: None,
+            },
+        ];
+
+        for case in cases {
+            let outcome = build_resume_operator_outcome(
+                &case.result,
+                &case.counts,
+                Path::new("custom-state"),
+            );
+            anyhow::ensure!(
+                outcome.next_action.kind == case.action,
+                "{}: unexpected action",
+                case.name
+            );
+            anyhow::ensure!(
+                outcome.safe_to_resume.value == case.safe_to_resume,
+                "{}: unexpected resume posture",
+                case.name
+            );
+            anyhow::ensure!(
+                outcome.failure_class == case.failure_class,
+                "{}: unexpected failure class",
+                case.name
+            );
+            anyhow::ensure!(
+                outcome.next_action.command.is_empty(),
+                "{}: resume outcome fabricated a command",
+                case.name
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn resume_legacy_and_typed_safety_preserve_intentional_compatibility_divergence() -> Result<()>
+    {
+        let retryable = CommandJsonPackageCounts {
+            failed: 1,
+            retryable_failures: 1,
+            ..CommandJsonPackageCounts::default()
+        };
+        let retryable_outcome = build_resume_operator_outcome(
+            &ExecutionResult::PartialFailure,
+            &retryable,
+            Path::new("state"),
+        );
+        anyhow::ensure!(!legacy_safe_to_resume(&retryable));
+        anyhow::ensure!(retryable_outcome.safe_to_resume.value);
+
+        let uploaded = CommandJsonPackageCounts {
+            uploaded: 1,
+            ..CommandJsonPackageCounts::default()
+        };
+        let uploaded_outcome = build_resume_operator_outcome(
+            &ExecutionResult::PartialFailure,
+            &uploaded,
+            Path::new("state"),
+        );
+        anyhow::ensure!(legacy_safe_to_resume(&uploaded));
+        anyhow::ensure!(!uploaded_outcome.safe_to_resume.value);
+
+        Ok(())
+    }
+
+    #[test]
+    fn relative_publish_evidence_is_resolved_against_the_workspace() {
+        let resolved =
+            publish_evidence_state_dir(Path::new("workspace"), Path::new("custom-state"));
+        assert_eq!(resolved, Path::new("workspace").join("custom-state"));
+
+        let absolute = std::env::temp_dir().join("shipper-publish-outcome-evidence");
+        assert_eq!(
+            publish_evidence_state_dir(Path::new("ignored"), &absolute),
+            absolute
+        );
+    }
+
     /// Regression guard for the top-level error format (PR #417 regression:
     /// `{e:#}` flattened cause chains into one line; `format_error` must
     /// preserve the readable `Error:` / `Caused by:` structure). If this
@@ -5091,6 +6612,34 @@ mod tests {
     }
 
     #[test]
+    fn publish_early_error_redacts_secret_bearing_cause() {
+        let error = anyhow::anyhow!("CARGO_REGISTRY_TOKEN=EARLY_ERROR_SECRET")
+            .context("publish authorization failed");
+        let classification = classify_publish_early_error(&error);
+        let marked = mark_publish_early_error(error, "json", classification);
+        let publish_error = marked
+            .downcast_ref::<PublishEarlyError>()
+            .expect("publish marker");
+        assert_eq!(publish_error.category, "authentication_required");
+        assert!(publish_error.rendered_error.contains("[REDACTED]"));
+        assert!(!publish_error.rendered_error.contains("EARLY_ERROR_SECRET"));
+    }
+
+    #[test]
+    fn publish_early_error_category_uses_raw_cause_not_generic_hint() {
+        let lock = anyhow::anyhow!("failed to acquire publish lock: stale lock");
+        let unknown = anyhow::anyhow!("unexpected internal adapter failure");
+        let registry = anyhow::anyhow!("registry request failed: connection refused");
+
+        assert_eq!(classify_publish_early_error(&lock).0, "state_conflict");
+        assert_eq!(classify_publish_early_error(&unknown).0, "publish_failed");
+        assert_eq!(
+            classify_publish_early_error(&registry).0,
+            "registry_unreachable"
+        );
+    }
+
+    #[test]
     fn global_flags_parse_after_subcommand() {
         let cli = Cli::try_parse_from([
             "shipper",
@@ -5117,6 +6666,39 @@ mod tests {
         assert_eq!(cli.verify_mode.as_deref(), Some("package"));
         assert_eq!(cli.policy.as_deref(), Some("safe"));
         assert_eq!(cli.format, "json");
+    }
+
+    #[test]
+    fn durable_status_validation_rejects_both_multi_registry_selectors() -> Result<()> {
+        for args in [
+            ["shipper", "--registries", "a,b", "status", "--durable"].as_slice(),
+            ["shipper", "--all-registries", "status", "--durable"].as_slice(),
+        ] {
+            let matches = cli_command().try_get_matches_from(args)?;
+            let cli = Cli::from_arg_matches(&matches)?;
+            let error = validate_cli_combinations(&cli).err().ok_or_else(|| {
+                anyhow::anyhow!("multi-registry durable status validated: {args:?}")
+            })?;
+            anyhow::ensure!(
+                error.kind() == clap::error::ErrorKind::ArgumentConflict,
+                "expected argument conflict for {args:?}, got {:?}: {error}",
+                error.kind()
+            );
+        }
+
+        let singular_matches = cli_command().try_get_matches_from([
+            "shipper",
+            "--registry",
+            "private",
+            "status",
+            "--durable",
+        ])?;
+        let singular = Cli::from_arg_matches(&singular_matches)?;
+        anyhow::ensure!(
+            validate_cli_combinations(&singular).is_ok(),
+            "single-registry durable status must remain accepted"
+        );
+        Ok(())
     }
 
     // #100 — `--preflight-only` on `shipper preflight` must parse into a
@@ -5155,7 +6737,10 @@ mod tests {
     fn status_watch_flag_parses() {
         let cli = Cli::try_parse_from(["shipper", "status", "--watch"]).expect("parse status");
         match cli.cmd {
-            Some(Commands::Status { watch }) => assert!(watch),
+            Some(Commands::Status { watch, durable }) => {
+                assert!(watch);
+                assert!(!durable);
+            }
             other => panic!("expected Status, got {other:?}"),
         }
     }
@@ -5204,12 +6789,18 @@ mod tests {
         assert_eq!(cli.max_attempts, Some(2));
         assert!(cli.parallel);
         assert_eq!(cli.webhook_secret.as_deref(), Some("compatibility-value"));
-        assert!(matches!(cli.cmd, Some(Commands::Status { watch: false })));
+        assert!(matches!(
+            cli.cmd,
+            Some(Commands::Status {
+                watch: false,
+                durable: false
+            })
+        ));
     }
 
     #[test]
     fn cli_reporter_methods_are_callable() {
-        let mut rep = CliReporter::new(false);
+        let mut rep = CliReporter::new(false, false);
         rep.info("info");
         rep.warn("warn");
         rep.error("error");
@@ -5221,7 +6812,7 @@ mod tests {
         // legacy warn-line + sleep path. Assert it still blocks for the
         // full delay (the engine relies on this).
         use std::time::Instant;
-        let mut rep = CliReporter::new(true); // quiet to suppress stderr
+        let mut rep = CliReporter::new(true, false); // quiet to suppress stderr
         let delay = Duration::from_millis(60);
         let start = Instant::now();
         rep.retry_wait(
@@ -5243,7 +6834,7 @@ mod tests {
     #[test]
     fn cli_reporter_retry_wait_without_progress_warns_and_blocks_for_delay() {
         use std::time::Instant;
-        let mut rep = CliReporter::new(false);
+        let mut rep = CliReporter::new(false, false);
         let delay = Duration::from_millis(40);
         let start = Instant::now();
         rep.retry_wait(
@@ -5264,7 +6855,7 @@ mod tests {
         // through ProgressReporter::retry_countdown — still blocks for the
         // delay, with no panic from the set_status path.
         use std::time::Instant;
-        let mut rep = CliReporter::new(false);
+        let mut rep = CliReporter::new(false, false);
         rep.install_progress(
             crate::output::progress::ProgressReporter::silent(2),
             BTreeMap::from([(String::from("pkg@1.0.0"), 2usize)]),
@@ -5286,7 +6877,7 @@ mod tests {
 
     #[test]
     fn cli_reporter_retry_wait_updates_progress_to_retrying_package() {
-        let mut rep = CliReporter::new(true);
+        let mut rep = CliReporter::new(true, false);
         rep.install_progress(
             crate::output::progress::ProgressReporter::silent(3),
             BTreeMap::from([(String::from("beta@0.2.0"), 2usize)]),
