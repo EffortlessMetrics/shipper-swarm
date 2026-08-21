@@ -21,7 +21,7 @@ pub(super) fn resolve_with_policies(
             .into_iter()
             .map(registry_from_config)
             .collect();
-        let policies = config
+        let mut policies = config
             .get_registries()
             .into_iter()
             .map(|registry| {
@@ -39,6 +39,7 @@ pub(super) fn resolve_with_policies(
                 )
             })
             .collect();
+        preserve_single_registry_policy(&mut policies, single_registry, rehearsal, cli);
         return (registries, policies);
     }
 
@@ -47,7 +48,7 @@ pub(super) fn resolve_with_policies(
             .iter()
             .map(|name| resolve_named_registry(config, name))
             .collect::<Vec<_>>();
-        let policies = registry_names
+        let mut policies = registry_names
             .iter()
             .map(|name| {
                 let configured = config.find_by_name(name);
@@ -61,6 +62,7 @@ pub(super) fn resolve_with_policies(
                 )
             })
             .collect();
+        preserve_single_registry_policy(&mut policies, single_registry, rehearsal, cli);
         return (resolved, policies);
     }
 
@@ -101,6 +103,28 @@ pub(super) fn resolve_with_policies(
         BTreeMap::new()
     };
     (vec![], policies)
+}
+
+fn preserve_single_registry_policy(
+    policies: &mut BTreeMap<String, RegistryTrustOptions>,
+    single_registry: Option<&RegistryConfig>,
+    rehearsal: &RehearsalConfig,
+    cli: &CliOverrides,
+) {
+    let Some(registry) = single_registry else {
+        return;
+    };
+    let effective_name = cli
+        .registry_name
+        .as_deref()
+        .unwrap_or(registry.name.as_str());
+    policies
+        .entry(effective_name.to_string())
+        .or_insert(RegistryTrustOptions {
+            allow_private: registry.allow_private,
+            allow_loopback: cli.allow_loopback
+                || rehearsal_allows_loopback(rehearsal, effective_name),
+        });
 }
 
 fn rehearsal_allows_loopback(rehearsal: &RehearsalConfig, registry_name: &str) -> bool {
@@ -384,6 +408,38 @@ mod tests {
         };
         let (_, policies) = resolve_with_policies(&config, None, &rehearsal_only, &cli);
         assert!(policies["local"].allow_loopback);
+    }
+
+    #[test]
+    fn resolve_named_rehearsal_preserves_live_policy_without_selecting_live() {
+        let config = config_with(vec![registry_config("rehearsal")]);
+        let mut live = registry_config("live");
+        live.allow_private = true;
+        let rehearsal = RehearsalConfig {
+            enabled: true,
+            allow_loopback: true,
+            registry: Some("rehearsal".to_string()),
+        };
+        let cli = CliOverrides {
+            registries: Some(vec!["rehearsal".to_string()]),
+            allow_loopback: true,
+            rehearsal_registry: Some("rehearsal".to_string()),
+            ..CliOverrides::default()
+        };
+
+        let (registries, policies) = resolve_with_policies(&config, Some(&live), &rehearsal, &cli);
+
+        assert_eq!(
+            registries
+                .iter()
+                .map(|registry| registry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["rehearsal"],
+            "live trust metadata must not make the live target dispatchable"
+        );
+        assert!(policies["rehearsal"].allow_loopback);
+        assert!(policies["live"].allow_loopback);
+        assert!(policies["live"].allow_private);
     }
 
     #[test]

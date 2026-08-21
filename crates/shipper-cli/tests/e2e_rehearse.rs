@@ -491,8 +491,9 @@ fn rehearsal_authority_distinct_loopback_runs_selected_catalog_entry() {
     let fake_cargo = write_fake_cargo(&bin);
     let cargo_log = td.path().join("cargo.log");
     let state_dir = td.path().join("evidence");
+    let (live_url, live_stop, live_requests) = spawn_counting_registry(200);
     let (rehearsal_url, rehearsal_stop, rehearsal_requests) = spawn_counting_registry(200);
-    write_rehearsal_isolation_config(td.path(), "https://registry.example", &rehearsal_url);
+    write_rehearsal_isolation_config(td.path(), &live_url, &rehearsal_url);
 
     let output = loopback_shipper_cmd()
         .arg("--manifest-path")
@@ -517,10 +518,20 @@ fn rehearsal_authority_distinct_loopback_runs_selected_catalog_entry() {
     assert!(String::from_utf8_lossy(&output.stdout).contains("rehearsal OK: 3 packages"));
     let cargo_calls = fs::read_to_string(&cargo_log).expect("cargo log");
     assert_eq!(cargo_calls.lines().count(), 3, "cargo calls: {cargo_calls}");
-    assert!(cargo_calls.lines().all(|line| line.contains("publish")));
+    assert!(
+        cargo_calls
+            .lines()
+            .all(|line| { line.contains("publish") && line.contains("--registry rehearsal") })
+    );
     assert_eq!(rehearsal_requests.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        live_requests.load(Ordering::SeqCst),
+        0,
+        "live trust metadata must not make the live registry dispatchable"
+    );
     assert!(state_dir.join("events.jsonl").exists());
     assert!(state_dir.join("rehearsal.json").exists());
+    let _ = live_stop.send(());
     let _ = rehearsal_stop.send(());
 }
 

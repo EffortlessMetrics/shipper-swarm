@@ -8718,6 +8718,20 @@ mod tests {
         write_fake_tools(&bin);
         let env_vars = fake_program_env_vars(&bin);
         temp_env::with_vars(env_vars, || {
+            let live_server = Server::http("127.0.0.1:0").expect("live server");
+            let live_url = format!("http://{}", live_server.server_addr());
+            let live_network =
+                thread::spawn(
+                    move || match live_server.recv_timeout(Duration::from_secs(1)) {
+                        Ok(Some(request)) => {
+                            request
+                                .respond(Response::from_string("{}"))
+                                .expect("respond");
+                            true
+                        }
+                        Ok(None) | Err(_) => false,
+                    },
+                );
             // Rehearsal-registry mock: returns 404 for the preflight lookup
             // (not here) and 200 for the post-publish visibility check.
             let rehearsal_server = spawn_registry_server(
@@ -8728,8 +8742,17 @@ mod tests {
                 1,
             );
 
-            let ws = planned_workspace(td.path(), "http://127.0.0.1:1".into());
+            let mut ws = planned_workspace(td.path(), live_url);
+            ws.plan.registry.name = "live".to_string();
+            ws.plan.registry.index_base = Some(ws.plan.registry.api_base.clone());
             let mut opts = default_opts(PathBuf::from(".shipper"));
+            opts.registry_policies.insert(
+                "live".to_string(),
+                RegistryTrustOptions {
+                    allow_private: false,
+                    allow_loopback: true,
+                },
+            );
             opts.rehearsal_registry = Some("rehearsal".to_string());
             opts.registries = vec![Registry {
                 name: "rehearsal".to_string(),
@@ -8773,6 +8796,10 @@ mod tests {
             );
 
             rehearsal_server.join();
+            assert!(
+                !live_network.join().expect("live network observer"),
+                "rehearsal must not dispatch requests to the live registry"
+            );
         });
     }
 
