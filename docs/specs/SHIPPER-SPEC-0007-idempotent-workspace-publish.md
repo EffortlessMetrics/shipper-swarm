@@ -86,6 +86,10 @@ For `shipper publish --format json`, the command envelope must carry:
   package summary has no pending, uploaded, failed, or ambiguous packages; the
   detailed evidence remains the package states, receipt, and reconciliation
   artifact.
+- A pre-receipt controlled stop with a failed-retryable package therefore keeps
+  `safe_to_rerun: false`: direct `publish` rerun is not authorized. When the
+  exact state, event, and `NotPublished` reconciliation evidence was persisted,
+  the separate commandless next action may be `resume`.
 - Artifact paths for `.shipper/state.json`, `.shipper/events.jsonl`, and
   `.shipper/receipt.json` (plus reconciliation artifact when present).
 - A nested receipt that remains the detailed package-outcome authority.

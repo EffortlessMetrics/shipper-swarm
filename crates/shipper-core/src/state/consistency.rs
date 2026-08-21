@@ -16,7 +16,8 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 
 use shipper_types::{
-    EventType, ExecutionState, PackageState, Receipt, ReconciliationReport, StateEventDrift,
+    ErrorClass, EventType, ExecutionState, PackageState, Receipt, ReconciliationOutcome,
+    ReconciliationReport, StateEventDrift,
 };
 
 use super::events::EventLog;
@@ -130,6 +131,106 @@ pub(crate) fn verify_unfinished_consistency(
                 .join("\n")
         )
     }
+}
+
+/// Verify the exact evidence tuple that authorizes a controlled retry after a
+/// conclusive NotPublished reconciliation. A reconciliation label alone is
+/// deliberately insufficient.
+pub(crate) fn verify_controlled_stop_consistency(
+    events_path: &Path,
+    state: &ExecutionState,
+    reconciliation_report: Option<&ReconciliationReport>,
+) -> Result<()> {
+    verify_unfinished_consistency(events_path, state, reconciliation_report)?;
+    let event_log = EventLog::read_from_file(events_path)?;
+    let Some(last) = event_log.all_events().last() else {
+        bail!("controlled stop requires an authoritative terminal marker");
+    };
+    let EventType::ExecutionStopped {
+        reason: shipper_types::ControlledStopReason::NotPublishedRetryBudgetExhausted,
+    } = &last.event_type
+    else {
+        bail!("authoritative event tail is not a controlled NotPublished stop");
+    };
+    let Some(progress) = state.packages.get(&last.package) else {
+        bail!("controlled-stop package is absent from state");
+    };
+    if !matches!(
+        progress.state,
+        PackageState::Failed {
+            class: ErrorClass::Retryable,
+            ..
+        }
+    ) {
+        bail!("controlled-stop package is not retryable in state");
+    }
+    let Some(report) = reconciliation_report else {
+        bail!("controlled NotPublished stop requires reconciliation evidence");
+    };
+    if report.plan_id != state.plan_id
+        || report.registry.name != state.registry.name
+        || report.registry.api_base != state.registry.api_base
+        || report.registry.index_base != state.registry.index_base
+    {
+        bail!("controlled-stop reconciliation identity disagrees with state");
+    }
+    let latest_retry_allowed = |package: &str| latest_retry_allowed(report, package);
+    if !latest_retry_allowed(&last.package) {
+        bail!("controlled-stop package lacks latest NotPublished retry evidence");
+    }
+    for (package, package_progress) in &state.packages {
+        match &package_progress.state {
+            PackageState::Published | PackageState::Skipped { .. } | PackageState::Pending => {}
+            PackageState::Failed {
+                class: ErrorClass::Retryable,
+                ..
+            } if latest_retry_allowed(package) => {}
+            PackageState::Failed {
+                class: ErrorClass::Retryable,
+                ..
+            } => bail!("retryable package {package} lacks latest NotPublished retry evidence"),
+            _ => bail!(
+                "controlled stop contains a package posture that is not safely resumable: {package}"
+            ),
+        }
+    }
+    Ok(())
+}
+
+fn latest_retry_allowed(report: &ReconciliationReport, package: &str) -> bool {
+    report
+        .records
+        .iter()
+        .rev()
+        .find(|record| record.package == package)
+        .is_some_and(|record| {
+            matches!(record.outcome, ReconciliationOutcome::NotPublished { .. })
+                && matches!(
+                    record.operator_action,
+                    shipper_types::ReconciliationOperatorAction::RetryAllowed
+                )
+        })
+}
+
+pub(crate) fn has_not_published_retryable_posture(
+    state: &ExecutionState,
+    reconciliation_report: Option<&ReconciliationReport>,
+) -> bool {
+    let Some(report) = reconciliation_report else {
+        return false;
+    };
+    let mut saw_retryable = false;
+    for (package, progress) in &state.packages {
+        match &progress.state {
+            PackageState::Published | PackageState::Skipped { .. } | PackageState::Pending => {}
+            PackageState::Failed {
+                class: ErrorClass::Retryable,
+                ..
+            } if latest_retry_allowed(report, package) => saw_retryable = true,
+            _ => return false,
+        }
+    }
+    saw_retryable
 }
 
 /// Render a human-readable summary of a drift report. Used by the Reporter
@@ -794,6 +895,89 @@ mod tests {
             verify_unfinished_consistency(&events_path(td.path()), &state, Some(&report)).is_err(),
             "an earlier reconciliation mismatch must not be hidden by a matching final outcome"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn controlled_stop_rejects_stale_not_published_before_latest_still_unknown() -> Result<()> {
+        let td = tempdir()?;
+        let package = "a@1.0.0";
+        let not_published = ReconciliationOutcome::NotPublished {
+            attempts: 1,
+            elapsed_ms: 10,
+        };
+        let still_unknown = ReconciliationOutcome::StillUnknown {
+            attempts: 1,
+            elapsed_ms: 20,
+            reason: "registry unavailable".to_string(),
+        };
+        write_events(
+            td.path(),
+            vec![
+                plan_created_event(),
+                PublishEvent {
+                    timestamp: Utc::now(),
+                    event_type: EventType::ExecutionStarted,
+                    package: "all".to_string(),
+                },
+                PublishEvent {
+                    timestamp: Utc::now(),
+                    event_type: EventType::PublishReconciled {
+                        outcome: not_published.clone(),
+                    },
+                    package: package.to_string(),
+                },
+                PublishEvent {
+                    timestamp: Utc::now(),
+                    event_type: EventType::PublishReconciled {
+                        outcome: still_unknown.clone(),
+                    },
+                    package: package.to_string(),
+                },
+                PublishEvent {
+                    timestamp: Utc::now(),
+                    event_type: EventType::PackageFailed {
+                        class: ErrorClass::Retryable,
+                        message: "forged retryable tail".to_string(),
+                    },
+                    package: package.to_string(),
+                },
+                PublishEvent {
+                    timestamp: Utc::now(),
+                    event_type: EventType::ExecutionStopped {
+                        reason:
+                            shipper_types::ControlledStopReason::NotPublishedRetryBudgetExhausted,
+                    },
+                    package: package.to_string(),
+                },
+            ],
+        );
+        let state = rebuild_state_from_events(
+            &events_path(td.path()),
+            StateRebuildOptions::new(Registry::crates_io()),
+        )?;
+        let mut report = reconciliation_report(package);
+        let template = report
+            .records
+            .first()
+            .cloned()
+            .context("reconciliation fixture record")?;
+        report.records = vec![
+            ReconciliationRecord {
+                outcome: not_published,
+                operator_action: ReconciliationOperatorAction::RetryAllowed,
+                ..template.clone()
+            },
+            ReconciliationRecord {
+                outcome: still_unknown,
+                operator_action: ReconciliationOperatorAction::OperatorActionRequired,
+                ..template
+            },
+        ];
+        let error =
+            verify_controlled_stop_consistency(&events_path(td.path()), &state, Some(&report))
+                .expect_err("latest StillUnknown must block controlled resume");
+        assert!(format!("{error:#}").contains("latest NotPublished"));
         Ok(())
     }
 

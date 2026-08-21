@@ -1667,6 +1667,12 @@ pub enum EventType {
     ExecutionFinished {
         result: ExecutionResult,
     },
+    /// The engine deliberately ended an unfinished run after persisting a
+    /// coherent, recoverable registry-truth decision. Unlike
+    /// `ExecutionFinished`, this marker never implies that a receipt exists.
+    ExecutionStopped {
+        reason: ControlledStopReason,
+    },
     AuthEvidenceRecorded {
         evidence: AuthEvidence,
     },
@@ -1883,6 +1889,15 @@ pub enum EventType {
     PreflightComplete {
         finishability: Finishability,
     },
+}
+
+/// Why the engine deliberately stopped before receipt finalization.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlledStopReason {
+    /// Cargo's result was ambiguous, but registry reconciliation conclusively
+    /// proved the package absent when the retry budget was exhausted.
+    NotPublishedRetryBudgetExhausted,
 }
 
 #[inline]
@@ -3042,6 +3057,25 @@ mod tests {
             let json = serde_json::to_string(result).unwrap();
             assert_eq!(&json, exp);
         }
+    }
+
+    #[test]
+    fn controlled_stop_event_serde_contract() {
+        let event = EventType::ExecutionStopped {
+            reason: ControlledStopReason::NotPublishedRetryBudgetExhausted,
+        };
+        let json = serde_json::to_string(&event).expect("serialize controlled stop");
+        assert_eq!(
+            json,
+            r#"{"type":"execution_stopped","reason":"not_published_retry_budget_exhausted"}"#
+        );
+        let parsed: EventType = serde_json::from_str(&json).expect("parse controlled stop");
+        assert!(matches!(
+            parsed,
+            EventType::ExecutionStopped {
+                reason: ControlledStopReason::NotPublishedRetryBudgetExhausted
+            }
+        ));
     }
 
     // ===== AuthType =====

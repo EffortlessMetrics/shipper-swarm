@@ -240,6 +240,16 @@ and the resolved `state.json`, `events.jsonl`, and `reconciliation.json` paths.
 Human output derives the same posture from that evidence. No receipt is
 claimed, and exit code `1` is unchanged.
 
+A controlled `NotPublished` retry-budget stop is the second evidence-backed
+early-error exception. It emits category `recoverable_stop`, retains the same
+three evidence paths, and keeps `safe_to_rerun.value: false` with the reason
+`do not rerun publish; retained evidence authorizes controlled resume`.
+Only when reconciliation persistence succeeded does its commandless next
+action become `resume`; this does not authorize a direct `publish` rerun. If
+that evidence was not persisted, the next action is `inspect_events` and
+recovery safety remains unproven. Exit code `1`, empty stdout for JSON mode,
+and the no-receipt boundary are unchanged.
+
 Note that `2` covers "all packages failed" as well as "some failed":
 finalization classifies every non-all-successful receipt as
 `PartialFailure`, so `CompleteFailure` (`1`) is not reachable from a

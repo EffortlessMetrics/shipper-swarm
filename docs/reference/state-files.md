@@ -78,7 +78,22 @@ Common event types:
 - `retry_backoff_started` — added in [#91](https://github.com/EffortlessMetrics/shipper/issues/91); carries attempt N/M, delay, reason, next-attempt time
 - `publish_reconciling`, `publish_reconciled` — added in [#99](https://github.com/EffortlessMetrics/shipper/issues/99); registry-truth resolution of ambiguous outcomes
 - `state_event_drift_detected` — added in [#93](https://github.com/EffortlessMetrics/shipper/issues/93); end-of-run consistency check
-- `execution_started`, `execution_finished`
+- `execution_started`, `execution_finished`, `execution_stopped`
+
+`execution_stopped` is a nonterminal, no-receipt marker written while the
+publish lock is still held. Its current reason,
+`not_published_retry_budget_exhausted`, records that registry truth proved the
+selected package absent after Cargo's ambiguous exit and the retry budget was
+exhausted. The marker authorizes nothing by itself: status and resume also
+require matching plan, registry, state, ordered events, and reconciliation
+evidence. An unfinished run without this exact coherent marker keeps missing,
+legacy, cross-host, and otherwise inconclusive lock evidence fail-closed.
+For a coherent controlled stop, an absent lock or an affirmatively `NotLive`
+holder permits recovery. A matching `Live` holder still blocks recovery, and
+an `Unknown` observation (including corrupt, legacy, or cross-host lock
+evidence) remains fail-closed. The public raw-event API therefore includes the
+`ExecutionStopped` event variant and its `ControlledStopReason`; exhaustive
+consumers must handle that compatibility surface.
 
 ### `state.json`
 

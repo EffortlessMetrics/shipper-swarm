@@ -44,11 +44,22 @@ fn finish_publish_errors(mut errors: Vec<anyhow::Error>) -> Result<()> {
             errors.len() + 1
         )));
     }
-    bail!(
-        "parallel publish failed for {} package(s): {}",
-        errors.len(),
-        summary
-    );
+    if let Some(index) = errors.iter().position(|error| {
+        error
+            .downcast_ref::<crate::engine::PublishRecoverableStopError>()
+            .is_none()
+    }) {
+        let blocker = errors.swap_remove(index);
+        return Err(blocker.context(format!(
+            "parallel publish failed for {} package(s): {summary}",
+            errors.len() + 1
+        )));
+    }
+    let recoverable = errors.swap_remove(0);
+    Err(recoverable.context(format!(
+        "parallel publish stopped recoverably for {} package(s): {summary}",
+        errors.len() + 1
+    )))
 }
 
 impl WorkerHandle {
@@ -204,6 +215,58 @@ mod tests {
             "typed StillUnknown identity was lost: {error:#}"
         );
         ensure!(format!("{error:#}").contains("unrelated worker failure"));
+        Ok(())
+    }
+
+    #[test]
+    fn recoverable_stop_identity_survives_when_every_worker_is_recoverable() -> Result<()> {
+        let errors = vec![
+            crate::engine::PublishRecoverableStopError {
+                message: "a stopped recoverably".to_string(),
+                package: "a@1.0.0".to_string(),
+                reconciliation_written: true,
+            }
+            .into(),
+            crate::engine::PublishRecoverableStopError {
+                message: "b stopped recoverably".to_string(),
+                package: "b@1.0.0".to_string(),
+                reconciliation_written: true,
+            }
+            .into(),
+        ];
+        let Err(error) = finish_publish_errors(errors) else {
+            bail!("parallel aggregation unexpectedly succeeded");
+        };
+        ensure!(
+            error
+                .downcast_ref::<crate::engine::PublishRecoverableStopError>()
+                .is_some(),
+            "typed recoverable stop identity was lost: {error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ordinary_blocker_outranks_parallel_recoverable_stop() -> Result<()> {
+        let errors = vec![
+            crate::engine::PublishRecoverableStopError {
+                message: "a stopped recoverably".to_string(),
+                package: "a@1.0.0".to_string(),
+                reconciliation_written: true,
+            }
+            .into(),
+            anyhow!("permanent worker blocker"),
+        ];
+        let Err(error) = finish_publish_errors(errors) else {
+            bail!("parallel aggregation unexpectedly succeeded");
+        };
+        ensure!(
+            error
+                .downcast_ref::<crate::engine::PublishRecoverableStopError>()
+                .is_none(),
+            "recoverable identity incorrectly outranked blocker: {error:#}"
+        );
+        ensure!(format!("{error:#}").contains("permanent worker blocker"));
         Ok(())
     }
 }

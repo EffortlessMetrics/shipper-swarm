@@ -4,7 +4,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use crate::types::{ExecutionResult, ExecutionState, ReconciliationReport};
+use crate::types::{ControlledStopReason, ExecutionResult, ExecutionState, ReconciliationReport};
 
 /// Why unfinished evidence could not prove whether its publisher is alive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,10 +35,26 @@ pub enum RunObservation {
         plan_id: Option<String>,
         liveness: RunLiveness,
     },
+    Stopped {
+        plan_id: Option<String>,
+        reason: ControlledStopReason,
+        package: String,
+        /// `None` means the lock is absent after an authoritative controlled
+        /// stop. Present lock evidence retains the normal fail-closed probe.
+        liveness: Option<RunLiveness>,
+    },
     Finished {
         plan_id: Option<String>,
         result: ExecutionResult,
     },
+}
+
+/// Detect retryable NotPublished posture without treating it as authorization.
+pub fn has_not_published_retryable_posture(
+    state: &ExecutionState,
+    reconciliation: Option<&ReconciliationReport>,
+) -> bool {
+    crate::state::consistency::has_not_published_retryable_posture(state, reconciliation)
 }
 
 /// Read authoritative events and advisory lock evidence without modifying it.
@@ -54,6 +70,22 @@ pub fn unfinished_evidence_consistent(
 ) -> Result<bool> {
     Ok(
         crate::state::consistency::verify_unfinished_consistency(
+            events_path,
+            state,
+            reconciliation,
+        )
+        .is_ok(),
+    )
+}
+
+/// Check that a controlled-stop marker agrees with state and reconciliation.
+pub fn controlled_stop_evidence_consistent(
+    events_path: &Path,
+    state: &ExecutionState,
+    reconciliation: Option<&ReconciliationReport>,
+) -> Result<bool> {
+    Ok(
+        crate::state::consistency::verify_controlled_stop_consistency(
             events_path,
             state,
             reconciliation,

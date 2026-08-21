@@ -63,6 +63,27 @@ fn observe_run_with(
         EventPhase::Finished { plan_id, result } => {
             Ok(RunObservation::Finished { plan_id, result })
         }
+        EventPhase::Stopped {
+            plan_id,
+            reason,
+            package,
+        } => {
+            let liveness = match read_lock_contents(&lock_path(state_dir, workspace_root))? {
+                LockContents::Missing => None,
+                LockContents::Corrupt => {
+                    Some(RunLiveness::Unknown(UnknownLivenessReason::CorruptLock))
+                }
+                LockContents::Present(record) => {
+                    Some(observe_lock(&record, plan_id.as_deref(), hostname, probe))
+                }
+            };
+            Ok(RunObservation::Stopped {
+                plan_id,
+                reason,
+                package,
+                liveness,
+            })
+        }
         EventPhase::Unfinished { plan_id } => {
             let liveness = match read_lock_contents(&lock_path(state_dir, workspace_root))? {
                 LockContents::Missing => RunLiveness::Unknown(UnknownLivenessReason::MissingLock),
@@ -84,6 +105,11 @@ enum EventPhase {
     Finished {
         plan_id: Option<String>,
         result: ExecutionResult,
+    },
+    Stopped {
+        plan_id: Option<String>,
+        reason: shipper_types::ControlledStopReason,
+        package: String,
     },
 }
 
@@ -111,6 +137,17 @@ fn event_phase(events: &EventLog) -> EventPhase {
                 phase = EventPhase::Finished {
                     plan_id,
                     result: result.clone(),
+                };
+            }
+            EventType::ExecutionStopped { reason } => {
+                let plan_id = match &phase {
+                    EventPhase::Unfinished { plan_id } => plan_id.clone(),
+                    _ => pending_plan_id.take(),
+                };
+                phase = EventPhase::Stopped {
+                    plan_id,
+                    reason: reason.clone(),
+                    package: event.package.clone(),
                 };
             }
             _ => {}
@@ -400,6 +437,52 @@ mod tests {
             )
             .is_err()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn controlled_stop_with_missing_lock_is_explicitly_absent() -> Result<()> {
+        let td = tempdir()?;
+        let mut events = started("p");
+        events.push(EventType::ExecutionStopped {
+            reason: shipper_types::ControlledStopReason::NotPublishedRetryBudgetExhausted,
+        });
+        write_events(td.path(), events)?;
+        ensure!(matches!(
+            observe_run_with(
+                td.path(),
+                None,
+                "a",
+                &mut probe(ProcessStatus::Unavailable)
+            )?,
+            RunObservation::Stopped {
+                plan_id: Some(plan_id),
+                reason: shipper_types::ControlledStopReason::NotPublishedRetryBudgetExhausted,
+                liveness: None,
+                ..
+            } if plan_id == "p"
+        ));
+        write_lock(td.path(), &record("a", Some("p"), Some(identity(7)))?)?;
+        ensure!(matches!(
+            observe_run_with(
+                td.path(),
+                None,
+                "a",
+                &mut probe(ProcessStatus::Running(identity(7)))
+            )?,
+            RunObservation::Stopped {
+                liveness: Some(RunLiveness::Live),
+                ..
+            }
+        ));
+        fs::write(lock_path(td.path(), None), b"bad")?;
+        ensure!(matches!(
+            observe_run_with(td.path(), None, "a", &mut probe(ProcessStatus::Unavailable))?,
+            RunObservation::Stopped {
+                liveness: Some(RunLiveness::Unknown(UnknownLivenessReason::CorruptLock)),
+                ..
+            }
+        ));
         Ok(())
     }
     #[test]

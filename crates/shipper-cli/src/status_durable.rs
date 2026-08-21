@@ -8,7 +8,8 @@ use serde::Serialize;
 
 use crate::output::outcome::{ActionKind, OperatorAction};
 use shipper_core::cli_bridge::{
-    RunLiveness, RunObservation, observe_run, unfinished_evidence_consistent,
+    RunLiveness, RunObservation, controlled_stop_evidence_consistent, observe_run,
+    unfinished_evidence_consistent,
 };
 use shipper_core::state::consistency::verify_finalization_consistency;
 use shipper_core::state::events::{EVENTS_FILE, events_path};
@@ -86,6 +87,7 @@ struct EvidencePacket {
     reconciliation: Option<ReconciliationReport>,
     finalization_consistent: Option<bool>,
     unfinished_consistent: Option<bool>,
+    controlled_stop_consistent: Option<bool>,
     evidence: Vec<String>,
 }
 
@@ -157,6 +159,14 @@ fn load_evidence(
         )?),
         _ => None,
     };
+    let controlled_stop_consistent = match (&state, &receipt) {
+        (Some(state), None) => Some(controlled_stop_evidence_consistent(
+            &events_path(resolved_state_dir),
+            state,
+            reconciliation.as_ref(),
+        )?),
+        _ => None,
+    };
     let evidence = [
         (events_path(resolved_state_dir), EVENTS_FILE),
         (resolved_state_dir.join(STATE_FILE), STATE_FILE),
@@ -175,6 +185,7 @@ fn load_evidence(
         reconciliation,
         finalization_consistent,
         unfinished_consistent,
+        controlled_stop_consistent,
         evidence,
     })
 }
@@ -240,10 +251,74 @@ fn classify(
         RunObservation::Finished { plan_id, result } => {
             classify_finished(plan_id, &result, configured_state_dir, packet)
         }
+        RunObservation::Stopped {
+            plan_id, liveness, ..
+        } => classify_controlled_stop(plan_id, liveness, configured_state_dir, packet),
         RunObservation::Unfinished { plan_id, liveness } => {
             classify_unfinished(plan_id, liveness, configured_state_dir, packet)
         }
     }
+}
+
+fn classify_controlled_stop(
+    plan_id: Option<String>,
+    liveness: Option<RunLiveness>,
+    configured_state_dir: &Path,
+    packet: EvidencePacket,
+) -> DurableOperatorOutcome {
+    if packet.receipt.is_some()
+        || packet.state.is_none()
+        || packet.controlled_stop_consistent != Some(true)
+    {
+        return disagreement(plan_id, None, packet.evidence);
+    }
+    match liveness {
+        Some(RunLiveness::Live) => {
+            return outcome(
+                DurableStatus::Live,
+                plan_id,
+                None,
+                unsafe_safety("the exact local publisher process identity is still live"),
+                OperatorAction::posture(
+                    ActionKind::Status,
+                    "the exact publisher identity is live; continue read-only observation and do not resume",
+                ),
+                packet.evidence,
+            );
+        }
+        Some(RunLiveness::Unknown(_)) => {
+            return outcome(
+                DurableStatus::Unknown,
+                plan_id,
+                None,
+                unknown_safety(
+                    "controlled-stop marker exists but lock liveness remains inconclusive",
+                ),
+                OperatorAction::posture(
+                    ActionKind::InspectEvents,
+                    "inspect the marker and lock evidence; do not resume while liveness is inconclusive",
+                ),
+                packet.evidence,
+            );
+        }
+        None | Some(RunLiveness::NotLive) => {}
+    }
+    let Some(state) = packet.state.as_ref() else {
+        return disagreement(plan_id, None, packet.evidence);
+    };
+    let (safe_to_resume, next_action) = action_for_posture(
+        package_posture(state.packages.values().map(|package| &package.state)),
+        configured_state_dir,
+        false,
+    );
+    outcome(
+        DurableStatus::Interrupted,
+        plan_id,
+        None,
+        safe_to_resume,
+        next_action,
+        packet.evidence,
+    )
 }
 
 fn classify_finished(
@@ -510,16 +585,18 @@ fn is_no_evidence(packet: &EvidencePacket) -> bool {
 fn observation_plan_id(observation: &RunObservation) -> Option<&str> {
     match observation {
         RunObservation::NoEvidence => None,
-        RunObservation::Unfinished { plan_id, .. } | RunObservation::Finished { plan_id, .. } => {
-            plan_id.as_deref()
-        }
+        RunObservation::Unfinished { plan_id, .. }
+        | RunObservation::Finished { plan_id, .. }
+        | RunObservation::Stopped { plan_id, .. } => plan_id.as_deref(),
     }
 }
 
 fn observation_result(observation: &RunObservation) -> Option<&ExecutionResult> {
     match observation {
         RunObservation::Finished { result, .. } => Some(result),
-        RunObservation::NoEvidence | RunObservation::Unfinished { .. } => None,
+        RunObservation::NoEvidence
+        | RunObservation::Unfinished { .. }
+        | RunObservation::Stopped { .. } => None,
     }
 }
 
@@ -742,6 +819,7 @@ mod tests {
             reconciliation: None,
             finalization_consistent: None,
             unfinished_consistent: Some(true),
+            controlled_stop_consistent: None,
             evidence: vec![".operator-state/events.jsonl".into()],
         }
     }
@@ -792,6 +870,61 @@ mod tests {
             ActionKind::InspectEvents,
             false,
         )?;
+        let mut controlled = packet(
+            RunObservation::Stopped {
+                plan_id: Some("plan-a".into()),
+                reason: shipper_types::ControlledStopReason::NotPublishedRetryBudgetExhausted,
+                package: "demo@0.1.0".into(),
+                liveness: None,
+            },
+            Some(PackageState::Failed {
+                class: ErrorClass::Retryable,
+                message: "registry confirmed absence".into(),
+            }),
+        );
+        controlled.controlled_stop_consistent = Some(true);
+        assert_posture(
+            &classify(&plan, configured, controlled),
+            DurableStatus::Interrupted,
+            Some(true),
+            ActionKind::Resume,
+            false,
+        )?;
+        for (liveness, expected_status, expected_safety, expected_action) in [
+            (
+                RunLiveness::Live,
+                DurableStatus::Live,
+                Some(false),
+                ActionKind::Status,
+            ),
+            (
+                RunLiveness::Unknown(UnknownLivenessReason::CorruptLock),
+                DurableStatus::Unknown,
+                None,
+                ActionKind::InspectEvents,
+            ),
+        ] {
+            let mut blocked = packet(
+                RunObservation::Stopped {
+                    plan_id: Some("plan-a".into()),
+                    reason: shipper_types::ControlledStopReason::NotPublishedRetryBudgetExhausted,
+                    package: "demo@0.1.0".into(),
+                    liveness: Some(liveness),
+                },
+                Some(PackageState::Failed {
+                    class: ErrorClass::Retryable,
+                    message: "registry confirmed absence".into(),
+                }),
+            );
+            blocked.controlled_stop_consistent = Some(true);
+            assert_posture(
+                &classify(&plan, configured, blocked),
+                expected_status,
+                expected_safety,
+                expected_action,
+                false,
+            )?;
+        }
         let mut stale_ambiguous = packet(
             RunObservation::Unfinished {
                 plan_id: Some("plan-a".into()),
@@ -911,6 +1044,7 @@ mod tests {
                     reconciliation: None,
                     finalization_consistent: None,
                     unfinished_consistent: None,
+                    controlled_stop_consistent: None,
                     evidence: vec![".operator-state/state.json".into()],
                 },
             ),
@@ -930,6 +1064,7 @@ mod tests {
                     reconciliation: None,
                     finalization_consistent: None,
                     unfinished_consistent: None,
+                    controlled_stop_consistent: None,
                     evidence: vec![".operator-state/state.json".into()],
                 },
             ),

@@ -383,7 +383,10 @@ fn assert_sentinel_absent_from_output_and_state(
             let Some(name) = entry_path.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
-            if matches!(name, "state.json" | "events.jsonl" | "receipt.json") {
+            if matches!(
+                name,
+                "state.json" | "events.jsonl" | "receipt.json" | "reconciliation.json"
+            ) {
                 let contents = fs::read(&entry_path).expect("read retained evidence");
                 assert!(
                     !String::from_utf8_lossy(&contents).contains(sentinel),
@@ -1098,6 +1101,67 @@ struct StillUnknownRun {
     state_dir: std::path::PathBuf,
     publish_log: std::path::PathBuf,
     output: std::process::Output,
+}
+
+struct ControlledStopRun {
+    _workspace: tempfile::TempDir,
+    state_dir: std::path::PathBuf,
+    output: std::process::Output,
+}
+
+fn run_initial_controlled_stop_publish(
+    format: Option<&str>,
+    block_reconciliation_write: bool,
+) -> Result<ControlledStopRun> {
+    let td = tempdir().context("create initial controlled-stop workspace")?;
+    create_single_crate_workspace(td.path());
+    let (new_path, real_cargo, fake_cargo) = setup_fake_cargo(td.path());
+    let registry = spawn_bounded_registry(vec![404, 404], 2);
+    let state_dir = td.path().join("initial-controlled-stop-state");
+    if block_reconciliation_write {
+        fs::create_dir_all(state_dir.join("reconciliation.json"))?;
+    }
+    let publish_log = td.path().join("initial-controlled-stop.log");
+    let mut command = loopback_shipper_cmd();
+    command
+        .timeout(Duration::from_secs(20))
+        .current_dir(td.path())
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--api-base")
+        .arg(&registry.base_url)
+        .arg("--allow-dirty")
+        .arg("--skip-ownership-check")
+        .arg("--readiness-timeout")
+        .arg("0ms")
+        .arg("--readiness-poll")
+        .arg("0ms")
+        .arg("--max-attempts")
+        .arg("1")
+        .arg("--base-delay")
+        .arg("0ms")
+        .arg("--state-dir")
+        .arg(&state_dir);
+    if let Some(format) = format {
+        command.arg("--format").arg(format);
+    }
+    let output = command
+        .arg("publish")
+        .env("PATH", &new_path)
+        .env("REAL_CARGO", &real_cargo)
+        .env("SHIPPER_CARGO_BIN", &fake_cargo)
+        .env("SHIPPER_FAKE_PUBLISH_EXIT", "1")
+        .env("SHIPPER_FAKE_PUBLISH_STDERR", "ambiguous transport close")
+        .env("SHIPPER_FAKE_PUBLISH_LOG", &publish_log)
+        .env("CARGO_REGISTRY_TOKEN", "CONTROLLED_STOP_SECRET_SENTINEL")
+        .output()?;
+    registry.finish(Duration::from_secs(2))?;
+    ensure!(read_publish_log(&publish_log).len() == 1);
+    Ok(ControlledStopRun {
+        _workspace: td,
+        state_dir,
+        output,
+    })
 }
 
 fn run_ambiguous_still_unknown_publish(format: Option<&str>) -> Result<StillUnknownRun> {
@@ -2264,4 +2328,344 @@ fn publish_mixed_existing_and_missing_failure_records_failed_package() {
     );
 
     registry.join();
+}
+
+#[test]
+fn controlled_stop_initial_human_and_json_envelopes_have_semantic_parity() -> Result<()> {
+    let human = run_initial_controlled_stop_publish(None, false)?;
+    let json = run_initial_controlled_stop_publish(Some("json"), false)?;
+    ensure!(human.output.status.code() == Some(1));
+    ensure!(json.output.status.code() == Some(1));
+    ensure!(human.output.stdout.is_empty());
+    ensure!(json.output.stdout.is_empty());
+
+    let human_stderr = String::from_utf8(human.output.stderr.clone())?;
+    let human_result = human_outcome_value(&human_stderr, "Result:")?;
+    let human_safe = human_outcome_value(&human_stderr, "Safe to rerun:")?;
+    let human_next = human_outcome_value(&human_stderr, "Next:")?;
+    let human_evidence = human_outcome_value(&human_stderr, "Evidence:")?;
+    ensure!(human_result.starts_with("failed"));
+    ensure!(human_safe.starts_with("no"));
+
+    let report: serde_json::Value = serde_json::from_slice(&json.output.stderr)?;
+    ensure!(report["schema_version"] == "shipper.publish.error.v1");
+    ensure!(report["category"] == "recoverable_stop");
+    ensure!(report["safe_to_rerun"]["value"] == false);
+    ensure!(
+        report["safe_to_rerun"]["reason"]
+            == "do not rerun publish; retained evidence authorizes controlled resume"
+    );
+    ensure!(
+        human_safe.ends_with(
+            report["safe_to_rerun"]["reason"]
+                .as_str()
+                .context("safe-to-rerun reason")?
+        ),
+        "human={human_safe:?} JSON={:?}",
+        report["safe_to_rerun"]["reason"]
+    );
+    ensure!(report["next_action"]["kind"] == "resume");
+    ensure!(report["next_action"].get("command").is_none());
+    ensure!(
+        human_next
+            == report["next_action"]["reason"]
+                .as_str()
+                .context("next reason")?
+    );
+
+    let human_evidence = human_evidence.split(", ").collect::<Vec<_>>();
+    let json_evidence = report["evidence"]
+        .as_array()
+        .context("JSON evidence")?
+        .iter()
+        .map(|value| value.as_str().context("string evidence"))
+        .collect::<Result<Vec<_>>>()?;
+    ensure!(human_evidence.len() == 3);
+    ensure!(json_evidence.len() == 3);
+    let normalize = |paths: &[&str], state_dir: &Path| {
+        paths
+            .iter()
+            .map(|path| normalize_state_identity(path, state_dir))
+            .collect::<Vec<_>>()
+    };
+    ensure!(
+        normalize(&human_evidence, &human.state_dir) == normalize(&json_evidence, &json.state_dir)
+    );
+    for run in [&human, &json] {
+        ensure!(run.state_dir.join("state.json").exists());
+        ensure!(run.state_dir.join("events.jsonl").exists());
+        ensure!(run.state_dir.join("reconciliation.json").exists());
+        ensure!(!run.state_dir.join("receipt.json").exists());
+        assert_sentinel_absent_from_output_and_state(
+            &run.output,
+            &run.state_dir,
+            "CONTROLLED_STOP_SECRET_SENTINEL",
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn controlled_stop_without_reconciliation_denies_resume_in_human_and_json() -> Result<()> {
+    let human = run_initial_controlled_stop_publish(None, true)?;
+    let json = run_initial_controlled_stop_publish(Some("json"), true)?;
+    ensure!(human.output.status.code() == Some(1));
+    ensure!(json.output.status.code() == Some(1));
+    let human_stderr = String::from_utf8(human.output.stderr.clone())?;
+    ensure!(
+        human_stderr
+            .contains("reconciliation evidence persistence failed; recovery is not authorized"),
+        "{human_stderr}"
+    );
+    let human_safe = human_outcome_value(&human_stderr, "Safe to rerun:")?;
+    let human_next = human_outcome_value(&human_stderr, "Next:")?;
+    ensure!(human_safe.starts_with("no"));
+    ensure!(human_safe.contains("recovery safety is not proven"));
+    ensure!(human_next.contains("do not resume"));
+    ensure!(!human_stderr.contains("authorizes a controlled resume"));
+
+    let report: serde_json::Value = serde_json::from_slice(&json.output.stderr)?;
+    ensure!(report["category"] == "recoverable_stop");
+    ensure!(report["safe_to_rerun"]["value"] == false);
+    ensure!(
+        report["safe_to_rerun"]["reason"]
+            == "reconciliation evidence was not persisted, so recovery safety is not proven"
+    );
+    ensure!(report["next_action"]["kind"] == "inspect_events");
+    ensure!(
+        report["next_action"]["reason"]
+            == "inspect retained events and state; do not resume without reconciliation evidence"
+    );
+    ensure!(report["evidence"].as_array().map(Vec::len) == Some(2));
+    ensure!(
+        !String::from_utf8_lossy(&json.output.stderr).contains("authorizes a controlled resume")
+    );
+    for run in [&human, &json] {
+        ensure!(run.state_dir.join("state.json").exists());
+        ensure!(run.state_dir.join("events.jsonl").exists());
+        ensure!(run.state_dir.join("reconciliation.json").is_dir());
+        ensure!(!run.state_dir.join("receipt.json").exists());
+        assert_sentinel_absent_from_output_and_state(
+            &run.output,
+            &run.state_dir,
+            "CONTROLLED_STOP_SECRET_SENTINEL",
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn conclusive_not_published_stop_status_and_resume_preserve_completed_packages() -> Result<()> {
+    const SECRET: &str = "CONTROLLED_STOP_SECRET_SENTINEL";
+
+    let td = tempdir().context("create controlled-stop workspace")?;
+    create_workspace(td.path());
+    let (new_path, real_cargo, fake_cargo) = setup_fake_cargo(td.path());
+    let state_dir = td.path().join("controlled-stop-state");
+    let publish_log = td.path().join("controlled-stop-publish.log");
+
+    // Core and utils already exist. App is absent before and after its ambiguous
+    // Cargo failure, so registry truth conclusively permits a controlled stop.
+    let first_registry = spawn_bounded_registry(vec![200, 200, 404, 404, 200], 5);
+    let first_registry_base = first_registry.base_url.clone();
+    let first = loopback_shipper_cmd()
+        .timeout(Duration::from_secs(20))
+        .current_dir(td.path())
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--api-base")
+        .arg(&first_registry_base)
+        .arg("--allow-dirty")
+        .arg("--skip-ownership-check")
+        .arg("--verify-timeout")
+        .arg("0ms")
+        .arg("--verify-poll")
+        .arg("0ms")
+        .arg("--readiness-timeout")
+        .arg("0ms")
+        .arg("--readiness-poll")
+        .arg("0ms")
+        .arg("--max-attempts")
+        .arg("1")
+        .arg("--base-delay")
+        .arg("0ms")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("publish")
+        .env("PATH", &new_path)
+        .env("REAL_CARGO", &real_cargo)
+        .env("SHIPPER_CARGO_BIN", &fake_cargo)
+        .env("SHIPPER_FAKE_PUBLISH_EXIT", "1")
+        .env("SHIPPER_FAKE_PUBLISH_STDERR", "ambiguous transport close")
+        .env("SHIPPER_FAKE_PUBLISH_LOG", &publish_log)
+        .env("CARGO_REGISTRY_TOKEN", SECRET)
+        .output()
+        .context("run controlled-stop publish")?;
+    ensure!(
+        first.status.code() == Some(1),
+        "publish status={:?}",
+        first.status.code()
+    );
+    ensure!(state_dir.join("state.json").exists());
+    ensure!(state_dir.join("events.jsonl").exists());
+    ensure!(state_dir.join("reconciliation.json").exists());
+    ensure!(!state_dir.join("receipt.json").exists());
+    assert_sentinel_absent_from_output_and_state(&first, &state_dir, SECRET);
+
+    let initial_state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(state_dir.join("state.json"))?)?;
+    ensure!(initial_state["packages"]["app@0.1.0"]["state"]["state"] == "failed");
+    ensure!(initial_state["packages"]["app@0.1.0"]["state"]["class"] == "retryable");
+    let event_values = fs::read_to_string(state_dir.join("events.jsonl"))?
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let terminal = event_values
+        .last()
+        .context("terminal controlled-stop event")?;
+    ensure!(terminal["event_type"]["type"] == "execution_stopped");
+    ensure!(terminal["event_type"]["reason"] == "not_published_retry_budget_exhausted");
+    ensure!(terminal["package"] == "app@0.1.0");
+    let reconciliation: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(state_dir.join("reconciliation.json"))?)?;
+    ensure!(reconciliation["plan_id"] == initial_state["plan_id"]);
+    ensure!(reconciliation["registry"] == initial_state["registry"]);
+    let latest = reconciliation["records"]
+        .as_array()
+        .context("reconciliation records")?
+        .last()
+        .context("latest reconciliation record")?;
+    ensure!(latest["package"] == "app@0.1.0");
+    ensure!(latest["outcome"]["outcome"] == "not_published");
+    ensure!(latest["operator_action"] == "retry_allowed");
+
+    let first_calls = read_publish_log(&publish_log);
+    ensure!(
+        first_calls.len() == 1,
+        "initial Cargo calls={first_calls:?}"
+    );
+    ensure!(
+        first_calls[0].contains("-p app"),
+        "initial Cargo calls={first_calls:?}"
+    );
+
+    let invoke_status = |json: bool| -> Result<std::process::Output> {
+        let mut command = loopback_shipper_cmd();
+        command
+            .timeout(Duration::from_secs(20))
+            .current_dir(td.path())
+            .arg("--manifest-path")
+            .arg(td.path().join("Cargo.toml"))
+            .arg("--api-base")
+            .arg(&first_registry_base)
+            .arg("--state-dir")
+            .arg(&state_dir);
+        if json {
+            command.arg("--format").arg("json");
+        }
+        Ok(command
+            .arg("status")
+            .arg("--durable")
+            .env("CARGO_REGISTRY_TOKEN", SECRET)
+            .output()?)
+    };
+    let human = invoke_status(false)?;
+    let json = invoke_status(true)?;
+    ensure!(
+        human.status.success(),
+        "human status={:?}",
+        human.status.code()
+    );
+    ensure!(
+        json.status.success(),
+        "JSON status={:?}",
+        json.status.code()
+    );
+    let human_stdout = String::from_utf8(human.stdout.clone())?;
+    ensure!(
+        human_stdout.contains("Durable result: interrupted"),
+        "{human_stdout}"
+    );
+    ensure!(
+        human_stdout.contains("Safe to resume: yes"),
+        "{human_stdout}"
+    );
+    ensure!(
+        human_stdout.contains("Next: resume is safe"),
+        "{human_stdout}"
+    );
+    let status_json: serde_json::Value = serde_json::from_slice(&json.stdout)?;
+    ensure!(status_json["outcome"]["status"] == "interrupted");
+    ensure!(status_json["outcome"]["safe_to_resume"]["value"] == true);
+    ensure!(status_json["outcome"]["next_action"]["kind"] == "resume");
+    for output in [&human, &json] {
+        assert_sentinel_absent_from_output_and_state(output, &state_dir, SECRET);
+    }
+
+    // The new run segment is granted a second total attempt. The registry sees
+    // exactly one successful post-publish visibility check, and only app is
+    // dispatched to Cargo; core/utils remain retained from the first segment.
+    let resumed = loopback_shipper_cmd()
+        .timeout(Duration::from_secs(20))
+        .current_dir(td.path())
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--api-base")
+        .arg(&first_registry_base)
+        .arg("--allow-dirty")
+        .arg("--skip-ownership-check")
+        .arg("--verify-timeout")
+        .arg("0ms")
+        .arg("--verify-poll")
+        .arg("0ms")
+        .arg("--readiness-timeout")
+        .arg("0ms")
+        .arg("--readiness-poll")
+        .arg("0ms")
+        .arg("--max-attempts")
+        .arg("2")
+        .arg("--base-delay")
+        .arg("0ms")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("resume")
+        .env("PATH", &new_path)
+        .env("REAL_CARGO", &real_cargo)
+        .env("SHIPPER_CARGO_BIN", &fake_cargo)
+        .env("SHIPPER_FAKE_PUBLISH_EXIT", "0")
+        .env("SHIPPER_FAKE_PUBLISH_STDERR", "")
+        .env("SHIPPER_FAKE_PUBLISH_LOG", &publish_log)
+        .env("CARGO_REGISTRY_TOKEN", SECRET)
+        .output()
+        .context("resume controlled stop")?;
+    ensure!(
+        resumed.status.success(),
+        "resume status={:?}; stderr={}",
+        resumed.status.code(),
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    first_registry.finish(Duration::from_secs(2))?;
+    assert_sentinel_absent_from_output_and_state(&resumed, &state_dir, SECRET);
+
+    let all_calls = read_publish_log(&publish_log);
+    ensure!(all_calls.len() == 2, "all Cargo calls={all_calls:?}");
+    ensure!(
+        all_calls.iter().all(|call| call.contains("-p app")),
+        "all Cargo calls={all_calls:?}"
+    );
+    ensure!(
+        all_calls
+            .iter()
+            .all(|call| !call.contains("-p core") && !call.contains("-p utils")),
+        "all Cargo calls={all_calls:?}"
+    );
+
+    let receipt: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(state_dir.join("receipt.json"))?)?;
+    let packages = receipt["packages"].as_array().context("receipt packages")?;
+    ensure!(receipt_package_state(packages, "core") == "skipped");
+    ensure!(receipt_package_state(packages, "utils") == "skipped");
+    ensure!(receipt_package_state(packages, "app") == "published");
+    ensure!(receipt["execution_result"] == "success");
+    Ok(())
 }
