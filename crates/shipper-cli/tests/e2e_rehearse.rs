@@ -38,6 +38,7 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -246,6 +247,64 @@ fn spawn_registry_at(addr: &str) -> (String, std::sync::mpsc::Sender<()>, Regist
     )
 }
 
+fn spawn_counting_registry(status: u16) -> (String, std::sync::mpsc::Sender<()>, Arc<AtomicUsize>) {
+    let server = Server::http("127.0.0.1:0").expect("server");
+    let base_url = format!("http://{}", server.server_addr());
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let requests_for_thread = Arc::clone(&requests);
+
+    thread::spawn(move || {
+        loop {
+            if stop_rx.try_recv().is_ok() {
+                break;
+            }
+            match server.recv_timeout(Duration::from_millis(100)) {
+                Ok(Some(request)) => {
+                    requests_for_thread.fetch_add(1, Ordering::SeqCst);
+                    request
+                        .respond(
+                            Response::from_string("{}")
+                                .with_status_code(StatusCode(status))
+                                .with_header(
+                                    Header::from_bytes("Content-Type", "application/json")
+                                        .expect("header"),
+                                ),
+                        )
+                        .expect("respond");
+                }
+                Ok(None) => {}
+                Err(_) => break,
+            }
+        }
+    });
+
+    (base_url, stop_tx, requests)
+}
+
+fn write_rehearsal_isolation_config(root: &Path, live_url: &str, rehearsal_url: &str) {
+    write_file(
+        &root.join(".shipper.toml"),
+        &format!(
+            r#"[registry]
+name = "live"
+api_base = "{live_url}"
+index_base = "{live_url}"
+
+[[registries.registries]]
+name = "rehearsal"
+api_base = "{rehearsal_url}"
+index_base = "{rehearsal_url}"
+
+[rehearsal]
+enabled = true
+allow_loopback = true
+registry = "rehearsal"
+"#
+        ),
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Event / state parsing helpers.
 // ---------------------------------------------------------------------------
@@ -383,6 +442,86 @@ fn count_fake_cargo_publishes(log_path: &Path, crate_name: &str) -> usize {
         .lines()
         .filter(|line| line.contains("publish") && line.contains(crate_name))
         .count()
+}
+
+#[test]
+#[serial]
+fn rehearsal_authority_alias_is_rejected_before_publish_network_or_state() {
+    let td = tempdir().expect("tempdir");
+    create_three_crate_workspace(td.path());
+    let bin = td.path().join("bin");
+    fs::create_dir_all(&bin).expect("mkdir bin");
+    let fake_cargo = write_fake_cargo(&bin);
+    let cargo_log = td.path().join("cargo.log");
+    let state_dir = td.path().join("evidence");
+    let (registry_url, stop, requests) = spawn_counting_registry(200);
+    write_rehearsal_isolation_config(td.path(), &registry_url, &registry_url);
+
+    let output = loopback_shipper_cmd()
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--registries")
+        .arg("rehearsal")
+        .arg("--rehearsal-registry")
+        .arg("rehearsal")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("rehearse")
+        .env("SHIPPER_CARGO_BIN", &fake_cargo)
+        .env("SHIPPER_FAKE_CARGO_LOG", &cargo_log)
+        .output()
+        .expect("run rehearse");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("authority overlaps"), "stderr: {stderr}");
+    assert!(!state_dir.exists(), "no rehearsal evidence may be created");
+    assert!(!cargo_log.exists(), "publish/smoke Cargo must not run");
+    assert_eq!(requests.load(Ordering::SeqCst), 0, "registry requests");
+    let _ = stop.send(());
+}
+
+#[test]
+#[serial]
+fn rehearsal_authority_distinct_loopback_runs_selected_catalog_entry() {
+    let td = tempdir().expect("tempdir");
+    create_three_crate_workspace(td.path());
+    let bin = td.path().join("bin");
+    fs::create_dir_all(&bin).expect("mkdir bin");
+    let fake_cargo = write_fake_cargo(&bin);
+    let cargo_log = td.path().join("cargo.log");
+    let state_dir = td.path().join("evidence");
+    let (rehearsal_url, rehearsal_stop, rehearsal_requests) = spawn_counting_registry(200);
+    write_rehearsal_isolation_config(td.path(), "https://registry.example", &rehearsal_url);
+
+    let output = loopback_shipper_cmd()
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--registries")
+        .arg("rehearsal")
+        .arg("--rehearsal-registry")
+        .arg("rehearsal")
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("rehearse")
+        .env("SHIPPER_CARGO_BIN", &fake_cargo)
+        .env("SHIPPER_FAKE_CARGO_LOG", &cargo_log)
+        .output()
+        .expect("run rehearse");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("rehearsal OK: 3 packages"));
+    let cargo_calls = fs::read_to_string(&cargo_log).expect("cargo log");
+    assert_eq!(cargo_calls.lines().count(), 3, "cargo calls: {cargo_calls}");
+    assert!(cargo_calls.lines().all(|line| line.contains("publish")));
+    assert_eq!(rehearsal_requests.load(Ordering::SeqCst), 3);
+    assert!(state_dir.join("events.jsonl").exists());
+    assert!(state_dir.join("rehearsal.json").exists());
+    let _ = rehearsal_stop.send(());
 }
 
 fn assert_live_rehearsal_interrupted_state(state_dir: &Path) {

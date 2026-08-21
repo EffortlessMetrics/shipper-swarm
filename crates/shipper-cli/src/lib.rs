@@ -238,7 +238,7 @@ struct Cli {
     #[arg(long, global = true)]
     resume_from: Option<String>,
 
-    /// Name of a registry (from `[[registries]]` in `.shipper.toml`) to
+    /// Name of a registry (from `[[registries.registries]]` in `.shipper.toml`) to
     /// rehearse the publish against before live dispatch.
     ///
     /// Runs the rehearsal publish flow against the alternate registry and
@@ -497,19 +497,27 @@ admission.
 ")]
     Resume,
     /// Rehearse a release against an alternate registry.
-    ///
-    /// Publishes every crate in the plan to the registry named by
-    /// `--rehearsal-registry` (or `[rehearsal] registry = "..."` in
-    /// `.shipper.toml`), verifies visibility on that registry, and
-    /// emits a `RehearsalComplete { passed, ... }` event to
-    /// `events.jsonl` so the outcome is auditable.
-    ///
-    /// Rehearse must target a non-live registry (kellnr, a sandbox
-    /// crates.io account, or a throwaway alternate registry). Shipper
-    /// refuses to rehearse against the same registry as the live target.
-    ///
-    /// When a rehearsal registry is configured, live publish later enforces
-    /// the recorded `rehearsal.json` gate unless `--skip-rehearsal` is used.
+    #[command(long_about = "\
+Rehearse a release against an alternate registry.
+
+Publishes every crate in the plan to the registry named by
+`--rehearsal-registry` (or `[rehearsal] registry = \"...\"` in
+`.shipper.toml`), verifies visibility on that registry, and emits a
+`RehearsalComplete { passed, ... }` event to `events.jsonl` so the outcome is
+auditable.
+
+The named registry must have a matching `[[registries.registries]]` entry and
+must be selected for the run with `--registries NAME --rehearsal-registry NAME`.
+
+Rehearse must target a separately named registry. The target requires a
+distinct configured API/index authority. Shipper rejects name or authority
+overlap with the live target and rejects every crates.io-family host. This guard
+checks configured identity; it does not prove DNS or administrative isolation
+of a remote registry.
+
+When a rehearsal registry is configured, live publish later enforces the
+recorded `rehearsal.json` gate unless `--skip-rehearsal` is used.
+")]
     Rehearse,
     /// Compare local workspace versions to the registry.
     #[command(long_about = "\

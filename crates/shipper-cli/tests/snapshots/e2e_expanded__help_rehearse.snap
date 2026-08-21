@@ -1,23 +1,37 @@
 ---
 source: crates/shipper-cli/tests/e2e_expanded.rs
-expression: normalize_stderr(&stdout)
+expression: trim_trailing_line_whitespace(&normalize_stderr(&stdout))
 ---
-Validate a configuration file
+Rehearse a release against an alternate registry.
 
-Usage: shipper-cli config validate [OPTIONS]
+Publishes every crate in the plan to the registry named by
+`--rehearsal-registry` (or `[rehearsal] registry = "..."` in
+`.shipper.toml`), verifies visibility on that registry, and emits a
+`RehearsalComplete { passed, ... }` event to `events.jsonl` so the outcome is
+auditable.
+
+The named registry must have a matching `[[registries.registries]]` entry and
+must be selected for the run with `--registries NAME --rehearsal-registry NAME`.
+
+Rehearse must target a separately named registry. The target requires a
+distinct configured API/index authority. Shipper rejects name or authority
+overlap with the live target and rejects every crates.io-family host. This guard
+checks configured identity; it does not prove DNS or administrative isolation
+of a remote registry.
+
+When a rehearsal registry is configured, live publish later enforces the
+recorded `rehearsal.json` gate unless `--skip-rehearsal` is used.
+
+
+Usage: shipper-cli rehearse [OPTIONS]
 
 Options:
-  -p, --path <PATH>
-          Path to the configuration file to validate (default: .shipper.toml)
-          
-          [default: .shipper.toml]
-
       --config <CONFIG>
           Path to a custom configuration file (.shipper.toml)
 
       --manifest-path <MANIFEST_PATH>
           Path to the workspace Cargo.toml
-          
+
           [default: Cargo.toml]
 
       --registry <REGISTRY>
@@ -46,7 +60,7 @@ Options:
 
       --strict-ownership
           Require a registry token during strict-ownership preflight and before publish execution. Preflight also fails when ownership verification fails.
-          
+
           Note: crates.io token scopes may not allow querying owners; this is best-effort.
 
       --no-verify
@@ -132,24 +146,24 @@ Options:
 
       --rehearsal-registry <REHEARSAL_REGISTRY>
           Name of a registry (from `[[registries.registries]]` in `.shipper.toml`) to rehearse the publish against before live dispatch.
-          
+
           Runs the rehearsal publish flow against the alternate registry and enables the live-publish rehearsal gate when configured.
 
       --skip-rehearsal
           Skip rehearsal even if `.shipper.toml` enables it.
-          
+
           Use with caution — rehearsal is the proof boundary between "we built it" and "we verified it actually resolves from a registry." Bypassing it should be rare.
 
       --smoke-install <CRATE>
           Crate name to smoke-install after a successful rehearsal.
-          
+
           Runs `cargo install --registry <rehearsal> <CRATE>` against the rehearsal registry to prove the crate actually resolves and installs end-to-end — the scenario that workspace-path dependencies defeat and that killed the rc.1 first-publish.
-          
+
           The named crate must be in the plan AND have a `[[bin]]` target. Library-only crates cannot be smoke-installed directly; use a consumer-workspace build instead (follow-on).
 
       --format <FORMAT>
           Output format: text (default) or json
-          
+
           [default: text]
           [possible values: text, json]
 

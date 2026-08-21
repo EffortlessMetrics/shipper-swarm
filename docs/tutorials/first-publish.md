@@ -88,7 +88,7 @@ unknown evidence into success.
 ## 6. Rehearse safely
 
 For this workspace's packaged artifacts, configure a non-live registry and run
-`shipper rehearse --rehearsal-registry <name>` as described in
+`shipper rehearse --registries <name> --rehearsal-registry <name>` as described in
 [the alternate-registry guide](../how-to/rehearse-against-an-alt-registry.md).
 That is the public, non-destructive rehearsal path.
 

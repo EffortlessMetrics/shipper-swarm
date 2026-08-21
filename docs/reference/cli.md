@@ -58,6 +58,14 @@ evidence for each targeted registry.
 | `shipper completion <shell>` | Generate shell completion scripts | No |
 | `shipper ci <platform>` | Print a CI workflow template | No |
 
+`shipper rehearse` requires the rehearsal catalog entry to have a different
+name and a distinct normalized API/index authority from the live target. It
+also rejects `crates.io` and every `.crates.io` host regardless of URL path or
+port. Use `--registries rehearsal --rehearsal-registry rehearsal` to select an
+entry named `rehearsal`; declaring `[[registries.registries]]` alone does not
+change the command's selected registry. This is a configured-identity guard, not proof of
+DNS, resolved-address, account, namespace, or administrative isolation.
+
 ## Most-used flags
 
 ### Global
