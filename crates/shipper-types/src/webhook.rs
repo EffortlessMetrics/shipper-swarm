@@ -45,10 +45,18 @@ pub struct WebhookConfig {
     pub timeout_secs: u64,
 }
 
+/// Default delivery timeout, in seconds.
+///
+/// This is a persisted contract value, not just an internal constant: it is the
+/// `serde` default for [`WebhookConfig::timeout_secs`], so a configuration file
+/// that omits the field deserializes to it. Changing it changes the meaning of
+/// every stored webhook configuration that relies on the default.
 fn default_timeout() -> u64 {
     30
 }
 
+/// Placeholder written in place of a credential-bearing value by
+/// [`WebhookConfig`]'s manual [`fmt::Debug`] implementation.
 const REDACTED_SECRET: &str = "<redacted>";
 
 impl fmt::Debug for WebhookConfig {
