@@ -21,7 +21,7 @@
 //! send_webhook(&config, &payload).expect("send");
 //! ```
 
-use std::{fmt, time::Duration};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use hmac::{Hmac, Mac};
@@ -29,70 +29,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::Sha256;
 
-/// Webhook type
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum WebhookType {
-    /// Generic webhook (POST JSON)
-    #[default]
-    Generic,
-    /// Slack incoming webhook
-    Slack,
-    /// Discord webhook
-    Discord,
-}
-
-/// Webhook configuration
-///
-/// `Debug` is implemented manually so signing secrets and credential-bearing
-/// webhook URLs are not copied into diagnostics, error chains, or evidence
-/// that formats configuration values.
-#[derive(Clone, Serialize, Deserialize)]
-pub struct WebhookConfig {
-    /// Webhook URL
-    pub url: String,
-    /// Type of webhook
-    #[serde(default)]
-    pub webhook_type: WebhookType,
-    /// Optional secret for payload signing
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub secret: Option<String>,
-    /// Timeout in seconds
-    #[serde(default = "default_timeout")]
-    pub timeout_secs: u64,
-}
-
-fn default_timeout() -> u64 {
-    30
-}
-
-const REDACTED_SECRET: &str = "<redacted>";
-
-impl fmt::Debug for WebhookConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let safe_url = if self.url.is_empty() {
-            ""
-        } else {
-            REDACTED_SECRET
-        };
-        f.debug_struct("WebhookConfig")
-            .field("url", &safe_url)
-            .field("webhook_type", &self.webhook_type)
-            .field("secret", &self.secret.as_ref().map(|_| REDACTED_SECRET))
-            .field("timeout_secs", &self.timeout_secs)
-            .finish()
-    }
-}
-
-impl Default for WebhookConfig {
-    fn default() -> Self {
-        Self {
-            url: String::new(),
-            webhook_type: WebhookType::default(),
-            secret: None,
-            timeout_secs: default_timeout(),
-        }
-    }
-}
+// The webhook *configuration* values live in `shipper-types` so the contract
+// crate can describe a configured webhook without inheriting this crate's HTTP
+// and signing dependencies. Delivery behavior stays here. These re-exports keep
+// `shipper_webhook::{WebhookConfig, WebhookType}` working as the public path.
+pub use shipper_types::webhook::{WebhookConfig, WebhookType};
 
 /// Webhook payload
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

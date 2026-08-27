@@ -2570,7 +2570,6 @@ dependencies = [
  "shipper-duration",
  "shipper-encrypt",
  "shipper-retry",
- "shipper-webhook",
 ]
 
 [[package]]
@@ -2585,6 +2584,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "shipper-types",
  "tempfile",
  "tiny_http",
  "tokio",

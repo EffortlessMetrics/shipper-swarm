@@ -83,7 +83,7 @@ These crates have standalone value or a stable contract worth versioning:
 | `shipper-duration` | Human-friendly duration parsing and serde codecs. |
 | `shipper-retry` | Retry/backoff strategies with jitter. |
 | `shipper-encrypt` | AES-256-GCM encryption for state files. |
-| `shipper-webhook` | Webhook notifications for publish lifecycle events. |
+| `shipper-webhook` | Webhook delivery, signing, and payload rendering for publish lifecycle events. Configuration values are re-exported from `shipper-types`. |
 | `shipper-sparse-index` | Cargo sparse-index path derivation and version lookup. |
 | `shipper-cargo-failure` | Cargo publish stderr classification. |
 | `shipper-output-sanitizer` | Token and secret redaction from captured cargo output. |
@@ -138,6 +138,9 @@ publishability, targets, workspace dependencies, surface hashes, and the
 - `shipper-cli` depends on `shipper-core`;
 - `shipper-core` has no normal, dev, or build dependency on `shipper`,
   `shipper-cli`, `clap`, or `indicatif`;
+- `shipper-types` has no normal, dev, or build dependency on `shipper-webhook`
+  (the contract hub does not depend on delivery behavior — see #261; further
+  behavior crates join this rule as each inversion lands);
 - `xtask` is the only private workspace package.
 
 Any change that makes `shipper-core` depend on `shipper-cli` or `shipper`, turns
@@ -266,15 +269,27 @@ shipper-registry -> shipper-sparse-index
 shipper-registry -> shipper-output-sanitizer
 
 shipper-types -> shipper-encrypt
-shipper-types -> shipper-webhook
 shipper-types -> shipper-retry
 shipper-types -> shipper-duration
 
+shipper-webhook -> shipper-types
+
 Leaf support crates:
   shipper-cargo-failure, shipper-duration, shipper-encrypt,
-  shipper-output-sanitizer, shipper-retry, shipper-sparse-index,
-  shipper-webhook
+  shipper-output-sanitizer, shipper-retry, shipper-sparse-index
 ```
+
+`shipper-types` is the domain-contract hub. The long-term direction (#261) is
+behavior depending on contracts, never the reverse: a contract crate that
+depends on a delivery crate makes every types-only consumer inherit machinery
+it does not use.
+
+`shipper-webhook` is the first edge inverted. Its configuration values
+(`WebhookConfig`, `WebhookType`) are now defined in `shipper_types::webhook`
+and re-exported from `shipper_webhook`, so the public paths are unchanged while
+`shipper-types` no longer pulls an HTTP/TLS stack (`reqwest`, `rustls`,
+`hyper`, `tokio`) into every consumer's graph. `shipper-encrypt`,
+`shipper-retry`, and `shipper-duration` remain to be inverted.
 
 ## Conventions
 
