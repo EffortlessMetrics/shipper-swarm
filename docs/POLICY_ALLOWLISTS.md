@@ -14,6 +14,7 @@ dense machine-maintained data.
 | `policy/clippy-exceptions.toml` | Permanent Clippy exceptions with business justification | `cargo xtask check-clippy-exceptions` |
 | `policy/no-panic-baseline.json` | Debt snapshot of existing panic-family calls (generated) | `cargo xtask no-panic check --mode blocking` |
 | `policy/non-rust-allowlist.toml` | General non-Rust files (docs, configs, templates) | `cargo xtask check-file-policy` |
+| `policy/non-rust-debt.toml` | Temporary non-Rust file debt awaiting cleanup or durable classification | `cargo xtask check-file-policy`; `cargo xtask non-rust propose` |
 | `policy/generated-allowlist.toml` | Machine-generated files (snapshots, baselines) | `cargo xtask check-generated` |
 | `policy/executable-allowlist.toml` | Files with execute permission | `cargo xtask check-executable-files` |
 | `policy/dependency-surface-allowlist.toml` | Dependency metadata and lock files | `cargo xtask check-dependency-surfaces` |
