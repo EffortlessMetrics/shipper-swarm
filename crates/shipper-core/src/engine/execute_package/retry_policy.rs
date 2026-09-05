@@ -1,11 +1,11 @@
-use std::time::Duration;
-
-use shipper_types::retry::{PerErrorConfig, RetryStrategyConfig, RetryStrategyType};
+use shipper_types::retry::{PerErrorConfig, RetryStrategyConfig};
 use shipper_types::{ErrorClass, RuntimeOptions};
 
 /// Effective retry policy for one classified failure.
 ///
-/// `config.max_attempts` is always bounded by the global cumulative ceiling.
+/// The top-level runtime policy is the fallback when that class has no
+/// override. CLI overrides have already been projected over every configured
+/// class by `shipper-config` before the engine receives `RuntimeOptions`.
 /// `override_configured` is retained because permanent failures remain
 /// non-retryable unless the operator explicitly configured that class.
 #[derive(Debug, Clone)]
@@ -22,7 +22,7 @@ impl RetryDecision {
 }
 
 pub(super) fn retry_decision(opts: &RuntimeOptions, class: &ErrorClass) -> RetryDecision {
-    let global = RetryStrategyConfig {
+    let fallback = RetryStrategyConfig {
         strategy: opts.retry_strategy,
         max_attempts: opts.max_attempts,
         base_delay: opts.base_delay,
@@ -30,11 +30,11 @@ pub(super) fn retry_decision(opts: &RuntimeOptions, class: &ErrorClass) -> Retry
         jitter: opts.retry_jitter,
     };
 
-    effective_retry_decision(global, &opts.retry_per_error, class)
+    effective_retry_decision(fallback, &opts.retry_per_error, class)
 }
 
 fn effective_retry_decision(
-    global: RetryStrategyConfig,
+    fallback: RetryStrategyConfig,
     per_error: &PerErrorConfig,
     class: &ErrorClass,
 ) -> RetryDecision {
@@ -44,13 +44,12 @@ fn effective_retry_decision(
         ErrorClass::Ambiguous => per_error.ambiguous.as_ref(),
     };
     let override_configured = override_config.is_some();
-    let global_max_attempts = global.max_attempts;
-    let mut config = override_config.cloned().unwrap_or(global);
+    let mut config = override_config.cloned().unwrap_or(fallback);
 
-    // `max_attempts` is one cumulative package ceiling across publish and
-    // resume. A class override may narrow it but cannot expand past the
-    // top-level/CLI authority.
-    config.max_attempts = config.max_attempts.min(global_max_attempts);
+    // Deserialized configuration rejects zero. Keep the engine boundary safe
+    // for embedders that construct RuntimeOptions directly: one Cargo attempt
+    // has already occurred before a classified retry decision exists.
+    config.max_attempts = config.max_attempts.max(1);
 
     RetryDecision {
         config,
@@ -60,6 +59,10 @@ fn effective_retry_decision(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use shipper_types::retry::RetryStrategyType;
+
     use super::*;
 
     fn config(
@@ -87,8 +90,8 @@ mod tests {
     }
 
     #[test]
-    fn unconfigured_class_uses_the_global_policy() {
-        let global = config(
+    fn unconfigured_class_uses_the_fallback_policy() {
+        let fallback = config(
             RetryStrategyType::Exponential,
             6,
             Duration::from_secs(2),
@@ -97,29 +100,29 @@ mod tests {
         );
 
         let decision = effective_retry_decision(
-            global.clone(),
+            fallback.clone(),
             &PerErrorConfig::default(),
             &ErrorClass::Retryable,
         );
 
-        assert_config_eq(&decision.config, &global);
+        assert_config_eq(&decision.config, &fallback);
         assert!(!decision.override_configured);
         assert!(decision.permits_retry(&ErrorClass::Retryable, 5));
         assert!(!decision.permits_retry(&ErrorClass::Retryable, 6));
     }
 
     #[test]
-    fn class_override_selects_its_strategy_and_narrows_the_ceiling() {
-        let global = config(
+    fn class_override_replaces_the_fallback_policy() {
+        let fallback = config(
             RetryStrategyType::Exponential,
-            8,
+            6,
             Duration::from_secs(3),
             Duration::from_secs(90),
             0.4,
         );
         let retryable = config(
             RetryStrategyType::Immediate,
-            3,
+            10,
             Duration::from_secs(1),
             Duration::from_secs(4),
             0.0,
@@ -131,49 +134,45 @@ mod tests {
         };
 
         let decision =
-            effective_retry_decision(global, &per_error, &ErrorClass::Retryable);
+            effective_retry_decision(fallback, &per_error, &ErrorClass::Retryable);
 
         assert_config_eq(&decision.config, &retryable);
         assert!(decision.override_configured);
-        assert!(decision.permits_retry(&ErrorClass::Retryable, 2));
-        assert!(!decision.permits_retry(&ErrorClass::Retryable, 3));
+        assert!(decision.permits_retry(&ErrorClass::Retryable, 9));
+        assert!(!decision.permits_retry(&ErrorClass::Retryable, 10));
     }
 
     #[test]
-    fn class_override_cannot_expand_the_global_ceiling() {
-        let global = config(
+    fn direct_zero_attempt_contract_is_normalized_to_one() {
+        let fallback = config(
             RetryStrategyType::Linear,
             4,
             Duration::from_secs(2),
             Duration::from_secs(20),
             0.1,
         );
-        let ambiguous = config(
-            RetryStrategyType::Constant,
-            12,
-            Duration::from_secs(7),
-            Duration::from_secs(7),
-            0.0,
-        );
         let per_error = PerErrorConfig {
             retryable: None,
-            ambiguous: Some(ambiguous),
+            ambiguous: Some(config(
+                RetryStrategyType::Constant,
+                0,
+                Duration::from_secs(7),
+                Duration::from_secs(7),
+                0.0,
+            )),
             permanent: None,
         };
 
         let decision =
-            effective_retry_decision(global, &per_error, &ErrorClass::Ambiguous);
+            effective_retry_decision(fallback, &per_error, &ErrorClass::Ambiguous);
 
-        assert_eq!(decision.config.max_attempts, 4);
-        assert_eq!(decision.config.strategy, RetryStrategyType::Constant);
-        assert_eq!(decision.config.base_delay, Duration::from_secs(7));
-        assert!(decision.permits_retry(&ErrorClass::Ambiguous, 3));
-        assert!(!decision.permits_retry(&ErrorClass::Ambiguous, 4));
+        assert_eq!(decision.config.max_attempts, 1);
+        assert!(!decision.permits_retry(&ErrorClass::Ambiguous, 1));
     }
 
     #[test]
     fn permanent_failures_require_an_explicit_class_override() {
-        let global = config(
+        let fallback = config(
             RetryStrategyType::Exponential,
             6,
             Duration::from_secs(2),
@@ -181,7 +180,7 @@ mod tests {
             0.5,
         );
         let none = effective_retry_decision(
-            global.clone(),
+            fallback.clone(),
             &PerErrorConfig::default(),
             &ErrorClass::Permanent,
         );
@@ -199,7 +198,7 @@ mod tests {
             )),
         };
         let explicit =
-            effective_retry_decision(global, &per_error, &ErrorClass::Permanent);
+            effective_retry_decision(fallback, &per_error, &ErrorClass::Permanent);
         assert!(explicit.permits_retry(&ErrorClass::Permanent, 1));
         assert!(!explicit.permits_retry(&ErrorClass::Permanent, 2));
     }
