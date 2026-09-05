@@ -55,6 +55,8 @@ jobs:
       duration: ${{ steps.select.outputs.duration }}
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
       - name: Cache Cargo + fuzz checks
@@ -115,6 +117,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
