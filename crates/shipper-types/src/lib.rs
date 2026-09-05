@@ -379,7 +379,7 @@ pub enum ReadinessMethod {
 /// - `max_delay`: 60 seconds
 /// - `max_total_wait`: 300 seconds (5 minutes)
 /// - `poll_interval`: 2 seconds
-/// - `jitter_factor`: 0.5 (Ãƒâ€šÃ‚Â±50%)
+/// - `jitter_factor`: 0.5 (±50%)
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -428,11 +428,11 @@ pub struct ReadinessConfig {
         serialize_with = "serialize_duration"
     )]
     pub poll_interval: Duration,
-    /// Jitter factor (Ãƒâ€šÃ‚Â±50% means 0.5)
+    /// Jitter factor (±50% means 0.5)
     ///
     /// Adds randomness to poll intervals to reduce thundering herd
     /// when many clients are checking simultaneously. A value of 0.5
-    /// means the actual interval varies by Ãƒâ€šÃ‚Â±50%.
+    /// means the actual interval varies by ±50%.
     pub jitter_factor: f64,
     /// Custom index path for testing (optional)
     ///
@@ -629,14 +629,14 @@ pub struct RuntimeOptions {
     pub registry_policies: BTreeMap<String, RegistryTrustOptions>,
     /// Optional package name to resume from (skips all packages before this one)
     pub resume_from: Option<String>,
-    /// Rehearsal registry name (#97) ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â if `Some`, `shipper rehearse` publishes
+    /// Rehearsal registry name (#97) — if `Some`, `shipper rehearse` publishes
     /// to this registry as phase-2 proof before live dispatch. `None` means
     /// rehearsal is disabled (the default; opt-in until phase-2 stabilizes).
     ///
     /// The name must resolve against the configured [`Self::registries`] at
     /// runtime; `engine::run_rehearsal` errors clean otherwise.
     pub rehearsal_registry: Option<String>,
-    /// Operator override ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â explicitly skip rehearsal even if a
+    /// Operator override — explicitly skip rehearsal even if a
     /// [`Self::rehearsal_registry`] is configured (#97). Default `false`.
     /// When the hard gate lands (#97 PR 3), live publish will refuse to run
     /// without this flag if rehearsal has not passed for the current `plan_id`.
@@ -644,7 +644,7 @@ pub struct RuntimeOptions {
     /// Crate name to install via `cargo install --registry <rehearsal>`
     /// after all rehearsal publishes succeed (#97 PR 4). This is the
     /// install/smoke check that proves end-to-end registry-index
-    /// resolution ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â the scenario that killed the rc.1 first-publish.
+    /// resolution — the scenario that killed the rc.1 first-publish.
     /// `None` means no smoke install (opt-in). The named crate must
     /// exist in the plan AND have a `[[bin]]` target.
     pub rehearsal_smoke_install: Option<String>,
@@ -980,10 +980,10 @@ where
 /// # State Transitions
 ///
 /// ```text
-/// Pending ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ Uploaded ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ Published
-///              ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬Å“
+/// Pending → Uploaded → Published
+///              ↓
 ///            Failed
-///              ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬Å“
+///              ↓
 ///           Pending (retry)
 /// ```
 ///
@@ -1046,19 +1046,19 @@ pub enum PackageState {
 ///
 /// # Classification is a hint, not truth
 ///
-/// This enum is produced by parsing cargo's stdout/stderr ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â a human-facing
+/// This enum is produced by parsing cargo's stdout/stderr — a human-facing
 /// log that is explicitly not a stable machine protocol. Pattern-matching on
 /// cargo text gives Shipper a fast first-pass signal, but **it must never be
 /// treated as the final word** on what actually happened:
 ///
 /// - [`ErrorClass::Permanent`] and [`ErrorClass::Retryable`] are still
-///   hints ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â they drive retry scheduling, but every retry attempt re-checks
+///   hints — they drive retry scheduling, but every retry attempt re-checks
 ///   the registry before and after the next `cargo publish`.
 /// - [`ErrorClass::Ambiguous`] is the dangerous case. Cargo's publish flow
 ///   uploads to the registry first and polls the index afterwards; the poll
 ///   can time out without affecting the upload. So a non-zero cargo exit
 ///   can coexist with a successful upload. Ambiguous outcomes MUST be
-///   reconciled against registry truth before any further action ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â never
+///   reconciled against registry truth before any further action — never
 ///   blind-retry. See [`ReconciliationOutcome`] and the reconciliation flow
 ///   in `shipper::engine::reconcile`.
 ///
@@ -1069,11 +1069,11 @@ pub enum PackageState {
 /// # Classification Heuristics (hints)
 ///
 /// Shipper uses various heuristics to classify errors:
-/// - HTTP 429 (Too Many Requests) ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ Retryable
-/// - HTTP 401/403 (Auth errors) ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ Permanent
-/// - HTTP 409 (Version conflict) ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ Permanent
-/// - Network timeouts ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ Retryable
-/// - Unknown errors ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ Ambiguous (triggers registry reconciliation)
+/// - HTTP 429 (Too Many Requests) → Retryable
+/// - HTTP 401/403 (Auth errors) → Permanent
+/// - HTTP 409 (Version conflict) → Permanent
+/// - Network timeouts → Retryable
+/// - Unknown errors → Ambiguous (triggers registry reconciliation)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorClass {
@@ -1087,7 +1087,7 @@ pub enum ErrorClass {
 /// Per [`docs/INVARIANTS.md`](https://github.com/EffortlessMetrics/shipper/blob/main/docs/INVARIANTS.md),
 /// `events.jsonl` is the authoritative source of truth and `state.json` is a
 /// projection derived from it. They should always agree about which packages
-/// were published. A drift is a bug ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â this struct captures which side claims
+/// were published. A drift is a bug — this struct captures which side claims
 /// what, so the end-of-run consistency check can surface it loudly rather
 /// than silently corrupting resume.
 ///
@@ -1344,7 +1344,7 @@ pub struct PackageReceipt {
     pub duration_ms: u128,
     pub evidence: PackageEvidence,
 
-    // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ Remediate pillar (#98) ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â compromised-release tracking ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
+    // ── Remediate pillar (#98) — compromised-release tracking ──
     // All three fields are additive Options; existing receipts read back
     // cleanly without migration. Shipper populates them via `shipper yank`
     // / `shipper plan-yank --mark-compromised` (PR 2) and
@@ -1764,7 +1764,7 @@ pub enum EventType {
     // `shipper rehearse` so an auditor can replay the rehearsal from the
     // event log without re-running it.
     //
-    // `plan_id` is NOT carried in the event payload ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â the enclosing
+    // `plan_id` is NOT carried in the event payload — the enclosing
     // `PublishEvent.package` field already disambiguates per-package events,
     // and the end-of-run `RehearsalComplete` is sufficient for plan-level
     // correlation since events.jsonl is append-only scoped to one state dir.
@@ -1795,9 +1795,9 @@ pub enum EventType {
         summary: String,
     },
 
-    // #97 PR 4 ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â install/smoke check. Opt-in post-publish step that runs
+    // #97 PR 4 — install/smoke check. Opt-in post-publish step that runs
     // `cargo install --registry <rehearsal> <crate>` to prove end-to-end
-    // registry-index resolution ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â the scenario that killed the rc.1
+    // registry-index resolution — the scenario that killed the rc.1
     // first-publish. Events bracket the check so an auditor replaying
     // events.jsonl can see the proof (or failure) inline with publishes.
     RehearsalSmokeCheckStarted {
@@ -1816,7 +1816,7 @@ pub enum EventType {
         message: String,
     },
 
-    // Retry visibility (#91) ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â emitted immediately before Shipper sleeps on a
+    // Retry visibility (#91) — emitted immediately before Shipper sleeps on a
     // retry backoff. `attempt` is the just-failed attempt number (1-indexed),
     // so the next attempt will be `attempt + 1` of `max_attempts`. `reason`
     // classifies why the retry is happening; `message` is the one-line
@@ -5965,7 +5965,7 @@ mod tests {
                 assert!(!debug.is_empty());
             }
 
-            /// The happy path PendingÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢UploadedÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢Published always completes in 2 transitions
+            /// The happy path Pending→Uploaded→Published always completes in 2 transitions
             #[test]
             fn happy_path_always_reaches_published(_seed in 0u64..100) {
                 let mut state = PackageState::Pending;
