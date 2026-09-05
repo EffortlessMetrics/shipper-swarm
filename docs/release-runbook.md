@@ -147,7 +147,7 @@ The isolated package gate is the complete 13-crate archive proof. It makes Cargo
 
 A raw `cargo publish --dry-run --workspace` is not the pre-release all-crate gate. Cargo's publish verification resolves registry dependencies; dependent 0.5.0 crates correctly stop before publication because their 0.5.0 workspace dependencies are not yet present in crates.io.
 
-Exercise Cargo's publish checks directly for the six dependency-free crates:
+Exercise Cargo's publish checks directly for the five dependency-free crates:
 
 ```bash
 for crate in \
@@ -155,16 +155,15 @@ for crate in \
   shipper-duration \
   shipper-encrypt \
   shipper-output-sanitizer \
-  shipper-retry \
   shipper-sparse-index
 do
   cargo publish --dry-run --locked -p "$crate"
 done
 ```
 
-`shipper-webhook` left this set when its configuration values moved to
-`shipper-types` (#261); it now publishes after `shipper-types` and is covered by
-the dependent train.
+`shipper-webhook` and `shipper-retry` left this set when their configuration
+values moved to `shipper-types` (#261); both now publish after `shipper-types`
+and are covered by the dependent train.
 
 Do not misclassify a dependent-crate dry-run failure caused solely by an unpublished workspace dependency as a package defect. The dependent train is covered by the isolated package gate, release rehearsal, and the resumable live publish train.
 
@@ -452,10 +451,10 @@ The generated Shipper plan is authoritative for package order. The current publi
 - `shipper-duration`
 - `shipper-encrypt`
 - `shipper-output-sanitizer`
-- `shipper-retry`
 - `shipper-sparse-index`
 - `shipper-types`
 - `shipper-registry`
+- `shipper-retry`
 - `shipper-webhook`
 - `shipper-config`
 - `shipper-core`
