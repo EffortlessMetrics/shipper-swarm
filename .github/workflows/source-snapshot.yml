@@ -1,0 +1,30 @@
+name: Branch source snapshot
+
+on:
+  push:
+    branches:
+      - codex/fix-per-error-retry
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out exact branch head
+        uses: actions/checkout@v7.0.1
+
+      - name: Pack source without Git metadata
+        shell: bash
+        run: tar --exclude=.git -czf "$RUNNER_TEMP/shipper-source-${GITHUB_SHA}.tar.gz" .
+
+      - name: Upload exact-head source snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: shipper-source-${{ github.sha }}
+          path: ${{ runner.temp }}/shipper-source-${{ github.sha }}.tar.gz
+          if-no-files-found: error
+          retention-days: 1
