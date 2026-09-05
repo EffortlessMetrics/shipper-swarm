@@ -5,6 +5,8 @@
 //! The parallel scheduler remains in `engine::parallel`; the module boundary
 //! deliberately keeps package execution independent from scheduling.
 
+mod retry_policy;
+
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -12,6 +14,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 
+use self::retry_policy::retry_decision;
 use crate::ops::cargo;
 use crate::plan::PlannedWorkspace;
 use crate::registry::RegistryClient;
@@ -847,6 +850,54 @@ pub(crate) fn publish_package_with_timeout(
                 };
             }
             ReconciliationOutcome::NotPublished { .. } => {
+                let retry = retry_decision(opts, &ErrorClass::Ambiguous);
+                if attempt >= retry.config.max_attempts {
+                    let exhausted_message = format!(
+                        "retry budget exhausted after registry confirmed NotPublished ({attempt}/{})",
+                        retry.config.max_attempts
+                    );
+                    if let Err(e) = commit_transition(
+                        st,
+                        state_dir,
+                        event_log,
+                        events_path,
+                        &key,
+                        PackageState::Failed {
+                            class: ErrorClass::Retryable,
+                            message: exhausted_message.clone(),
+                        },
+                        PublishEvent {
+                            timestamp: Utc::now(),
+                            event_type: EventType::PackageFailed {
+                                class: ErrorClass::Retryable,
+                                message: exhausted_message.clone(),
+                            },
+                            package: pkg_label.clone(),
+                        },
+                    ) {
+                        return PackagePublishResult { result: Err(e) };
+                    }
+                    let _ = write_reconciliation_report_best_effort(
+                        state_dir,
+                        ws,
+                        events_path,
+                        reporter,
+                    );
+                    reporter.error(&format!(
+                        "{}@{}: reconciliation outcome: NotPublished; action: stop because the class retry ceiling is exhausted (evidence: {})",
+                        p.name,
+                        p.version,
+                        reconciliation_report_path.display()
+                    ));
+                    return PackagePublishResult {
+                        result: Err(crate::engine::PublishRecoverableStopError {
+                            message: format!("{}@{}: {exhausted_message}", p.name, p.version),
+                            package: pkg_label.clone(),
+                            evidence_consistent: false,
+                        }
+                        .into()),
+                    };
+                }
                 if let Err(e) = commit_pending_transition(
                     st,
                     state_dir,
@@ -1021,12 +1072,15 @@ pub(crate) fn publish_package_with_timeout(
                     return PackagePublishResult { result: Err(e) };
                 }
 
-                if attempt >= opts.max_attempts {
+                let retry = retry_decision(opts, &ErrorClass::Ambiguous);
+                if attempt >= retry.config.max_attempts {
                     return PackagePublishResult {
                         result: Err(anyhow::anyhow!(
-                            "{}@{}: upload reconciliation did not observe published package before max attempts",
+                            "{}@{}: upload reconciliation did not observe published package before the class retry ceiling ({}/{})",
                             p.name,
-                            p.version
+                            p.version,
+                            attempt,
+                            retry.config.max_attempts
                         )),
                     };
                 }
@@ -1262,13 +1316,14 @@ pub(crate) fn publish_package_with_timeout(
             } else {
                 let failure_output = format!("{}\n{}", out.stderr_tail, out.stdout_tail);
                 let (class, msg) = classify_cargo_failure(&out.stderr_tail, &out.stdout_tail);
+                let retry = retry_decision(opts, &class);
                 let completion_timestamp = Utc::now();
                 last_err = Some((class.clone(), msg.clone()));
                 let mut attempt_detail = AttemptDetail {
                     package: p.name.clone(),
                     version: p.version.clone(),
                     attempt,
-                    max_attempts: opts.max_attempts,
+                    max_attempts: retry.config.max_attempts,
                     started_at: attempt_started_at,
                     ended_at: completion_timestamp,
                     error_class: Some(class.clone()),
@@ -1390,11 +1445,11 @@ pub(crate) fn publish_package_with_timeout(
                                 p.version,
                                 reconciliation_report_path.display()
                             ));
-                            // Safe to enter the normal Retryable path below;
+                            // Safe to enter the normal retry path below;
                             // registry confirms no duplicate-upload risk.
                             // Preserve negative-polling evidence for the receipt.
                             readiness_evidence = reconcile_evidence;
-                            if attempt >= opts.max_attempts {
+                            if attempt >= retry.config.max_attempts {
                                 let retryable = PackageState::Failed {
                                     class: ErrorClass::Retryable,
                                     message: msg.clone(),
@@ -1542,7 +1597,7 @@ pub(crate) fn publish_package_with_timeout(
                 }
 
                 match class {
-                    ErrorClass::Permanent => {
+                    ErrorClass::Permanent if !retry.override_configured => {
                         let failed = PackageState::Failed {
                             class: class.clone(),
                             message: msg.clone(),
@@ -1580,7 +1635,7 @@ pub(crate) fn publish_package_with_timeout(
                             )),
                         };
                     }
-                    ErrorClass::Retryable | ErrorClass::Ambiguous => {
+                    ErrorClass::Permanent | ErrorClass::Retryable | ErrorClass::Ambiguous => {
                         // Ambiguous can only reach here if reconciliation
                         // returned NotPublished; registry confirms no
                         // duplicate-upload risk, so cargo retry is safe.
@@ -1595,7 +1650,7 @@ pub(crate) fn publish_package_with_timeout(
                             } else {
                                 false
                             };
-                        if attempt < opts.max_attempts {
+                        if retry.permits_retry(&class, attempt) {
                             if crate::runtime::execution::looks_like_rate_limit(&failure_output)
                                 && let Err(e) = record_rate_limit_observed(
                                     event_log,
@@ -1609,11 +1664,11 @@ pub(crate) fn publish_package_with_timeout(
                                 return PackagePublishResult { result: Err(e) };
                             }
                             let delay = registry_aware_backoff(
-                                opts.base_delay,
-                                opts.max_delay,
+                                retry.config.base_delay,
+                                retry.config.max_delay,
                                 attempt,
-                                opts.retry_strategy,
-                                opts.retry_jitter,
+                                retry.config.strategy,
+                                retry.config.jitter,
                                 is_new_crate,
                                 &failure_output,
                             );
@@ -1624,7 +1679,7 @@ pub(crate) fn publish_package_with_timeout(
                                 events_path,
                                 &pkg_label,
                                 attempt,
-                                opts.max_attempts,
+                                retry.config.max_attempts,
                                 delay,
                                 next_attempt_at,
                                 &class,
@@ -1647,12 +1702,14 @@ pub(crate) fn publish_package_with_timeout(
                                 &p.name,
                                 &p.version,
                                 attempt,
-                                opts.max_attempts,
+                                retry.config.max_attempts,
                                 delay,
                                 class.clone(),
                                 &msg,
                             );
-                        } else if let Err(e) = commit_attempt_detail_transition(
+                            continue;
+                        }
+                        if let Err(e) = commit_attempt_detail_transition(
                             st,
                             state_dir,
                             event_log,
@@ -1662,9 +1719,9 @@ pub(crate) fn publish_package_with_timeout(
                         ) {
                             return PackagePublishResult { result: Err(e) };
                         }
+                        break;
                     }
                 }
-                continue;
             }
         }
 
@@ -1750,13 +1807,14 @@ pub(crate) fn publish_package_with_timeout(
                     let message =
                         "published locally, but version not observed on registry within timeout";
                     last_err = Some((ErrorClass::Ambiguous, message.to_string()));
-                    if attempt < opts.max_attempts {
+                    let retry = retry_decision(opts, &ErrorClass::Ambiguous);
+                    if retry.permits_retry(&ErrorClass::Ambiguous, attempt) {
                         let delay = backoff_delay(
-                            opts.base_delay,
-                            opts.max_delay,
+                            retry.config.base_delay,
+                            retry.config.max_delay,
                             attempt,
-                            opts.retry_strategy,
-                            opts.retry_jitter,
+                            retry.config.strategy,
+                            retry.config.jitter,
                         );
                         let next_attempt_at = retry_next_attempt_at(delay);
                         if let Err(err) = emit_retry_backoff(
@@ -1767,7 +1825,7 @@ pub(crate) fn publish_package_with_timeout(
                             &p.name,
                             &p.version,
                             attempt,
-                            opts.max_attempts,
+                            retry.config.max_attempts,
                             delay,
                             next_attempt_at,
                             ErrorClass::Ambiguous,
@@ -1781,6 +1839,8 @@ pub(crate) fn publish_package_with_timeout(
                                 )),
                             };
                         }
+                    } else {
+                        break;
                     }
                 }
             }
