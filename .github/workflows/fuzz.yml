@@ -60,8 +60,12 @@ jobs:
           key: ubuntu-fuzz-build-${{ hashFiles('**/Cargo.lock', 'fuzz/Cargo.toml') }}
           restore-keys: ubuntu-fuzz-build-
 
+      # No `--locked`: `fuzz/Cargo.lock` is gitignored (.gitignore), so a fresh
+      # checkout has none and `--locked` refuses to create one. The fuzz crate is
+      # excluded from the workspace and deliberately unpinned; this job is a
+      # compile check, not a supply-chain gate.
       - name: Compile every declared fuzz target
-        run: cargo check --manifest-path fuzz/Cargo.toml --all-targets --locked
+        run: cargo check --manifest-path fuzz/Cargo.toml --all-targets
 
   fuzz:
     name: Fuzz (${{ matrix.target }})
