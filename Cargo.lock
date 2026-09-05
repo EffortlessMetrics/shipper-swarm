@@ -2539,7 +2539,6 @@ dependencies = [
 name = "shipper-retry"
 version = "0.5.0"
 dependencies = [
- "humantime-serde",
  "insta",
  "proptest",
  "rand 0.10.2",

@@ -13,7 +13,6 @@ categories = ["algorithms", "asynchronous"]
 
 [dependencies]
 serde.workspace = true
-humantime-serde = "1.1"
 rand = { version = "0.10.0", features = ["std"] }
 shipper-types.workspace = true
 
