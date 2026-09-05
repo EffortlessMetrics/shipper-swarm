@@ -19,7 +19,7 @@
 
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Strategy type for retry behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -42,8 +42,11 @@ pub struct RetryStrategyConfig {
     /// Strategy type for calculating delay between retries.
     #[serde(default)]
     pub strategy: RetryStrategyType,
-    /// Maximum number of retry attempts.
-    #[serde(default = "default_max_attempts")]
+    /// Maximum cumulative number of attempts for the selected error class.
+    #[serde(
+        default = "default_max_attempts",
+        deserialize_with = "deserialize_max_attempts"
+    )]
     pub max_attempts: u32,
     /// Base delay for backoff calculations.
     #[serde(default = "default_base_delay")]
@@ -61,6 +64,19 @@ pub struct RetryStrategyConfig {
 /// Default cumulative attempt ceiling for a class-specific override.
 fn default_max_attempts() -> u32 {
     6
+}
+
+fn deserialize_max_attempts<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = u32::deserialize(deserializer)?;
+    if value == 0 {
+        return Err(serde::de::Error::custom(
+            "retry max_attempts must be greater than zero",
+        ));
+    }
+    Ok(value)
 }
 
 /// Default base delay for backoff, used as the `serde` default for
@@ -104,7 +120,7 @@ pub struct PerErrorConfig {
     #[serde(default, rename = "ambiguous")]
     pub ambiguous: Option<RetryStrategyConfig>,
     /// Retry configuration for permanent errors (e.g., authentication failure).
-    /// Permanent errors are typically not retried, but this can be customized.
+    /// Permanent errors are not retried unless this override is present.
     #[serde(default, rename = "permanent")]
     pub permanent: Option<RetryStrategyConfig>,
 }
@@ -170,6 +186,14 @@ mod tests {
         assert_eq!(config.base_delay, Duration::from_secs(5));
         assert_eq!(config.max_delay, Duration::from_mins(2));
         assert_eq!(config.jitter, 0.5);
+    }
+
+    #[test]
+    fn explicit_zero_attempt_ceiling_is_rejected() {
+        let error = serde_json::from_str::<RetryStrategyConfig>(r#"{"max_attempts":0}"#)
+            .expect_err("zero attempts must not become a live retry policy");
+
+        assert!(error.to_string().contains("must be greater than zero"));
     }
 
     #[test]
