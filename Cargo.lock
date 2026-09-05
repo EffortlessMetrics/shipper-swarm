@@ -2544,6 +2544,7 @@ dependencies = [
  "proptest",
  "rand 0.10.2",
  "serde",
+ "shipper-types",
 ]
 
 [[package]]
@@ -2562,6 +2563,7 @@ version = "0.5.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "humantime-serde",
  "insta",
  "proptest",
  "serde",
@@ -2569,7 +2571,6 @@ dependencies = [
  "serde_with",
  "shipper-duration",
  "shipper-encrypt",
- "shipper-retry",
 ]
 
 [[package]]

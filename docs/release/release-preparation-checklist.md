@@ -174,7 +174,7 @@ git diff --check
 
 A raw `cargo publish --dry-run --workspace` is **not** the all-crate candidate gate. Cargo verifies each package against registry-resolvable dependencies; before the release train starts, dependent 0.5.0 crates correctly stop because their 0.5.0 workspace dependencies are not in crates.io yet. Use the isolated workspace package gate above for the complete 13-crate archive proof.
 
-The six dependency-free crates can still exercise Cargo's publish checks directly:
+The five dependency-free crates can still exercise Cargo's publish checks directly:
 
 ```bash
 for crate in \
@@ -182,18 +182,17 @@ for crate in \
   shipper-duration \
   shipper-encrypt \
   shipper-output-sanitizer \
-  shipper-retry \
   shipper-sparse-index
 do
   cargo publish --dry-run --locked -p "$crate"
 done
 ```
 
-`shipper-webhook` left this set when its configuration values moved to
-`shipper-types` (#261); it now publishes after `shipper-types` and belongs to
-the dependent train.
+`shipper-webhook` and `shipper-retry` left this set when their configuration
+values moved to `shipper-types` (#261); both now publish after `shipper-types`
+and belong to the dependent train.
 
-- [ ] All six dependency-free publish dry-runs pass.
+- [ ] All five dependency-free publish dry-runs pass.
 - [ ] The generated Shipper plan contains exactly 13 publishable crates in topological dependency order.
 - [ ] No dependent-crate dry-run failure caused only by an unpublished workspace dependency is misclassified as a package defect.
 - [ ] Full dependent-train behavior is covered by the isolated archive gate, release rehearsal, and the actual resumable publish train.

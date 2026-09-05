@@ -81,7 +81,7 @@ These crates have standalone value or a stable contract worth versioning:
 | `shipper-types` | Shared domain types: plans, execution state, receipts, events, and schemas. |
 | `shipper-registry` | Registry HTTP client for version-existence and owner checks. |
 | `shipper-duration` | Human-friendly duration parsing and serde codecs. |
-| `shipper-retry` | Retry/backoff strategies with jitter. |
+| `shipper-retry` | Retry/backoff execution: delay calculation, jitter, and the retry loop. Configuration values are re-exported from `shipper-types`. |
 | `shipper-encrypt` | AES-256-GCM encryption for state files. |
 | `shipper-webhook` | Webhook delivery, signing, and payload rendering for publish lifecycle events. Configuration values are re-exported from `shipper-types`. |
 | `shipper-sparse-index` | Cargo sparse-index path derivation and version lookup. |
@@ -139,8 +139,8 @@ publishability, targets, workspace dependencies, surface hashes, and the
 - `shipper-core` has no normal, dev, or build dependency on `shipper`,
   `shipper-cli`, `clap`, or `indicatif`;
 - `shipper-types` has no normal, dev, or build dependency on `shipper-webhook`
-  (the contract hub does not depend on delivery behavior — see #261; further
-  behavior crates join this rule as each inversion lands);
+  or `shipper-retry` (the contract hub does not depend on behavior crates — see
+  #261; the remaining behavior crates join this rule as each inversion lands);
 - `xtask` is the only private workspace package.
 
 Any change that makes `shipper-core` depend on `shipper-cli` or `shipper`, turns
@@ -269,14 +269,14 @@ shipper-registry -> shipper-sparse-index
 shipper-registry -> shipper-output-sanitizer
 
 shipper-types -> shipper-encrypt
-shipper-types -> shipper-retry
 shipper-types -> shipper-duration
 
+shipper-retry -> shipper-types
 shipper-webhook -> shipper-types
 
 Leaf support crates:
   shipper-cargo-failure, shipper-duration, shipper-encrypt,
-  shipper-output-sanitizer, shipper-retry, shipper-sparse-index
+  shipper-output-sanitizer, shipper-sparse-index
 ```
 
 `shipper-types` is the domain-contract hub. The long-term direction (#261) is
@@ -284,12 +284,23 @@ behavior depending on contracts, never the reverse: a contract crate that
 depends on a delivery crate makes every types-only consumer inherit machinery
 it does not use.
 
-`shipper-webhook` is the first edge inverted. Its configuration values
-(`WebhookConfig`, `WebhookType`) are now defined in `shipper_types::webhook`
-and re-exported from `shipper_webhook`, so the public paths are unchanged while
-`shipper-types` no longer pulls an HTTP/TLS stack (`reqwest`, `rustls`,
-`hyper`, `tokio`) into every consumer's graph. `shipper-encrypt`,
-`shipper-retry`, and `shipper-duration` remain to be inverted.
+Two edges are inverted so far, both the same way: the configuration values
+move to `shipper-types` and the behavior crate consumes and re-exports them, so
+the previous public paths keep resolving.
+
+- `shipper-webhook` — `WebhookConfig` and `WebhookType` now live in
+  `shipper_types::webhook`, so `shipper-types` no longer pulls an HTTP/TLS
+  stack (`reqwest`, `rustls`, `hyper`, `tokio`) into every consumer's graph.
+- `shipper-retry` — `RetryStrategyType`, `RetryStrategyConfig`, and
+  `PerErrorConfig` now live in `shipper_types::retry`, so the contract crate no
+  longer pulls a CSPRNG (`rand`, `rand_core`, `chacha20`, `getrandom`) in for
+  jitter it never applies. Delay calculation, jitter, `ErrorClass`,
+  `RetryPolicy`, and `RetryExecutor` stay in `shipper-retry`.
+
+`shipper-encrypt` and `shipper-duration` remain. `EncryptionConfig` cannot move
+as-is: `get_passphrase` reads the environment, which the ownership rules above
+place outside the contract crate, so that edge needs a behavior/value split
+rather than a move.
 
 ## Conventions
 

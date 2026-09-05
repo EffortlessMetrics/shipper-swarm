@@ -38,6 +38,9 @@ pub mod storage;
 /// Pure webhook contract values consumed by `shipper-webhook`'s delivery layer.
 pub mod webhook;
 
+/// Pure retry contract values consumed by `shipper-retry`'s execution layer.
+pub mod retry;
+
 /// Schema version parsing and compatibility validation for shipper state files.
 ///
 /// This module was folded in from the former `shipper-schema` crate in Phase 6
@@ -589,11 +592,11 @@ pub struct RuntimeOptions {
     /// Upper bound on backoff delay.
     pub max_delay: Duration,
     /// Retry strategy type: immediate, exponential, linear, constant
-    pub retry_strategy: shipper_retry::RetryStrategyType,
+    pub retry_strategy: crate::retry::RetryStrategyType,
     /// Jitter factor for retry delays
     pub retry_jitter: f64,
     /// Per-error-type retry configuration
-    pub retry_per_error: shipper_retry::PerErrorConfig,
+    pub retry_per_error: crate::retry::PerErrorConfig,
     /// Timeout for the workspace-level dry-run verification step.
     pub verify_timeout: Duration,
     /// Poll interval for the dry-run verification step.
@@ -2880,9 +2883,9 @@ mod tests {
             max_attempts: 3,
             base_delay: Duration::from_secs(1),
             max_delay: Duration::from_mins(1),
-            retry_strategy: shipper_retry::RetryStrategyType::Exponential,
+            retry_strategy: crate::retry::RetryStrategyType::Exponential,
             retry_jitter: 0.5,
-            retry_per_error: shipper_retry::PerErrorConfig::default(),
+            retry_per_error: crate::retry::PerErrorConfig::default(),
             verify_timeout: Duration::from_mins(10),
             verify_poll_interval: Duration::from_secs(10),
             state_dir: PathBuf::from(".shipper"),
@@ -5550,9 +5553,9 @@ mod tests {
                     max_attempts: 3,
                     base_delay: Duration::from_millis(base_delay_ms),
                     max_delay: Duration::from_millis(max_delay_ms),
-                    retry_strategy: shipper_retry::RetryStrategyType::Exponential,
+                    retry_strategy: crate::retry::RetryStrategyType::Exponential,
                     retry_jitter: 0.5,
-                    retry_per_error: shipper_retry::PerErrorConfig::default(),
+                    retry_per_error: crate::retry::PerErrorConfig::default(),
                     verify_timeout: Duration::from_millis(verify_timeout_ms),
                     verify_poll_interval: Duration::from_millis(verify_poll_ms),
                     state_dir: PathBuf::from(".shipper"),
