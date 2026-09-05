@@ -45,10 +45,7 @@ mod tests {
 
     #[test]
     fn includes_transitive_dependencies() {
-        let dependencies = graph(&[
-            ("facade", &["middle"]),
-            ("middle", &["foundation"]),
-        ]);
+        let dependencies = graph(&[("facade", &["middle"]), ("middle", &["foundation"])]);
 
         assert_eq!(
             close_over_dependencies(&ids(&["facade"]), &dependencies),
