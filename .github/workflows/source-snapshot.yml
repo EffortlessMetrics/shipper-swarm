@@ -30,7 +30,7 @@ jobs:
         run: |
           tar --exclude=.git -czf "$RUNNER_TEMP/shipper-source-${GITHUB_SHA}.tar.gz" .
           tar -C "$HOME/.rustup/toolchains" -czf "$RUNNER_TEMP/rust-1.95.0-x86_64-unknown-linux-gnu.tar.gz" 1.95.0-x86_64-unknown-linux-gnu
-          tar -C "$HOME/.cargo" -czf "$RUNNER_TEMP/cargo-cache-${GITHUB_SHA}.tar.gz" registry git
+          tar -C "$HOME/.cargo" -czf "$RUNNER_TEMP/cargo-cache-${GITHUB_SHA}.tar.gz" registry
 
       - name: Upload exact-head source snapshot
         uses: actions/upload-artifact@v4
