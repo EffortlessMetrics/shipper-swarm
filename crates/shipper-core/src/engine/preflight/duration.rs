@@ -119,12 +119,7 @@ mod tests {
 
         assert_eq!(
             summary(" CRATES-IO ", &packages),
-            Some((
-                "crates-io".to_string(),
-                8,
-                4,
-                Duration::from_mins(30),
-            ))
+            Some(("crates-io".to_string(), 8, 4, Duration::from_mins(30),))
         );
     }
 
