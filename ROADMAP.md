@@ -6,126 +6,143 @@
 
 **v0.4.0 shipped 2026-05-20.** Thirteen public crates are live on crates.io, and `cargo install shipper --locked` is the stable install path. The 0.4.0 release line made Shipper an idempotent, evidence-backed workspace publisher: it plans missing `name@version` pairs, preflights proof and pacing, reconciles ambiguous Cargo outcomes against registry truth, resumes from durable state, and records release evidence.
 
-The post-release retrospective produced a product thesis organized around nine competencies. This document is structured around them. Each competency has a tracking issue (#100–#108); the master roadmap is **#109**.
+The post-v0.3.0 retrospective organized the product thesis around nine competencies. Issues #100–#109 are the historical implementation ledger for that model; completed competencies are no longer open planning queues. This document is the current roadmap.
 
 ## 0.5.0 release-line status
 
-The 0.5.0 line is the capstone for the current execution and security work.
-`shipper-swarm` is the development and proof surface; the separate
-`EffortlessMetrics/shipper` repository remains the release authority for tags,
-crates.io publication, signing, and release evidence.
+The 0.5.0 line is the capstone for the current execution and security work. `shipper-swarm` is the development and proof surface; the separate `EffortlessMetrics/shipper` repository remains the release authority for tags, crates.io publication, GitHub Release creation, and final release evidence.
 
-The stabilized boundaries are one per-package execution authority shared by
-both schedulers, event-first transitions with rebuild evidence, one readiness
-polling kernel, validated registry destinations and redirects, context-aware
-authorization redaction, versioned KDF compatibility, and blank-value-safe
-OIDC diagnostics. A green swarm branch is not itself a release: promotion
-still requires one exact candidate SHA and release-authority evidence. Release
-credentials must not move into this repository.
+The stabilized boundaries are one per-package execution authority shared by both schedulers, event-first transitions with rebuild evidence, one readiness polling kernel, validated registry destinations and redirects, context-aware authorization redaction, versioned KDF compatibility, and blank-value-safe OIDC diagnostics. A green swarm branch is not itself a release: promotion still requires one exact candidate SHA and release-authority evidence. Release credentials must not move into this repository.
+
+The active release sequence is explicit:
+
+1. freeze and review one swarm candidate;
+2. promote that history to the source-authority repository;
+3. rehearse the exact promoted SHA and record GO or NO-GO;
+4. publish only after explicit authorization;
+5. verify public artifacts and backfill the final authority history into swarm.
 
 ## Five existential pillars (the safety claim)
 
-Cargo 1.90 stabilized multi-package workspace publishing. "Publish several crates at once" is no longer a differentiator. Shipper is only worth existing if it owns five guarantees Cargo still does not give you — together they are the **release-closure system** that the engine is moving toward:
+Cargo stabilized multi-package workspace publishing. “Publish several crates at once” is not enough differentiation. Shipper is worth existing only if it owns five guarantees Cargo does not give the operator together:
 
-| Pillar | Question it answers | Status |
+| Pillar | Question it answers | Current state |
 |---|---|---|
-| **Prove** | Can I show this release is safe *before* the irreversible step? | Stable base — plan/preflight JSON, dry-run, ownership where possible, registry pacing, and alternate-registry rehearsal surfaces exist; stronger schema/provenance work remains follow-up |
-| **Dispatch** | Is the publish executed in a registry-aware, paced way? | Partial — crates.io first-publish backoff, `Retry-After` retry floors, and preflight registry-pacing estimates exist; alternative registry profiles pending ([#94](https://github.com/EffortlessMetrics/shipper/issues/94) / [#106](https://github.com/EffortlessMetrics/shipper/issues/106)) |
-| **Reconcile** | When the result is ambiguous, do I check registry truth before retrying? | Implemented — ambiguous exits reconcile to Published / NotPublished / StillUnknown before retry ([#99](https://github.com/EffortlessMetrics/shipper/issues/99) / [#102](https://github.com/EffortlessMetrics/shipper/issues/102)) |
-| **Recover** | If the runner dies mid-train, can I converge from durable state without losing or duplicating work? | Stable/internal proof — synthetic resume and live-runner artifact handoff are proven against fake Cargo/mock registry; live crates.io interruption remains a release-candidate procedure |
-| **Remediate** | If a partial release goes bad, can I contain or fix-forward it mechanically? | Bounded — receipt-driven planning, dry-run artifacts, and guarded fake-Cargo execution exist; live crates.io yank/fix-forward execution remains advisory |
+| **Prove** | Can I show this release is safe *before* the irreversible step? | Implemented base — deterministic plan, structured preflight, package dry-run, ownership evidence where applicable, registry pacing, policy reports, rehearsal, and versioned JSON evidence. Exact release-candidate proof is repeated for every release. |
+| **Dispatch** | Is publication executed in a registry-aware, paced way? | Implemented for the evidence-backed crates.io profile — authoritative publish regimes, first-publish burst/refill behavior, `Retry-After` floors, readiness checks, and duration estimates. Additional registry profiles require their own evidence. |
+| **Reconcile** | When the result is ambiguous, do I check registry truth before retrying? | Implemented — ambiguous exits resolve to Published, NotPublished, or StillUnknown before any safe retry. StillUnknown stops rather than guessing. |
+| **Recover** | If the runner dies mid-train, can I converge from durable state without losing or duplicating work? | Stable/internal proof — events are authoritative, state can be rebuilt, terminal packages are skipped on resume, and a two-job interruption artifact handoff is proven with fake Cargo and a mock registry. The release candidate repeats this proof on its exact tree. |
+| **Remediate** | If a partial release goes bad, can I contain or fix-forward it mechanically? | Bounded implementation — receipt-driven yank/fix-forward planning, dry-run artifacts, guarded yank execution, and compromise evidence exist. Live registry mutation remains an explicit operator decision. |
 
-These five are the existential pillars: a publishing tool that doesn't own them is a publishing tool that asks too much trust from the operator. Today Shipper has closed the first Reconcile implementation path and remains mid-flight on Prove, Dispatch, Recover, and Remediate. The remaining work turns "useful release executor" into "trustworthy release-closure system."
+The engine therefore has the release-closure shape. The remaining work is not to reimplement these pillars under stale “partial” labels; it is to preserve their evidence while finishing the 0.5 source-authority release, close direct coverage gaps, and prove the actual auth and integration contracts.
 
-## Nine competencies (the full scorecard)
+## Nine competencies (the implementation ledger)
 
-The five pillars cover the safety story. Four more competencies — narrate, harden, integrate, ergonomics — make the tool legible, securable, embeddable, and approachable. Together they form the full scorecard each tracking issue maps to:
+The five pillars cover the safety story. Narrate, Harden, Integrate, and Ergonomics make the tool legible, securable, embeddable, and approachable.
 
-| # | Competency | Definition | Status | Issue |
+| # | Competency | Definition | Current state | Issue |
 |---|---|---|---|---|
-| 1 | **Prove** | Establish before the irreversible step that the publish can succeed | Partial | [#100](https://github.com/EffortlessMetrics/shipper/issues/100) |
+| 1 | **Prove** | Establish before the irreversible step that publication can succeed | Implemented base; repeated per release candidate | [#100](https://github.com/EffortlessMetrics/shipper/issues/100) |
 | 2 | **Survive** | Recover from interruption without losing or duplicating work | Implemented | [#101](https://github.com/EffortlessMetrics/shipper/issues/101) |
 | 3 | **Reconcile** | Close ambiguous outcomes against registry truth | Implemented | [#102](https://github.com/EffortlessMetrics/shipper/issues/102) |
-| 4 | **Narrate** | Tell the operator what's happening live, not just after the fact | Implemented | [#103](https://github.com/EffortlessMetrics/shipper/issues/103) |
-| 5 | **Remediate** | Mechanically recover from bad partial outcomes (yank, fix-forward) | Bounded | [#104](https://github.com/EffortlessMetrics/shipper/issues/104) |
-| 6 | **Harden** | Default to safe auth posture; minimize long-lived secret blast radius | Partial (blocked externally) | [#105](https://github.com/EffortlessMetrics/shipper/issues/105) |
-| 7 | **Profile** | Encode what we know about each registry (rate limits, regimes) | Partial | [#106](https://github.com/EffortlessMetrics/shipper/issues/106) |
-| 8 | **Integrate** | Consumable from IDP platforms and CI orchestration tooling | Partial | [#107](https://github.com/EffortlessMetrics/shipper/issues/107) |
-| 9 | **Ergonomics** | First-impression friction is low; defaults are sensible | Partial | [#108](https://github.com/EffortlessMetrics/shipper/issues/108) |
+| 4 | **Narrate** | Tell the operator what is happening live, not only afterward | Implemented | [#103](https://github.com/EffortlessMetrics/shipper/issues/103) |
+| 5 | **Remediate** | Mechanically contain or fix-forward bad partial outcomes | Bounded implementation | [#104](https://github.com/EffortlessMetrics/shipper/issues/104) |
+| 6 | **Harden** | Default to the proved auth posture and bound supply-chain evidence | Active — exact-source Trusted Publishing proof and provenance decision remain | [#105](https://github.com/EffortlessMetrics/shipper/issues/105) |
+| 7 | **Profile** | Encode evidence-backed registry constraints and regimes | Implemented for crates.io | [#106](https://github.com/EffortlessMetrics/shipper/issues/106) |
+| 8 | **Integrate** | Expose reliable machine and embedding boundaries | Active — observable notification delivery and one compile-tested embedding proof remain | [#107](https://github.com/EffortlessMetrics/shipper/issues/107) |
+| 9 | **Ergonomics** | Keep first-run, diagnosis, and recovery friction low | Implemented base | [#108](https://github.com/EffortlessMetrics/shipper/issues/108) |
 
-**Master tracking issue: [#109](https://github.com/EffortlessMetrics/shipper/issues/109)**
+The historical master scorecard is [#109](https://github.com/EffortlessMetrics/shipper/issues/109). It is superseded by this roadmap and the current release program; it should not be used to infer present implementation status.
 
-The biggest single gap used to be **#3 Reconcile**: when `cargo publish` returns ambiguously (it uploads first, then polls the index, and the poll can time out without affecting the upload), Shipper could retry blindly. Shipper now reconciles ambiguous outcomes against registry truth before retry. As of 0.4.0, **#2 Survive** (interruption recovery, events-as-truth drift detection, state-rebuild-from-events) and **#4 Narrate** (retry/backoff visibility, `status --watch`, `inspect-events --follow`, attempt history) are also implemented. Remaining safety work is concentrated in registry-aware pacing (#106 Profile) and Trusted Publishing default proof (#105 Harden, blocked on external crates.io registration).
+The important unresolved distinctions are narrow:
+
+- Trusted Publishing is supported, but 0.4.0 selected `fallback_secret`; the default claim waits for exact-source rehearsal evidence.
+- Webhooks exist and preserve sequential/parallel event parity, but delivery is still best-effort and not durably observable.
+- The crates.io profile is implemented; another registry does not get a profile until its pacing and propagation semantics are evidenced.
+- A completed competency does not waive release-candidate proof. Every irreversible release still re-establishes source identity, package surface, compatibility, auth, recovery, and public-result evidence.
 
 ## Design principles
 
-These guide all Shipper development.
-
 ### Reliability over speed
-Default behaviors verify, log, and provide evidence. Faster paths are explicit opt-ins. The default publish policy (`safe`) includes all verification.
+
+Default behaviors verify, log, and provide evidence. Faster paths are explicit opt-ins. The default publish policy (`safe`) includes the required verification.
 
 ### Determinism
-Publish order is reproducible. Plan IDs are SHA256 of the workspace plan and stable across environments. The same workspace state always produces the same `plan_id`.
 
-### Events are truth, state is a projection
-Per [docs/INVARIANTS.md](docs/INVARIANTS.md): `events.jsonl` is authoritative and append-only. `state.json` is a projection over events for resume convenience. `receipt.json` is a summary derived from events at end-of-run. The relationship is contractual; see [#93](https://github.com/EffortlessMetrics/shipper/issues/93) for enforcement.
+Publish order is reproducible. Plan IDs are SHA-256 identities of the workspace plan and stable across equivalent environments. The same release inputs must produce the same plan identity.
 
-### Engine is library; CLI is thin
-All release behavior lives in `crates/shipper-core`. `crates/shipper-cli` parses args and calls into the engine. `crates/shipper` is the install facade and curated product-name re-export. Other frontends (IDP plugins, dashboards, automation) consume `shipper-core` or the curated facade directly.
+### Events are truth; state is a projection
+
+Per [docs/INVARIANTS.md](docs/INVARIANTS.md), `events.jsonl` is authoritative and append-only. `state.json` is a projection for resume convenience. `receipt.json` is a summary derived at end of run. Event/state/receipt drift is a product defect, not an acceptable reporting mismatch.
+
+### Engine is library; CLI is an adapter
+
+Release behavior lives in `crates/shipper-core` and its contract/adapter crates. `crates/shipper-cli` parses arguments and renders output. `crates/shipper` is the install facade and curated product-name re-export. Other frontends consume supported public boundaries rather than importing CLI internals.
+
+### Evidence controls release authority
+
+A green branch, merged PR, configuration value, or successful token mint is not publication authorization. The release issue must name one approved SHA/tree and one observed auth path. Public claims follow retained evidence, not intended configuration.
 
 ### Forbid unsafe; respect MSRV
-`unsafe_code = "forbid"` workspace-wide. Edition 2024, MSRV 1.95.
+
+`unsafe_code = "forbid"` is workspace-wide. Edition 2024 and MSRV 1.95 are policy boundaries, with repository checks preventing silent regression.
 
 ## Now / Next / Later
 
-Sequencing follows the master roadmap ([#109](https://github.com/EffortlessMetrics/shipper/issues/109)).
+### Now — close the 0.5 line
 
-### Now — after v0.4.0
-1. **[#105](https://github.com/EffortlessMetrics/shipper/issues/105) Harden** — keep Trusted Publishing default planned/advisory until release evidence proves the short-lived-token path for the full crate set. Current 0.4.0 evidence records explicit fallback-secret use. **Blocked externally** on crates.io trusted-publisher registration.
-2. **[#107](https://github.com/EffortlessMetrics/shipper/issues/107) Integrate** — make the stable JSON envelopes, receipts, and `.shipper/` packet easy for CI, IDPs, and agents to consume.
-3. **[#104](https://github.com/EffortlessMetrics/shipper/issues/104) Remediate** — promote only the proof-backed remediation surfaces: dry-run artifacts and guarded fake-Cargo execution today; live crates.io yank/fix-forward execution only after deliberate evidence.
+1. **Release candidate and authority chain** — finish the swarm candidate, promote it without rewriting history, run the full exact-source gate, record GO/NO-GO, and publish only through [#475–#479](https://github.com/EffortlessMetrics/shipper/issues/475).
+2. **[#105 Harden](https://github.com/EffortlessMetrics/shipper/issues/105)** — prove which auth source the release actually selects; keep fallback explicit until the short-lived path is proven across the full train; define provenance from a threat model and consumer rather than a tool checklist.
+3. **[#107 Integrate](https://github.com/EffortlessMetrics/shipper/issues/107)** — choose an observable webhook-delivery contract and add one compile-tested embedding consumer using supported public APIs.
+4. **Coverage and evidence maintenance** — compile every fuzz target, keep scheduled campaign failures honest, add direct tests at high-value policy seams, and repair source-of-truth drift without relabeling advisory evidence as release proof.
 
-**Recently completed:** #101 Survive (interruption recovery, drift detection, state rebuild) and #103 Narrate (retry visibility, watch/follow modes, attempt history) shipped during the 0.4.0 cycle.
+### Next — extend only from evidence
 
-### Next
-6. **[#100](https://github.com/EffortlessMetrics/shipper/issues/100) Prove tier 2** — keep strengthening alternate-registry rehearsal and smoke-install proof as an explicit tier above local dry-run.
-7. **[#106](https://github.com/EffortlessMetrics/shipper/issues/106) Profile** — extend beyond the proof-backed crates.io profile when another registry has evidence-backed pacing semantics.
+1. Add a second registry profile only after its documented and observed pacing, propagation, ambiguity, and auth semantics can be encoded and tested.
+2. Exercise bounded remediation against a deliberate non-production registry or equally strong harness before promoting live-registry automation.
+3. Tighten document-contract checks after the current status/link drift is repaired; do not make a known-broken projection blocking first.
+4. Improve notification replay or external adapters only after the chosen webhook/embedding contract is stable.
 
-### Later — once the engine is closure-complete
-8. **Advanced integrations** — IDP plugin examples (Backstage / Port / Cortex), HTTP query API, webhook reliability semantics, and richer library consumer guides. Best done after the engine offers a stable closure story to integrate against.
+### Later — concrete consumers, not generic integration theatre
+
+- IDP adapters for Backstage, Port, Cortex, or another platform when an actual consumer supplies the required workflow and compatibility surface.
+- HTTP or service APIs only when process embedding and versioned CLI/event contracts are insufficient for a real deployment.
+- Additional provenance formats only when an independent verifier consumes them.
+- Performance work after correctness evidence identifies a material operator cost.
 
 ## Explicit non-goals
 
-Shipper does NOT plan to support:
+The Shipper product does not own these concerns merely because the repository release workflow may orchestrate them around a release:
 
-| Feature | Alternative |
+| Concern | Primary owner |
 |---|---|
-| Version bumping | [cargo-release](https://github.com/crate-ci/cargo-release) |
-| Changelog generation | [release-plz](https://github.com/MarcoIeni/release-plz) |
-| Git tag creation | cargo-release |
-| GitHub release creation | `gh` CLI or GitHub Actions |
+| Version bumping | release-plz, cargo-release, or an explicit repository process |
+| Changelog generation | Changie/release tooling |
+| Git tag creation | release-authority workflow or operator |
+| GitHub Release publication | release-authority workflow / GitHub tooling |
 | crates.io team management | `cargo owner` |
-| Dependency updates | cargo's built-in commands |
+| Dependency updates | Cargo/Dependabot and reviewed maintenance PRs |
 
-**Shipper focuses on reliable publishing, not release orchestration.**
+**Shipper focuses on safe workspace publication and evidence-backed convergence.** Repository automation may call adjacent tools, but those calls do not become engine responsibilities.
 
 ## Contributing
 
-How features are prioritized:
-1. Fit with the nine-competency thesis
-2. Whether it closes a proof or operator-confidence gap in the current release-closure line
-3. Maintenance burden vs value
+Work from the current open issue and PR queues, not the historical #100–#109 scorecard alone.
 
-To contribute:
-1. Pick an issue from #100–#109 or one of the child issues #90–#99
-2. Comment to claim
-3. Open a draft PR with tests + documentation per [CONTRIBUTING.md](CONTRIBUTING.md)
+Prioritize changes by:
+
+1. fit with the release-closure model;
+2. whether they close a real proof, operator-confidence, or maintainability gap;
+3. whether the claim can be challenged by tests or retained evidence;
+4. maintenance burden relative to value.
+
+A good PR is bounded, names the governing contract, carries direct tests or a reason they are inapplicable, updates the relevant policy/document projection, and does not claim publication authority.
 
 ## Version history
 
 | Version | Date | Theme |
 |---|---|---|
 | v0.4.0 | 2026-05-20 | Stable release-closure line; idempotent workspace publish, JSON evidence envelopes, registry-truth reconciliation, resume proof, auth evidence, and bounded remediation surfaces |
-| v0.3.0-rc.1 | 2026-04-16 | First crates.io publish; 12 crates live; deterministic plan, retry absorption (41 retries), evidence trail proven under real rate limits |
-| v0.2.0 | 2026-02-14 | Evidence + verification (event log, receipts, readiness checks, publish policies) |
+| v0.3.0-rc.1 | 2026-04-16 | First crates.io publish; 12 crates live; deterministic plan, retry absorption, and evidence trail proven under real rate limits |
+| v0.2.0 | 2026-02-14 | Evidence and verification: event log, receipts, readiness checks, publish policies |
 | v0.1.0 | — | Initial release |
