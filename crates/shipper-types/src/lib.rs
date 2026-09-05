@@ -29,11 +29,14 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_with::{DurationMilliSeconds, serde_as};
 
+use crate::webhook::WebhookConfig;
 pub use shipper_duration::{deserialize_duration, serialize_duration};
 use shipper_encrypt::EncryptionConfig as EncryptionSettings;
-use shipper_webhook::WebhookConfig;
 
 pub mod storage;
+
+/// Pure webhook contract values consumed by `shipper-webhook`'s delivery layer.
+pub mod webhook;
 
 /// Schema version parsing and compatibility validation for shipper state files.
 ///
