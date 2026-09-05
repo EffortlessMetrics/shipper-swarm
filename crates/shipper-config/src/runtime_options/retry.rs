@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-use shipper_retry::{PerErrorConfig, RetryPolicy, RetryStrategyType};
+use shipper_retry::{
+    PerErrorConfig, RetryPolicy, RetryStrategyConfig, RetryStrategyType,
+};
 
 use crate::{CliOverrides, RetryConfig};
 
@@ -43,7 +45,36 @@ pub(super) fn resolve(config: &RetryConfig, cli: &CliOverrides) -> ResolvedRetry
             config.jitter,
             policy_defaults.jitter,
         )),
-        per_error: config.per_error.clone(),
+        per_error: resolve_per_error(&config.per_error, cli),
+    }
+}
+
+fn resolve_per_error(config: &PerErrorConfig, cli: &CliOverrides) -> PerErrorConfig {
+    let mut resolved = config.clone();
+    apply_cli_overrides(resolved.retryable.as_mut(), cli);
+    apply_cli_overrides(resolved.ambiguous.as_mut(), cli);
+    apply_cli_overrides(resolved.permanent.as_mut(), cli);
+    resolved
+}
+
+fn apply_cli_overrides(config: Option<&mut RetryStrategyConfig>, cli: &CliOverrides) {
+    let Some(config) = config else {
+        return;
+    };
+    if let Some(value) = cli.max_attempts {
+        config.max_attempts = value;
+    }
+    if let Some(value) = cli.base_delay {
+        config.base_delay = value;
+    }
+    if let Some(value) = cli.max_delay {
+        config.max_delay = value;
+    }
+    if let Some(value) = cli.retry_strategy {
+        config.strategy = value;
+    }
+    if let Some(value) = cli.retry_jitter {
+        config.jitter = value;
     }
 }
 
@@ -75,6 +106,16 @@ mod tests {
             config.max_attempts = TEST_DEFAULT_MAX_ATTEMPTS;
         }
         config
+    }
+
+    fn retry_config() -> RetryStrategyConfig {
+        RetryStrategyConfig {
+            strategy: RetryStrategyType::Immediate,
+            max_attempts: 10,
+            base_delay: Duration::from_millis(50),
+            max_delay: Duration::from_secs(1),
+            jitter: 0.0,
+        }
     }
 
     #[test]
@@ -198,14 +239,8 @@ mod tests {
     }
 
     #[test]
-    fn resolve_preserves_per_error_config_verbatim() {
-        let retryable = shipper_retry::RetryStrategyConfig {
-            strategy: RetryStrategyType::Immediate,
-            max_attempts: 7,
-            base_delay: Duration::from_millis(50),
-            max_delay: Duration::from_secs(1),
-            jitter: 0.0,
-        };
+    fn resolve_preserves_per_error_config_without_cli_overrides() {
+        let retryable = retry_config();
         let per_error = PerErrorConfig {
             retryable: Some(retryable),
             ambiguous: None,
@@ -231,9 +266,49 @@ mod tests {
             .as_ref()
             .expect("retryable settings should round-trip");
         assert_eq!(resolved_retryable.strategy, RetryStrategyType::Immediate);
-        assert_eq!(resolved_retryable.max_attempts, 7);
+        assert_eq!(resolved_retryable.max_attempts, 10);
         assert_eq!(resolved_retryable.base_delay, Duration::from_millis(50));
         assert!(resolved.per_error.ambiguous.is_none());
         assert!(resolved.per_error.permanent.is_none());
+    }
+
+    #[test]
+    fn resolve_cli_overrides_apply_to_every_configured_error_class() {
+        let config = RetryConfig {
+            policy: RetryPolicy::Default,
+            max_attempts: TEST_DEFAULT_MAX_ATTEMPTS,
+            base_delay: Duration::from_secs(2),
+            max_delay: Duration::from_mins(2),
+            strategy: RetryStrategyType::Exponential,
+            jitter: 0.5,
+            per_error: PerErrorConfig {
+                retryable: Some(retry_config()),
+                ambiguous: Some(retry_config()),
+                permanent: Some(retry_config()),
+            },
+        };
+        let cli = CliOverrides {
+            max_attempts: Some(4),
+            base_delay: Some(Duration::from_secs(3)),
+            max_delay: Some(Duration::from_secs(12)),
+            retry_strategy: Some(RetryStrategyType::Linear),
+            retry_jitter: Some(0.25),
+            ..Default::default()
+        };
+
+        let resolved = resolve(&config, &cli);
+
+        for class_config in [
+            resolved.per_error.retryable.as_ref(),
+            resolved.per_error.ambiguous.as_ref(),
+            resolved.per_error.permanent.as_ref(),
+        ] {
+            let class_config = class_config.expect("class override remains configured");
+            assert_eq!(class_config.max_attempts, 4);
+            assert_eq!(class_config.base_delay, Duration::from_secs(3));
+            assert_eq!(class_config.max_delay, Duration::from_secs(12));
+            assert_eq!(class_config.strategy, RetryStrategyType::Linear);
+            assert!((class_config.jitter - 0.25).abs() < f64::EPSILON);
+        }
     }
 }
