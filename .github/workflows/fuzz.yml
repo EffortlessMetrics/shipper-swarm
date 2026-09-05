@@ -27,6 +27,42 @@ permissions:
   contents: read
 
 jobs:
+  # `cargo fuzz run <target>` builds only the target it runs, so a target left
+  # out of the matrix below is never compiled by CI at all. That is how
+  # `execution_core` silently stopped building against `ExecutionState` while
+  # this workflow stayed green. This job compiles every declared target so the
+  # next one to drift fails here instead of rotting unnoticed.
+  build-targets:
+    name: Build all fuzz targets
+    runs-on:
+      group: em-ci-small
+      labels: [self-hosted, linux, x64, em-ci, cx53, rust-large, trusted-pr]
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: check runner routing policy
+        run: scripts/ci/no-bare-self-hosted.sh
+
+      # Compiling the targets needs no nightly toolchain; only `cargo fuzz run`
+      # does. Keeping this on the pinned stable toolchain makes the check cheap
+      # and keeps it honest about what contributors build locally.
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            fuzz/target
+          key: ubuntu-fuzz-build-${{ hashFiles('**/Cargo.lock', 'fuzz/Cargo.toml') }}
+          restore-keys: ubuntu-fuzz-build-
+
+      - name: Compile every declared fuzz target
+        run: cargo check --manifest-path fuzz/Cargo.toml --all-targets --locked
+
   fuzz:
     name: Fuzz (${{ matrix.target }})
     runs-on:

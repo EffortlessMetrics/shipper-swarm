@@ -1,0 +1,6 @@
+kind: fixed
+body: Repair the `execution_core` fuzz target, which stopped compiling when `ExecutionState` gained `attempt_history`, and compile every declared fuzz target in CI. Only 6 of 31 targets appeared in the nightly run matrix, and `cargo fuzz run` builds just the target it runs, so the other 25 were never built and could rot while the workflow stayed green.
+time: 2026-09-05T06:00:00Z
+custom:
+  Audience: Maintainers
+  Importance: Maintenance
