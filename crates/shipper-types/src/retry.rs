@@ -43,7 +43,7 @@ pub struct RetryStrategyConfig {
     #[serde(default)]
     pub strategy: RetryStrategyType,
     /// Maximum number of retry attempts.
-    #[serde(default)]
+    #[serde(default = "default_max_attempts")]
     pub max_attempts: u32,
     /// Base delay for backoff calculations.
     #[serde(default = "default_base_delay")]
@@ -56,6 +56,11 @@ pub struct RetryStrategyConfig {
     /// Jitter factor for randomized delays (0.0 = no jitter, 1.0 = full jitter).
     #[serde(default = "default_jitter")]
     pub jitter: f64,
+}
+
+/// Default cumulative attempt ceiling for a class-specific override.
+fn default_max_attempts() -> u32 {
+    6
 }
 
 /// Default base delay for backoff, used as the `serde` default for
@@ -81,10 +86,10 @@ impl Default for RetryStrategyConfig {
     fn default() -> Self {
         Self {
             strategy: RetryStrategyType::Exponential,
-            max_attempts: 6,
-            base_delay: Duration::from_secs(2),
-            max_delay: Duration::from_mins(2),
-            jitter: 0.5,
+            max_attempts: default_max_attempts(),
+            base_delay: default_base_delay(),
+            max_delay: default_max_delay(),
+            jitter: default_jitter(),
         }
     }
 }
@@ -140,6 +145,7 @@ mod tests {
         let from_default = RetryStrategyConfig::default();
 
         assert_eq!(from_empty.strategy, from_default.strategy);
+        assert_eq!(from_empty.max_attempts, from_default.max_attempts);
         assert_eq!(from_empty.base_delay, from_default.base_delay);
         assert_eq!(from_empty.max_delay, from_default.max_delay);
         assert_eq!(from_empty.jitter, from_default.jitter);
@@ -148,14 +154,22 @@ mod tests {
         // each other only proves they agree — a change applied to both would
         // pass while silently altering every configuration that omits a field.
         assert_eq!(from_default.strategy, RetryStrategyType::Exponential);
+        assert_eq!(from_default.max_attempts, 6);
         assert_eq!(from_default.base_delay, Duration::from_secs(2));
         assert_eq!(from_default.max_delay, Duration::from_mins(2));
         assert_eq!(from_default.jitter, 0.5);
-        // `max_attempts` is the deliberate exception: its `serde` default is
-        // `u32::default()` (0) while `Default` uses 6. Pin the difference so a
-        // change to either is visible rather than accidental.
-        assert_eq!(from_empty.max_attempts, 0);
-        assert_eq!(from_default.max_attempts, 6);
+    }
+
+    #[test]
+    fn partial_override_uses_contract_defaults_for_omitted_fields() {
+        let config: RetryStrategyConfig =
+            serde_json::from_str(r#"{"base_delay":"5s"}"#).expect("deserialize partial");
+
+        assert_eq!(config.strategy, RetryStrategyType::Exponential);
+        assert_eq!(config.max_attempts, 6);
+        assert_eq!(config.base_delay, Duration::from_secs(5));
+        assert_eq!(config.max_delay, Duration::from_mins(2));
+        assert_eq!(config.jitter, 0.5);
     }
 
     #[test]
