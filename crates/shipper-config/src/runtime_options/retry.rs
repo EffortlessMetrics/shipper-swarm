@@ -1,8 +1,6 @@
 use std::time::Duration;
 
-use shipper_retry::{
-    PerErrorConfig, RetryPolicy, RetryStrategyConfig, RetryStrategyType,
-};
+use shipper_retry::{PerErrorConfig, RetryPolicy, RetryStrategyConfig, RetryStrategyType};
 
 use crate::{CliOverrides, RetryConfig};
 
