@@ -1,3 +1,4 @@
+use anyhow::{Result, bail};
 use shipper_types::retry::{PerErrorConfig, RetryStrategyConfig};
 use shipper_types::{ErrorClass, RuntimeOptions};
 
@@ -19,6 +20,43 @@ impl RetryDecision {
         (class != &ErrorClass::Permanent || self.override_configured)
             && attempt < self.config.max_attempts
     }
+}
+
+pub(super) fn validate_runtime_retry_options(opts: &RuntimeOptions) -> Result<()> {
+    validate_config(
+        "retry",
+        &RetryStrategyConfig {
+            strategy: opts.retry_strategy,
+            max_attempts: opts.max_attempts,
+            base_delay: opts.base_delay,
+            max_delay: opts.max_delay,
+            jitter: opts.retry_jitter,
+        },
+    )?;
+
+    for (class_name, config) in [
+        ("retryable", opts.retry_per_error.retryable.as_ref()),
+        ("ambiguous", opts.retry_per_error.ambiguous.as_ref()),
+        ("permanent", opts.retry_per_error.permanent.as_ref()),
+    ] {
+        if let Some(config) = config {
+            validate_config(&format!("retry.per_error.{class_name}"), config)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_config(path: &str, config: &RetryStrategyConfig) -> Result<()> {
+    if config.max_attempts == 0 {
+        bail!("{path}.max_attempts must be greater than 0");
+    }
+    if config.max_delay < config.base_delay {
+        bail!("{path}.max_delay must be greater than or equal to base_delay");
+    }
+    if !(0.0..=1.0).contains(&config.jitter) {
+        bail!("{path}.jitter must be between 0.0 and 1.0");
+    }
+    Ok(())
 }
 
 pub(super) fn retry_decision(opts: &RuntimeOptions, class: &ErrorClass) -> RetryDecision {
@@ -199,6 +237,54 @@ mod tests {
 
         assert_eq!(decision.config.max_attempts, 1);
         assert!(!decision.permits_retry(&ErrorClass::Ambiguous, 1));
+    }
+
+    #[test]
+    fn runtime_policy_validation_rejects_invalid_values() {
+        let zero_attempts = config(
+            RetryStrategyType::Immediate,
+            0,
+            Duration::ZERO,
+            Duration::ZERO,
+            0.0,
+        );
+        assert!(validate_config("retry", &zero_attempts).is_err());
+
+        let nan_jitter = config(
+            RetryStrategyType::Immediate,
+            2,
+            Duration::ZERO,
+            Duration::ZERO,
+            f64::NAN,
+        );
+        assert!(validate_config("retry", &nan_jitter).is_err());
+
+        let invalid_bounds = config(
+            RetryStrategyType::Immediate,
+            2,
+            Duration::from_secs(5),
+            Duration::from_secs(4),
+            0.0,
+        );
+        let error = validate_config("retry.per_error.ambiguous", &invalid_bounds)
+            .expect_err("invalid class bounds");
+        assert!(
+            error
+                .to_string()
+                .contains("retry.per_error.ambiguous.max_delay")
+        );
+    }
+
+    #[test]
+    fn runtime_policy_validation_allows_zero_delay_immediate_class() {
+        let immediate = config(
+            RetryStrategyType::Immediate,
+            1,
+            Duration::ZERO,
+            Duration::ZERO,
+            0.0,
+        );
+        assert!(validate_config("retry.per_error.permanent", &immediate).is_ok());
     }
 
     #[test]
