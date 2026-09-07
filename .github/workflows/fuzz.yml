@@ -148,9 +148,10 @@ jobs:
         env:
           FUZZ_TARGET: ${{ matrix.target }}
           FUZZ_DURATION: ${{ needs.check-targets.outputs.duration }}
+          RUSTUP_TOOLCHAIN: nightly
         run: |
           mkdir -p "fuzz/corpus/$FUZZ_TARGET" artifacts
-          cargo fuzz run "$FUZZ_TARGET" "fuzz/corpus/$FUZZ_TARGET" \
+          cargo fuzz run "$FUZZ_TARGET" "fuzz/corpus/$FUZZ_TARGET" --target x86_64-unknown-linux-gnu \
             -- \
             "-max_total_time=$FUZZ_DURATION" \
             "-artifact_prefix=artifacts/${FUZZ_TARGET}_"
