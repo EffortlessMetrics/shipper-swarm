@@ -86,11 +86,11 @@ review_after = "2026-08-12"
 path = ".github/workflows/live-runner-interruption-rehearsal.yml"
 kind = "release_rehearsal"
 owner = "release/ci"
-reason = "Dedicated live-runner interruption proof: creates an interrupted .shipper artifact in one GitHub job, downloads it in a second job, resumes with fake Cargo and a mock registry, and uploads the resumed evidence packet."
+reason = "Dedicated live-runner interruption proof: creates an interrupted .shipper artifact in one GitHub job, downloads it in a second job, resumes with fake Cargo and a mock registry, and uploads the resumed evidence packet. Swarm automatically runs the same shared steps on ephemeral Ubuntu jobs with isolated caches and bounded runtime; other repositories retain the scoped self-hosted route. Same-repository PR guards remain mandatory."
 process_policy = "ci"
 network_policy = "ci"
 created = "2026-05-18"
-review_after = "2026-08-18"
+review_after = "2026-12-08"
 
 [[workflow]]
 path = ".github/workflows/em-ci-routed-rust.yml"
