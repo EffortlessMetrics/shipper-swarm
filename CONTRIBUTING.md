@@ -363,8 +363,9 @@ Types: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`
 - Open a [discussion](https://github.com/effortlessmetrics/shipper/discussions)
   for questions. Discussions remain in the release-authority repo until
   explicitly moved.
-- Open an [issue](https://github.com/effortlessmetrics/shipper/issues) for bugs
-  or features. Issues remain in the release-authority repo until explicitly
-  moved.
+- Open a [development issue](https://github.com/EffortlessMetrics/shipper-swarm/issues)
+  for routine bugs or features. Promotion, rehearsal, publication, and release
+  evidence retain the source-repository issue owners described in
+  [Before You Start](#before-you-start).
 
 Thank you for contributing!
