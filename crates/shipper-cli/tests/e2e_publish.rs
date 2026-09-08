@@ -4,6 +4,9 @@
 //! verification, --dry-run-like behavior, --package scoping, custom --state-dir,
 //! failed publishes, and re-running publish when everything is already published.
 
+#[path = "e2e_publish/registry_failure.rs"]
+mod registry_failure;
+
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
