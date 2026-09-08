@@ -113,13 +113,18 @@ work waits for registry visibility, permanent failures require repair, and
 only durable pending or retryable work recommends resume.
 
 A controlled NotPublished stop can remain safe to resume while a particular
-resume invocation is rejected because its cumulative `--max-attempts` ceiling
-is exhausted. Human stderr reports the package and current, requested, and
-minimum usable attempt counts. JSON stderr emits the same fields in
-`shipper.resume.error.v1`, with `safe_to_resume`, a typed next action, and the
-unchanged retained evidence paths. Increase the explicit ceiling only after
-reviewing that evidence; the rejected command does not consume the controlled
-resume authorization.
+resume invocation is rejected because its effective cumulative retry ceiling
+is exhausted. A configured error-class ceiling may narrow the top-level
+`--max-attempts` ceiling but never expand it. Human stderr reports the package,
+retained attempt count, requested top-level ceiling, effective class ceiling,
+and minimum usable next ceiling. JSON stderr emits the same facts in
+`shipper.resume.error.v1` as `current_attempts`, `requested_max_attempts`,
+`effective_max_attempts`, and `minimum_max_attempts`, with `safe_to_resume`, a
+typed next action, and the unchanged retained evidence paths. An explicit
+`--max-attempts` override is projected over configured classes, so raising it
+can deliberately authorize the next cumulative attempt after reviewing the
+evidence; the rejected command itself does not consume the controlled resume
+authorization.
 
 Resume's plan guard compares the stored and recomputed `plan_id`. That ID is a
 hash of the registry API base and ordered package names/versions. It does not

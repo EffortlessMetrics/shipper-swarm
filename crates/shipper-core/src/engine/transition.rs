@@ -12,7 +12,7 @@ use chrono::Utc;
 
 use crate::state::events::EventLog;
 use crate::state::execution_state;
-use crate::types::{AttemptDetail, ExecutionState, PackageState, PublishEvent};
+use crate::types::{AttemptDetail, EventType, ExecutionState, PackageState, PublishEvent};
 
 /// Apply one package transition through the shared event/state boundary.
 ///
@@ -238,6 +238,9 @@ fn validate_attempt_detail(key: &str, detail: &AttemptDetail) -> Result<()> {
             detail_key
         );
     }
+    if detail.attempt == 0 || detail.max_attempts == 0 || detail.ended_at < detail.started_at {
+        bail!("invalid completed-attempt bounds for {key}");
+    }
     Ok(())
 }
 
@@ -263,6 +266,13 @@ fn persist(
         progress.attempts = attempt;
     }
     if let Some(detail) = attempt_detail {
+        event_log.record(PublishEvent {
+            timestamp: Utc::now(),
+            package: key.to_string(),
+            event_type: EventType::PackageAttemptCompleted {
+                detail: detail.clone(),
+            },
+        });
         next_state.attempt_history.push(detail);
     }
     progress.last_updated_at = Utc::now();
@@ -468,7 +478,7 @@ mod tests {
         assert_eq!(state.packages["demo@1.0.0"].state, PackageState::Published);
         assert_eq!(state.attempt_history.len(), 1);
         assert_eq!(state.attempt_history[0].attempt, 1);
-        assert_eq!(EventLog::read_from_file(&events)?.len(), 1);
+        assert_eq!(EventLog::read_from_file(&events)?.len(), 2);
         let saved = crate::state::execution_state::load_state(dir.path())?
             .context("combined transition state was not persisted")?;
         assert_eq!(saved.attempt_history, state.attempt_history);
@@ -496,7 +506,7 @@ mod tests {
 
         assert!(log.all_events().is_empty());
         assert_eq!(state.attempt_history.len(), 1);
-        assert_eq!(EventLog::read_from_file(&events)?.len(), 1);
+        assert_eq!(EventLog::read_from_file(&events)?.len(), 2);
         Ok(())
     }
 

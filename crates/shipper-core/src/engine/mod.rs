@@ -77,6 +77,7 @@ struct ResumeRetryBudgetError {
     package: String,
     current_attempts: u32,
     requested_max_attempts: u32,
+    effective_max_attempts: u32,
     minimum_max_attempts: Option<u32>,
 }
 
@@ -84,8 +85,11 @@ impl std::fmt::Display for ResumeRetryBudgetError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             formatter,
-            "resume retry ceiling exhausted for {}: persisted attempts {}, requested --max-attempts {}",
-            self.package, self.current_attempts, self.requested_max_attempts
+            "resume retry ceiling exhausted for {}: persisted attempts {}, requested --max-attempts {}, effective ceiling {}",
+            self.package,
+            self.current_attempts,
+            self.requested_max_attempts,
+            self.effective_max_attempts
         )?;
         match self.minimum_max_attempts {
             Some(minimum) => write!(
@@ -109,6 +113,7 @@ pub struct ResumeRetryBudgetClassification {
     pub package: String,
     pub current_attempts: u32,
     pub requested_max_attempts: u32,
+    pub effective_max_attempts: u32,
     pub minimum_max_attempts: Option<u32>,
 }
 
@@ -122,6 +127,7 @@ pub fn classify_resume_retry_budget(
             package: budget.package.clone(),
             current_attempts: budget.current_attempts,
             requested_max_attempts: budget.requested_max_attempts,
+            effective_max_attempts: budget.effective_max_attempts,
             minimum_max_attempts: budget.minimum_max_attempts,
         })
 }
@@ -433,6 +439,7 @@ pub fn run_publish(
     opts: &RuntimeOptions,
     reporter: &mut dyn Reporter,
 ) -> Result<Receipt> {
+    execute_package::retry_policy::validate_runtime_retry_options(opts)?;
     publish::bootstrap::validate_resume_target(ws, opts)?;
     let publish::bootstrap::PublishBootstrap {
         state_dir,
@@ -598,6 +605,7 @@ pub fn run_resume(
     opts: &RuntimeOptions,
     reporter: &mut dyn Reporter,
 ) -> Result<Receipt> {
+    execute_package::retry_policy::validate_runtime_retry_options(opts)?;
     let workspace_root = &ws.workspace_root;
     let state_dir = resolve_state_dir(workspace_root, &opts.state_dir);
     let Some(existing_state) = state::load_state(&state_dir)? else {
@@ -669,9 +677,14 @@ pub fn run_resume(
             reconciliation.as_ref(),
         )
         .context("controlled-stop evidence does not authorize resume")?;
-        publish::bootstrap::validate_resume_target(ws, opts)?;
-        reject_exhausted_resume_retry_ceiling(ws, opts, &existing_state)?;
     }
+    publish::bootstrap::validate_resume_target(ws, opts)?;
+    reject_exhausted_resume_retry_ceiling(
+        ws,
+        opts,
+        &existing_state,
+        derived_recoverable || marker_present,
+    )?;
     run_publish(ws, opts, reporter)
 }
 
@@ -679,24 +692,41 @@ fn reject_exhausted_resume_retry_ceiling(
     ws: &PlannedWorkspace,
     opts: &RuntimeOptions,
     state: &ExecutionState,
+    controlled_not_published: bool,
 ) -> Result<()> {
     let reject_package = |package: &shipper_types::PlannedPackage| -> Result<()> {
         let key = pkg_key(&package.name, &package.version);
         let Some(progress) = state.packages.get(&key) else {
             return Ok(());
         };
-        if matches!(
-            progress.state,
-            PackageState::Failed {
-                class: ErrorClass::Retryable,
-                ..
-            }
-        ) && progress.attempts >= opts.max_attempts
-        {
+        let PackageState::Failed { class, .. } = &progress.state else {
+            // Unresolved ambiguity must still reconcile: it may already be
+            // published and therefore need no further Cargo attempt.
+            return Ok(());
+        };
+        if class == &ErrorClass::Ambiguous {
+            return Ok(());
+        }
+        // A conclusive NotPublished controlled stop retains Failed(Retryable)
+        // for consistency, while its completed attempt records the originating
+        // Ambiguous classification. Ordinary retained failures use their class.
+        let policy_class = if controlled_not_published {
+            // The controlled-stop consistency gate has already proved that
+            // every retained Failed(Retryable) package has NotPublished evidence.
+            &ErrorClass::Ambiguous
+        } else {
+            class
+        };
+        let effective_max_attempts =
+            execute_package::retry_policy::retry_decision(opts, policy_class)
+                .config
+                .max_attempts;
+        if progress.attempts >= effective_max_attempts {
             Err(ResumeRetryBudgetError {
                 package: key,
                 current_attempts: progress.attempts,
                 requested_max_attempts: opts.max_attempts,
+                effective_max_attempts,
                 minimum_max_attempts: progress.attempts.checked_add(1),
             }
             .into())
@@ -1136,6 +1166,7 @@ pub(crate) fn init_state(ws: &PlannedWorkspace, state_dir: &Path) -> Result<Exec
 
 #[cfg(test)]
 mod tests {
+    mod retry_regressions;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
@@ -3456,6 +3487,7 @@ mod tests {
                 package: "demo@0.1.0".to_string(),
                 current_attempts: 1,
                 requested_max_attempts: 1,
+                effective_max_attempts: 1,
                 minimum_max_attempts: Some(2),
             })
         );
@@ -4460,7 +4492,7 @@ mod tests {
         let mut opts = default_opts(PathBuf::from(".shipper"));
         opts.max_attempts = 1;
 
-        let error = reject_exhausted_resume_retry_ceiling(&ws, &opts, &state)
+        let error = reject_exhausted_resume_retry_ceiling(&ws, &opts, &state, false)
             .expect_err("both packages exhaust the requested ceiling");
         assert_eq!(
             classify_resume_retry_budget(&error),
@@ -4468,13 +4500,14 @@ mod tests {
                 package: "zeta@0.1.0".to_string(),
                 current_attempts: 3,
                 requested_max_attempts: 1,
+                effective_max_attempts: 1,
                 minimum_max_attempts: Some(4),
             }),
             "the plan order, not state-map order, owns deterministic reporting"
         );
 
         opts.resume_from = Some("alpha".to_string());
-        let selected_error = reject_exhausted_resume_retry_ceiling(&ws, &opts, &state)
+        let selected_error = reject_exhausted_resume_retry_ceiling(&ws, &opts, &state, false)
             .expect_err("the selected package also exhausts the ceiling");
         assert_eq!(
             classify_resume_retry_budget(&selected_error),
@@ -4482,6 +4515,7 @@ mod tests {
                 package: "alpha@0.1.0".to_string(),
                 current_attempts: 1,
                 requested_max_attempts: 1,
+                effective_max_attempts: 1,
                 minimum_max_attempts: Some(2),
             }),
             "packages before --resume-from must not participate in admission"
@@ -4502,7 +4536,7 @@ mod tests {
             .map(|path| std::fs::read(path).expect("read admission sentinel"))
             .collect::<Vec<_>>();
         opts.parallel.enabled = true;
-        let same_level_error = reject_exhausted_resume_retry_ceiling(&ws, &opts, &state)
+        let same_level_error = reject_exhausted_resume_retry_ceiling(&ws, &opts, &state, false)
             .expect_err("parallel resume selects the target's entire dependency level");
         assert_eq!(
             classify_resume_retry_budget(&same_level_error),
@@ -4510,6 +4544,7 @@ mod tests {
                 package: "zeta@0.1.0".to_string(),
                 current_attempts: 3,
                 requested_max_attempts: 1,
+                effective_max_attempts: 1,
                 minimum_max_attempts: Some(4),
             }),
             "the earlier exhausted sibling in the selected level must block deterministically"
@@ -4527,7 +4562,7 @@ mod tests {
         opts.max_attempts = u32::MAX;
         let zeta = state.packages.get_mut("zeta@0.1.0").expect("zeta progress");
         zeta.attempts = u32::MAX;
-        let overflow_error = reject_exhausted_resume_retry_ceiling(&ws, &opts, &state)
+        let overflow_error = reject_exhausted_resume_retry_ceiling(&ws, &opts, &state, false)
             .expect_err("the maximum representable ceiling cannot increase");
         assert_eq!(
             classify_resume_retry_budget(&overflow_error),
@@ -4535,6 +4570,7 @@ mod tests {
                 package: "zeta@0.1.0".to_string(),
                 current_attempts: u32::MAX,
                 requested_max_attempts: u32::MAX,
+                effective_max_attempts: u32::MAX,
                 minimum_max_attempts: None,
             })
         );
@@ -6673,45 +6709,6 @@ mod tests {
     }
 
     // â”€â”€ Retry logic edge-case tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-    #[test]
-    #[serial]
-    fn run_publish_zero_max_attempts_skips_publish_loop() {
-        let td = tempdir().expect("tempdir");
-        let bin = td.path().join("bin");
-        write_fake_tools(&bin);
-        with_test_env(
-            &bin,
-            vec![("SHIPPER_CARGO_EXIT", Some("0".to_string()))],
-            || {
-                // Registry says version doesn't exist, so engine enters the publish loop
-                // with max_attempts=0 â†’ loop body never executes â†’ package stays Pending
-                let server = spawn_registry_server(
-                    std::collections::BTreeMap::from([(
-                        "/api/v1/crates/demo/0.1.0".to_string(),
-                        vec![(404, "{}".to_string())],
-                    )]),
-                    1,
-                );
-                let ws = planned_workspace(td.path(), server.base_url.clone());
-                let mut opts = default_opts(PathBuf::from(".shipper"));
-                opts.max_attempts = 0;
-
-                let mut reporter = CollectingReporter::default();
-                let receipt = run_publish(&ws, &opts, &mut reporter).expect("publish");
-                assert_eq!(receipt.packages.len(), 1);
-                assert!(matches!(receipt.packages[0].state, PackageState::Pending));
-
-                let st = state::load_state(&td.path().join(".shipper"))
-                    .expect("load")
-                    .expect("exists");
-                let pkg = st.packages.get("demo@0.1.0").expect("pkg");
-                assert_eq!(pkg.attempts, 0, "no attempts should have been made");
-                assert!(matches!(pkg.state, PackageState::Pending));
-                server.join();
-            },
-        );
-    }
 
     #[test]
     fn sequential_scheduler_uses_finite_package_timeout() {

@@ -19,7 +19,7 @@
 
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Strategy type for retry behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -42,8 +42,11 @@ pub struct RetryStrategyConfig {
     /// Strategy type for calculating delay between retries.
     #[serde(default)]
     pub strategy: RetryStrategyType,
-    /// Maximum number of retry attempts.
-    #[serde(default)]
+    /// Maximum cumulative number of attempts for the selected error class.
+    #[serde(
+        default = "default_max_attempts",
+        deserialize_with = "deserialize_max_attempts"
+    )]
     pub max_attempts: u32,
     /// Base delay for backoff calculations.
     #[serde(default = "default_base_delay")]
@@ -56,6 +59,24 @@ pub struct RetryStrategyConfig {
     /// Jitter factor for randomized delays (0.0 = no jitter, 1.0 = full jitter).
     #[serde(default = "default_jitter")]
     pub jitter: f64,
+}
+
+/// Default cumulative attempt ceiling for a class-specific override.
+fn default_max_attempts() -> u32 {
+    6
+}
+
+fn deserialize_max_attempts<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = u32::deserialize(deserializer)?;
+    if value == 0 {
+        return Err(serde::de::Error::custom(
+            "retry max_attempts must be greater than zero",
+        ));
+    }
+    Ok(value)
 }
 
 /// Default base delay for backoff, used as the `serde` default for
@@ -81,10 +102,10 @@ impl Default for RetryStrategyConfig {
     fn default() -> Self {
         Self {
             strategy: RetryStrategyType::Exponential,
-            max_attempts: 6,
-            base_delay: Duration::from_secs(2),
-            max_delay: Duration::from_mins(2),
-            jitter: 0.5,
+            max_attempts: default_max_attempts(),
+            base_delay: default_base_delay(),
+            max_delay: default_max_delay(),
+            jitter: default_jitter(),
         }
     }
 }
@@ -99,7 +120,7 @@ pub struct PerErrorConfig {
     #[serde(default, rename = "ambiguous")]
     pub ambiguous: Option<RetryStrategyConfig>,
     /// Retry configuration for permanent errors (e.g., authentication failure).
-    /// Permanent errors are typically not retried, but this can be customized.
+    /// Permanent errors are not retried unless this override is present.
     #[serde(default, rename = "permanent")]
     pub permanent: Option<RetryStrategyConfig>,
 }
@@ -140,6 +161,7 @@ mod tests {
         let from_default = RetryStrategyConfig::default();
 
         assert_eq!(from_empty.strategy, from_default.strategy);
+        assert_eq!(from_empty.max_attempts, from_default.max_attempts);
         assert_eq!(from_empty.base_delay, from_default.base_delay);
         assert_eq!(from_empty.max_delay, from_default.max_delay);
         assert_eq!(from_empty.jitter, from_default.jitter);
@@ -148,14 +170,32 @@ mod tests {
         // each other only proves they agree — a change applied to both would
         // pass while silently altering every configuration that omits a field.
         assert_eq!(from_default.strategy, RetryStrategyType::Exponential);
+        assert_eq!(from_default.max_attempts, 6);
         assert_eq!(from_default.base_delay, Duration::from_secs(2));
         assert_eq!(from_default.max_delay, Duration::from_mins(2));
         assert_eq!(from_default.jitter, 0.5);
-        // `max_attempts` is the deliberate exception: its `serde` default is
-        // `u32::default()` (0) while `Default` uses 6. Pin the difference so a
-        // change to either is visible rather than accidental.
-        assert_eq!(from_empty.max_attempts, 0);
-        assert_eq!(from_default.max_attempts, 6);
+    }
+
+    #[test]
+    fn partial_override_uses_contract_defaults_for_omitted_fields() -> anyhow::Result<()> {
+        let config: RetryStrategyConfig = serde_json::from_str(r#"{"base_delay":"5s"}"#)?;
+
+        anyhow::ensure!(config.strategy == RetryStrategyType::Exponential);
+        anyhow::ensure!(config.max_attempts == 6);
+        anyhow::ensure!(config.base_delay == Duration::from_secs(5));
+        anyhow::ensure!(config.max_delay == Duration::from_mins(2));
+        anyhow::ensure!(config.jitter == 0.5);
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_zero_attempt_ceiling_is_rejected() -> anyhow::Result<()> {
+        let error = serde_json::from_str::<RetryStrategyConfig>(r#"{"max_attempts":0}"#)
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("zero attempts became a live retry policy"))?;
+
+        anyhow::ensure!(error.to_string().contains("must be greater than zero"));
+        Ok(())
     }
 
     #[test]

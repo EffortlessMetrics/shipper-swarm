@@ -97,7 +97,7 @@ max_delay = "90s"
 jitter = 0.4
 
 [retry.per_error.retryable]
-max_attempts = 10
+max_attempts = 6
 base_delay = "1s"
 
 [retry.per_error.ambiguous]
@@ -105,11 +105,23 @@ max_attempts = 4
 base_delay = "5s"
 ```
 
+Each configured class block becomes that class's complete retry policy after
+omitted fields receive the public defaults. A class-specific `max_attempts` is
+a narrower cumulative ceiling, not a second budget: it can never expand the
+top-level `[retry].max_attempts` ceiling, and the same cumulative count is
+enforced after an interrupted run resumes. Permanent failures remain terminal
+unless `[retry.per_error.permanent]` is explicitly configured.
+
 ### CLI overrides
 
 ```bash
 shipper publish --max-attempts 10 --base-delay 5s --max-delay 5m
 ```
+
+Explicit CLI retry flags have highest precedence and overlay the corresponding
+field in every configured error-class override for that invocation. In
+particular, `--max-attempts` sets the cumulative package ceiling used by each
+configured class.
 
 ---
 

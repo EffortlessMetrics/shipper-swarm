@@ -60,9 +60,13 @@ jitter = 0.5
 
 # Per-error-type retry configuration (optional)
 # Uncomment and customize to override retry behavior for specific error types
+# Each block is a complete policy with public defaults for omitted fields.
+# Class ceilings are cumulative across resume and capped by the package ceiling.
+# Explicit CLI retry flags overlay every configured class, including max_attempts.
+# Permanent failures retry only with an explicit [retry.per_error.permanent] block.
 # [retry.per_error.retryable]
 # strategy = "immediate"
-# max_attempts = 10
+# max_attempts = 4
 # base_delay = "0s"
 # max_delay = "1s"
 # jitter = 0.0
