@@ -150,6 +150,35 @@ fuzz smoke, heavy crypto proptests, native Linux target check, and release
 build. It does not publish crates or move release authority into
 `shipper-swarm`.
 
+When self-hosted allocation is unavailable, `shipper-swarm` maintainers can
+explicitly select the manual hosted route:
+
+```bash
+gh workflow run ci.yml --repo EffortlessMetrics/shipper-swarm \
+  --ref <reviewed-branch> -f runner_route=github-hosted
+```
+
+The default `runner_route=self-hosted` preserves the existing job groups and
+labels. Hosted selection applies only to `workflow_dispatch` in
+`EffortlessMetrics/shipper-swarm`; push and schedule behavior stays governed by
+the existing route. This option does not apply to the release authority.
+
+All twelve hosted jobs reuse the original step sequences through YAML anchors,
+including full-strength crypto, policy, security, MSRV, BDD, fuzz smoke, and
+release-profile compilation. Their dependency edges select the hosted jobs,
+their caches have a separate namespace, and their concurrency group prevents
+a later default main run from cancelling deliberate manual proof. The unused
+self-hosted counterparts are intentionally skipped on that run; every selected
+hosted job must execute and reach a terminal result.
+
+This is an opt-in broad proof run and can exceed the ordinary PR CI cost target.
+Dispatch once after the candidate and route have been reviewed; do not repeatedly
+dispatch an unchanged failure. Retain the run ID, source SHA, per-job results,
+and artifacts. Passing this route does not establish self-hosted availability,
+publication authorization, or the remaining exact-candidate release matrix.
+The [manual route plan](../../plans/swarm/manual-full-ci-hosted.md) and
+`python3 scripts/ci/check-full-ci-hosted.py --test` define the bounded contract.
+
 For PR-time advisory evidence, a maintainer can also apply labels:
 
 The canonical names, descriptions, colors, and lane memberships live in
