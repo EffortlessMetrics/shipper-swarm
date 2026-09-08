@@ -716,8 +716,27 @@ impl ShipperConfig {
         }
 
         // Validate jitter
-        if self.retry.jitter < 0.0 || self.retry.jitter > 1.0 {
+        if !(0.0..=1.0).contains(&self.retry.jitter) {
             bail!("retry.jitter must be between 0.0 and 1.0");
+        }
+
+        for (class, config) in [
+            ("retryable", self.retry.per_error.retryable.as_ref()),
+            ("ambiguous", self.retry.per_error.ambiguous.as_ref()),
+            ("permanent", self.retry.per_error.permanent.as_ref()),
+        ] {
+            let Some(config) = config else { continue };
+            if config.max_attempts == 0 {
+                bail!("retry.per_error.{class}.max_attempts must be greater than 0");
+            }
+            if config.max_delay < config.base_delay {
+                bail!(
+                    "retry.per_error.{class}.max_delay must be greater than or equal to base_delay"
+                );
+            }
+            if !(0.0..=1.0).contains(&config.jitter) {
+                bail!("retry.per_error.{class}.jitter must be between 0.0 and 1.0");
+            }
         }
 
         // Validate lock_timeout
@@ -894,9 +913,13 @@ jitter = 0.5
 
 # Per-error-type retry configuration (optional)
 # Uncomment and customize to override retry behavior for specific error types
+# Each block is a complete policy with public defaults for omitted fields.
+# Class ceilings are cumulative across resume and capped by the package ceiling.
+# Explicit CLI retry flags overlay every configured class, including max_attempts.
+# Permanent failures retry only with an explicit [retry.per_error.permanent] block.
 # [retry.per_error.retryable]
 # strategy = "immediate"
-# max_attempts = 10
+# max_attempts = 4
 # base_delay = "0s"
 # max_delay = "1s"
 # jitter = 0.0
@@ -3538,5 +3561,53 @@ api_base = "http://127.0.0.1:9/api"
 
         let config = ShipperConfig::load_from_file(&config_path).expect("parse");
         assert_eq!(config.schema_version, "shipper.config.v1");
+    }
+}
+
+#[cfg(test)]
+mod per_error_validation_tests {
+    use super::*;
+    use anyhow::ensure;
+
+    #[test]
+    fn every_class_rejects_invalid_policy_and_accepts_immediate_zero_delay() -> Result<()> {
+        for class in ["retryable", "ambiguous", "permanent"] {
+            for fields in [
+                "max_attempts = 0",
+                "base_delay = \"3s\"\nmax_delay = \"1s\"",
+                "jitter = -0.1",
+                "jitter = 1.1",
+                "jitter = nan",
+                "jitter = inf",
+            ] {
+                let input = format!("[retry.per_error.{class}]\n{fields}\n");
+                if fields == "max_attempts = 0" {
+                    let error = toml::from_str::<ShipperConfig>(&input)
+                        .err()
+                        .context("zero attempt ceiling decoded")?;
+                    ensure!(
+                        error.to_string().contains("max_attempts"),
+                        "wrong zero rejection: {error}"
+                    );
+                } else {
+                    let config = toml::from_str::<ShipperConfig>(&input)?;
+                    let error = config.validate().err().context("invalid class validated")?;
+                    ensure!(
+                        error
+                            .to_string()
+                            .contains(&format!("retry.per_error.{class}.")),
+                        "wrong class rejection: {error}"
+                    );
+                }
+            }
+            let input = format!(
+                "[retry.per_error.{class}]\nstrategy = \"immediate\"\nbase_delay = \"0s\"\nmax_delay = \"0s\"\njitter = 0.0\n"
+            );
+            toml::from_str::<ShipperConfig>(&input)?.validate()?;
+        }
+        let mut config = ShipperConfig::default();
+        config.retry.jitter = f64::NAN;
+        ensure!(config.validate().is_err(), "top-level NaN accepted");
+        Ok(())
     }
 }

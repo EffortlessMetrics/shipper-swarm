@@ -6337,7 +6337,7 @@ fn reconcile_bdd_ambiguous_resolves_to_published() {
 
 #[test]
 #[serial]
-fn reconcile_bdd_not_published_exhaustion_records_controlled_retryable_stop() {
+fn reconcile_bdd_not_published_exhaustion_records_controlled_retryable_stop() -> Result<()> {
     // Scenario: cargo exits ambiguously on every attempt. Registry is
     // consistently 404 — the version never appears. Reconcile resolves
     // to NotPublished on each cargo-failure path, which falls through to
@@ -6449,8 +6449,16 @@ fn reconcile_bdd_not_published_exhaustion_records_controlled_retryable_stop() {
         has_reconciled_not_published,
         "expected at least one PublishReconciled with NotPublished outcome"
     );
-    assert!(matches!(
-        persisted.all_events().last().map(|event| &event.event_type),
+    let mut tail = persisted.all_events().iter().rev();
+    anyhow::ensure!(matches!(
+        tail.next().map(|event| &event.event_type),
+        Some(EventType::PackageAttemptCompleted { detail })
+            if detail.attempt == 2 && detail.max_attempts == 2
+                && detail.error_class == Some(ErrorClass::Ambiguous)
+                && detail.next_attempt_at.is_none()
+    ));
+    anyhow::ensure!(matches!(
+        tail.next().map(|event| &event.event_type),
         Some(EventType::PackageFailed {
             class: ErrorClass::Retryable,
             ..
@@ -6482,6 +6490,7 @@ fn reconcile_bdd_not_published_exhaustion_records_controlled_retryable_stop() {
     );
 
     server.join();
+    Ok(())
 }
 
 #[test]
@@ -8041,7 +8050,18 @@ fn semantic_event_sequence(
 fn strip_nondeterministic_event_fields(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(fields) => {
-            for field in ["duration_ms", "elapsed_ms", "next_attempt_at", "until"] {
+            // Completion events carry the Cargo timeline inside `detail`.
+            // Independent runs have different clocks; their classified policy
+            // and attempt facts remain in this semantic comparison. Per-run
+            // rebuild checks separately require the exact original timestamps.
+            for field in [
+                "duration_ms",
+                "elapsed_ms",
+                "next_attempt_at",
+                "until",
+                "started_at",
+                "ended_at",
+            ] {
                 fields.remove(field);
             }
             for child in fields.values_mut() {

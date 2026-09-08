@@ -5,7 +5,7 @@
 //! The parallel scheduler remains in `engine::parallel`; the module boundary
 //! deliberately keeps package execution independent from scheduling.
 
-mod retry_policy;
+pub(super) mod retry_policy;
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};

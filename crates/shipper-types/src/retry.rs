@@ -177,23 +177,25 @@ mod tests {
     }
 
     #[test]
-    fn partial_override_uses_contract_defaults_for_omitted_fields() {
-        let config: RetryStrategyConfig =
-            serde_json::from_str(r#"{"base_delay":"5s"}"#).expect("deserialize partial");
+    fn partial_override_uses_contract_defaults_for_omitted_fields() -> anyhow::Result<()> {
+        let config: RetryStrategyConfig = serde_json::from_str(r#"{"base_delay":"5s"}"#)?;
 
-        assert_eq!(config.strategy, RetryStrategyType::Exponential);
-        assert_eq!(config.max_attempts, 6);
-        assert_eq!(config.base_delay, Duration::from_secs(5));
-        assert_eq!(config.max_delay, Duration::from_mins(2));
-        assert_eq!(config.jitter, 0.5);
+        anyhow::ensure!(config.strategy == RetryStrategyType::Exponential);
+        anyhow::ensure!(config.max_attempts == 6);
+        anyhow::ensure!(config.base_delay == Duration::from_secs(5));
+        anyhow::ensure!(config.max_delay == Duration::from_mins(2));
+        anyhow::ensure!(config.jitter == 0.5);
+        Ok(())
     }
 
     #[test]
-    fn explicit_zero_attempt_ceiling_is_rejected() {
+    fn explicit_zero_attempt_ceiling_is_rejected() -> anyhow::Result<()> {
         let error = serde_json::from_str::<RetryStrategyConfig>(r#"{"max_attempts":0}"#)
-            .expect_err("zero attempts must not become a live retry policy");
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("zero attempts became a live retry policy"))?;
 
-        assert!(error.to_string().contains("must be greater than zero"));
+        anyhow::ensure!(error.to_string().contains("must be greater than zero"));
+        Ok(())
     }
 
     #[test]

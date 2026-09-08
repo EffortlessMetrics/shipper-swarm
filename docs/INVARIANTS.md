@@ -80,6 +80,23 @@ that a runtime-only attempt transition could infer locally.
 
 ## Artifact compatibility across the 0.4 to 0.5 line
 
+New writers record `package_attempt_completed` after the domain events for each
+completed Cargo attempt and before persisting its state projection. Its detail
+contains the effective classified retry ceiling, original Cargo completion
+time, and any scheduled next-attempt time. `package_attempted.max_attempts`
+remains the package admission ceiling, before the failure class is known.
+Completion records finalize attempt metadata; they do not claim package
+publication or completion of the run. Rebuild checks their package/attempt
+identity and agreement with preceding domain events, replacing the matching
+inferred attempt rather than adding a duplicate.
+
+Readers in this version still rebuild older event logs through the historical
+event inference rules. Older binaries do not recognize the new event variant
+and reject logs written with it; do not downgrade a retained run to an older
+reader. The public `EventType` enum also gains a variant, so exhaustive source
+matches in downstream integrations require updating. No schema-version change
+or unknown-event skipping is introduced.
+
 The compatibility promise is asymmetric:
 
 - **0.5 artifacts:** new events contain enough information to rebuild every

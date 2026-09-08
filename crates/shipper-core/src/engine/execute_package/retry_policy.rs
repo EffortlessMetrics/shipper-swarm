@@ -10,8 +10,8 @@ use shipper_types::{ErrorClass, RuntimeOptions};
 /// `override_configured` is retained because permanent failures remain
 /// non-retryable unless the operator explicitly configured that class.
 #[derive(Debug, Clone)]
-pub(super) struct RetryDecision {
-    pub(super) config: RetryStrategyConfig,
+pub(in crate::engine) struct RetryDecision {
+    pub(in crate::engine) config: RetryStrategyConfig,
     pub(super) override_configured: bool,
 }
 
@@ -22,7 +22,7 @@ impl RetryDecision {
     }
 }
 
-pub(super) fn validate_runtime_retry_options(opts: &RuntimeOptions) -> Result<()> {
+pub(in crate::engine) fn validate_runtime_retry_options(opts: &RuntimeOptions) -> Result<()> {
     validate_config(
         "retry",
         &RetryStrategyConfig {
@@ -59,7 +59,10 @@ fn validate_config(path: &str, config: &RetryStrategyConfig) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn retry_decision(opts: &RuntimeOptions, class: &ErrorClass) -> RetryDecision {
+pub(in crate::engine) fn retry_decision(
+    opts: &RuntimeOptions,
+    class: &ErrorClass,
+) -> RetryDecision {
     let fallback = RetryStrategyConfig {
         strategy: opts.retry_strategy,
         max_attempts: opts.max_attempts,
@@ -100,6 +103,7 @@ fn effective_retry_decision(
 
 #[cfg(test)]
 mod tests {
+    use anyhow::{Context, ensure};
     use std::time::Duration;
 
     use shipper_types::retry::RetryStrategyType;
@@ -122,16 +126,17 @@ mod tests {
         }
     }
 
-    fn assert_config_eq(actual: &RetryStrategyConfig, expected: &RetryStrategyConfig) {
-        assert_eq!(actual.strategy, expected.strategy);
-        assert_eq!(actual.max_attempts, expected.max_attempts);
-        assert_eq!(actual.base_delay, expected.base_delay);
-        assert_eq!(actual.max_delay, expected.max_delay);
-        assert!((actual.jitter - expected.jitter).abs() < f64::EPSILON);
+    fn check_config_eq(actual: &RetryStrategyConfig, expected: &RetryStrategyConfig) -> Result<()> {
+        ensure!(actual.strategy == expected.strategy);
+        ensure!(actual.max_attempts == expected.max_attempts);
+        ensure!(actual.base_delay == expected.base_delay);
+        ensure!(actual.max_delay == expected.max_delay);
+        ensure!((actual.jitter - expected.jitter).abs() < f64::EPSILON);
+        Ok(())
     }
 
     #[test]
-    fn unconfigured_class_uses_the_fallback_policy() {
+    fn unconfigured_class_uses_the_fallback_policy() -> Result<()> {
         let fallback = config(
             RetryStrategyType::Exponential,
             6,
@@ -146,14 +151,15 @@ mod tests {
             &ErrorClass::Retryable,
         );
 
-        assert_config_eq(&decision.config, &fallback);
-        assert!(!decision.override_configured);
-        assert!(decision.permits_retry(&ErrorClass::Retryable, 5));
-        assert!(!decision.permits_retry(&ErrorClass::Retryable, 6));
+        check_config_eq(&decision.config, &fallback)?;
+        ensure!(!decision.override_configured);
+        ensure!(decision.permits_retry(&ErrorClass::Retryable, 5));
+        ensure!(!decision.permits_retry(&ErrorClass::Retryable, 6));
+        Ok(())
     }
 
     #[test]
-    fn class_override_replaces_the_fallback_policy() {
+    fn class_override_replaces_the_fallback_policy() -> Result<()> {
         let fallback = config(
             RetryStrategyType::Exponential,
             6,
@@ -178,14 +184,15 @@ mod tests {
 
         let mut expected = retryable;
         expected.max_attempts = 6;
-        assert_config_eq(&decision.config, &expected);
-        assert!(decision.override_configured);
-        assert!(decision.permits_retry(&ErrorClass::Retryable, 5));
-        assert!(!decision.permits_retry(&ErrorClass::Retryable, 6));
+        check_config_eq(&decision.config, &expected)?;
+        ensure!(decision.override_configured);
+        ensure!(decision.permits_retry(&ErrorClass::Retryable, 5));
+        ensure!(!decision.permits_retry(&ErrorClass::Retryable, 6));
+        Ok(())
     }
 
     #[test]
-    fn class_override_may_narrow_the_hard_package_ceiling() {
+    fn class_override_may_narrow_the_hard_package_ceiling() -> Result<()> {
         let fallback = config(
             RetryStrategyType::Exponential,
             6,
@@ -207,13 +214,14 @@ mod tests {
 
         let decision = effective_retry_decision(fallback, &per_error, &ErrorClass::Ambiguous);
 
-        assert_eq!(decision.config.max_attempts, 2);
-        assert!(decision.permits_retry(&ErrorClass::Ambiguous, 1));
-        assert!(!decision.permits_retry(&ErrorClass::Ambiguous, 2));
+        ensure!(decision.config.max_attempts == 2);
+        ensure!(decision.permits_retry(&ErrorClass::Ambiguous, 1));
+        ensure!(!decision.permits_retry(&ErrorClass::Ambiguous, 2));
+        Ok(())
     }
 
     #[test]
-    fn direct_zero_attempt_contract_is_normalized_to_one() {
+    fn direct_zero_attempt_contract_is_normalized_to_one() -> Result<()> {
         let fallback = config(
             RetryStrategyType::Linear,
             4,
@@ -235,12 +243,13 @@ mod tests {
 
         let decision = effective_retry_decision(fallback, &per_error, &ErrorClass::Ambiguous);
 
-        assert_eq!(decision.config.max_attempts, 1);
-        assert!(!decision.permits_retry(&ErrorClass::Ambiguous, 1));
+        ensure!(decision.config.max_attempts == 1);
+        ensure!(!decision.permits_retry(&ErrorClass::Ambiguous, 1));
+        Ok(())
     }
 
     #[test]
-    fn runtime_policy_validation_rejects_invalid_values() {
+    fn runtime_policy_validation_rejects_invalid_values() -> Result<()> {
         let zero_attempts = config(
             RetryStrategyType::Immediate,
             0,
@@ -248,7 +257,7 @@ mod tests {
             Duration::ZERO,
             0.0,
         );
-        assert!(validate_config("retry", &zero_attempts).is_err());
+        ensure!(validate_config("retry", &zero_attempts).is_err());
 
         let nan_jitter = config(
             RetryStrategyType::Immediate,
@@ -257,7 +266,7 @@ mod tests {
             Duration::ZERO,
             f64::NAN,
         );
-        assert!(validate_config("retry", &nan_jitter).is_err());
+        ensure!(validate_config("retry", &nan_jitter).is_err());
 
         let invalid_bounds = config(
             RetryStrategyType::Immediate,
@@ -267,16 +276,18 @@ mod tests {
             0.0,
         );
         let error = validate_config("retry.per_error.ambiguous", &invalid_bounds)
-            .expect_err("invalid class bounds");
-        assert!(
+            .err()
+            .context("invalid class bounds were accepted")?;
+        ensure!(
             error
                 .to_string()
                 .contains("retry.per_error.ambiguous.max_delay")
         );
+        Ok(())
     }
 
     #[test]
-    fn runtime_policy_validation_allows_zero_delay_immediate_class() {
+    fn runtime_policy_validation_allows_zero_delay_immediate_class() -> Result<()> {
         let immediate = config(
             RetryStrategyType::Immediate,
             1,
@@ -284,11 +295,11 @@ mod tests {
             Duration::ZERO,
             0.0,
         );
-        assert!(validate_config("retry.per_error.permanent", &immediate).is_ok());
+        validate_config("retry.per_error.permanent", &immediate)
     }
 
     #[test]
-    fn permanent_failures_require_an_explicit_class_override() {
+    fn permanent_failures_require_an_explicit_class_override() -> Result<()> {
         let fallback = config(
             RetryStrategyType::Exponential,
             6,
@@ -301,7 +312,7 @@ mod tests {
             &PerErrorConfig::default(),
             &ErrorClass::Permanent,
         );
-        assert!(!none.permits_retry(&ErrorClass::Permanent, 1));
+        ensure!(!none.permits_retry(&ErrorClass::Permanent, 1));
 
         let per_error = PerErrorConfig {
             retryable: None,
@@ -315,7 +326,8 @@ mod tests {
             )),
         };
         let explicit = effective_retry_decision(fallback, &per_error, &ErrorClass::Permanent);
-        assert!(explicit.permits_retry(&ErrorClass::Permanent, 1));
-        assert!(!explicit.permits_retry(&ErrorClass::Permanent, 2));
+        ensure!(explicit.permits_retry(&ErrorClass::Permanent, 1));
+        ensure!(!explicit.permits_retry(&ErrorClass::Permanent, 2));
+        Ok(())
     }
 }

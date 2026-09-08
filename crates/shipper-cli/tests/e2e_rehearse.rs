@@ -379,7 +379,7 @@ fn common_args(
     state_dir: &Path,
     fake_cargo: &Path,
 ) {
-    common_args_with_max_attempts(cmd, manifest, api_base, state_dir, fake_cargo, "1");
+    common_args_with_max_attempts(cmd, manifest, api_base, state_dir, fake_cargo, Some("1"));
 }
 
 fn common_args_with_max_attempts(
@@ -388,7 +388,7 @@ fn common_args_with_max_attempts(
     api_base: &str,
     state_dir: &Path,
     fake_cargo: &Path,
-    max_attempts: &str,
+    max_attempts: Option<&str>,
 ) {
     cmd.arg("--manifest-path")
         .arg(manifest)
@@ -402,13 +402,14 @@ fn common_args_with_max_attempts(
         .arg("0ms")
         .arg("--verify-mode")
         .arg("none")
-        .arg("--max-attempts")
-        .arg(max_attempts)
         .arg("--base-delay")
         .arg("0ms")
         .arg("--state-dir")
         .arg(state_dir)
         .env("SHIPPER_CARGO_BIN", fake_cargo);
+    if let Some(max_attempts) = max_attempts {
+        cmd.args(["--max-attempts", max_attempts]);
+    }
 }
 
 fn live_rehearsal_root() -> PathBuf {
@@ -625,7 +626,7 @@ fn assert_live_rehearsal_resumed_state(state_dir: &Path) {
 
 #[test]
 #[serial]
-fn rehearsal_interrupted_publish_then_resume_preserves_invariants() {
+fn rehearsal_interrupted_publish_then_resume_preserves_invariants() -> anyhow::Result<()> {
     let td = tempdir().expect("tempdir");
     let root = td.path();
     create_three_crate_workspace(root);
@@ -716,15 +717,23 @@ fn rehearsal_interrupted_publish_then_resume_preserves_invariants() {
     let requests_before_budget_rejection = registry.total_hits();
     let secret = "issue346-retry-budget-secret";
 
+    let retry_config = root.join("retry-resume.toml");
+    fs::write(
+        &retry_config,
+        "[retry]\npolicy = \"custom\"\nmax_attempts = 6\n[retry.per_error.ambiguous]\nmax_attempts = 1\n",
+    )?;
     let mut same_ceiling_human = loopback_shipper_cmd();
-    common_args(
+    common_args_with_max_attempts(
         &mut same_ceiling_human,
         &root.join("Cargo.toml"),
         &registry_url,
         &state_dir,
         &fake_cargo,
+        None,
     );
     let human_output = same_ceiling_human
+        .arg("--config")
+        .arg(&retry_config)
         .arg("resume")
         .env("SHIPPER_FAKE_CARGO_LOG", &cargo_log)
         .env("SHIPPER_FAKE_EXIT_FOR_C", "0")
@@ -736,7 +745,8 @@ fn rehearsal_interrupted_publish_then_resume_preserves_invariants() {
     for expected in [
         "crate-c@0.1.0",
         "persisted attempts 1",
-        "requested --max-attempts 1",
+        "requested --max-attempts 6",
+        "effective ceiling 1",
         "--max-attempts 2 or greater",
         "Safe to resume: yes",
     ] {
@@ -748,14 +758,17 @@ fn rehearsal_interrupted_publish_then_resume_preserves_invariants() {
     assert!(!human_stderr.contains(secret));
 
     let mut same_ceiling_json = loopback_shipper_cmd();
-    common_args(
+    common_args_with_max_attempts(
         &mut same_ceiling_json,
         &root.join("Cargo.toml"),
         &registry_url,
         &state_dir,
         &fake_cargo,
+        None,
     );
     let json_output = same_ceiling_json
+        .arg("--config")
+        .arg(&retry_config)
         .args(["--format", "json", "resume"])
         .env("SHIPPER_FAKE_CARGO_LOG", &cargo_log)
         .env("SHIPPER_FAKE_EXIT_FOR_C", "0")
@@ -769,7 +782,8 @@ fn rehearsal_interrupted_publish_then_resume_preserves_invariants() {
     assert_eq!(json["schema_version"], "shipper.resume.error.v1");
     assert_eq!(json["package"], "crate-c@0.1.0");
     assert_eq!(json["current_attempts"], 1);
-    assert_eq!(json["requested_max_attempts"], 1);
+    assert_eq!(json["requested_max_attempts"], 6);
+    anyhow::ensure!(json.get("effective_max_attempts") == Some(&serde_json::json!(1)));
     assert_eq!(json["minimum_max_attempts"], 2);
     assert_eq!(json["safe_to_resume"]["value"], true);
     assert_eq!(json["next_action"]["kind"], "resume");
@@ -832,9 +846,13 @@ fn rehearsal_interrupted_publish_then_resume_preserves_invariants() {
         &registry_url,
         &state_dir,
         &fake_cargo,
-        "2",
+        Some("2"),
     );
-    resume.arg("resume").env("SHIPPER_FAKE_EXIT_FOR_C", "0");
+    resume
+        .arg("--config")
+        .arg(&retry_config)
+        .arg("resume")
+        .env("SHIPPER_FAKE_EXIT_FOR_C", "0");
     resume.env("SHIPPER_FAKE_CARGO_LOG", &cargo_log);
     resume.assert().success();
 
@@ -892,8 +910,9 @@ fn rehearsal_interrupted_publish_then_resume_preserves_invariants() {
     assert_eq!(
         execution_started, 2,
         "ExecutionStarted events should be exactly 2 (one per run); got {execution_started}. \
-         < 2 means events.jsonl was truncated somewhere — append-only invariant broken."
+        < 2 means events.jsonl was truncated somewhere — append-only invariant broken."
     );
+    Ok(())
 }
 
 #[test]
@@ -983,7 +1002,7 @@ fn live_runner_interruption_resume_downloaded_artifact_preserves_invariants() {
         &registry_url,
         &state_dir,
         &fake_cargo,
-        "2",
+        Some("2"),
     );
     resume
         .arg("resume")

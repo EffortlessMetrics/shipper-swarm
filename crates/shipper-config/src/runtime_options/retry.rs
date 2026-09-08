@@ -271,7 +271,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_cli_overrides_apply_to_every_configured_error_class() {
+    fn resolve_cli_overrides_apply_to_every_configured_error_class() -> anyhow::Result<()> {
         let config = RetryConfig {
             policy: RetryPolicy::Default,
             max_attempts: TEST_DEFAULT_MAX_ATTEMPTS,
@@ -301,12 +301,14 @@ mod tests {
             resolved.per_error.ambiguous.as_ref(),
             resolved.per_error.permanent.as_ref(),
         ] {
-            let class_config = class_config.expect("class override remains configured");
-            assert_eq!(class_config.max_attempts, 4);
-            assert_eq!(class_config.base_delay, Duration::from_secs(3));
-            assert_eq!(class_config.max_delay, Duration::from_secs(12));
-            assert_eq!(class_config.strategy, RetryStrategyType::Linear);
-            assert!((class_config.jitter - 0.25).abs() < f64::EPSILON);
+            let class_config =
+                class_config.ok_or_else(|| anyhow::anyhow!("class override missing"))?;
+            anyhow::ensure!(class_config.max_attempts == 4);
+            anyhow::ensure!(class_config.base_delay == Duration::from_secs(3));
+            anyhow::ensure!(class_config.max_delay == Duration::from_secs(12));
+            anyhow::ensure!(class_config.strategy == RetryStrategyType::Linear);
+            anyhow::ensure!((class_config.jitter - 0.25).abs() < f64::EPSILON);
         }
+        Ok(())
     }
 }

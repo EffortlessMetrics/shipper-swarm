@@ -80,6 +80,16 @@ Common event types:
 - `state_event_drift_detected` — added in [#93](https://github.com/EffortlessMetrics/shipper/issues/93); end-of-run consistency check
 - `execution_started`, `execution_finished`, `execution_stopped`
 
+`package_attempt_completed` records the final `AttemptDetail` for one Cargo
+invocation, after its domain events and before the state projection is saved.
+Its `detail.max_attempts` is the effective ceiling selected for the failure
+class; `package_attempted.max_attempts` is the package admission ceiling before
+classification. Completion metadata does not establish publication. Rebuild
+checks the matching attempt identity and preceding domain facts, then replaces
+the inferred detail without adding another history row. Older binaries reject
+this new event variant; retained runs must use a compatible reader. See the
+[artifact compatibility contract](../INVARIANTS.md#artifact-compatibility-across-the-04-to-05-line).
+
 `execution_stopped` is a nonterminal, no-receipt marker written while the
 publish lock is still held. Its current reason,
 `not_published_retry_budget_exhausted`, records that registry truth proved the

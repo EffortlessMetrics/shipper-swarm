@@ -1701,6 +1701,11 @@ pub enum EventType {
         #[serde(default, skip_serializing_if = "is_zero_u32")]
         max_attempts: u32,
     },
+    /// Authoritative final facts for one Cargo attempt, including the effective
+    /// policy selected after failure classification. Does not imply publication.
+    PackageAttemptCompleted {
+        detail: AttemptDetail,
+    },
     PackageOutput {
         stdout_tail: String,
         stderr_tail: String,

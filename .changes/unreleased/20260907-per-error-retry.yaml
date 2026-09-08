@@ -1,0 +1,6 @@
+kind: fixed
+body: Apply complete per-error retry policies with cumulative package limits, CLI precedence, validation after overlays, and accurate requested versus effective resume ceilings. Record completed attempt facts for exact recovery; older binaries cannot read the new completion event and downstream exhaustive EventType matches need updating.
+time: 2026-09-07T23:55:00Z
+custom:
+  Audience: Operators
+  Importance: Detailed

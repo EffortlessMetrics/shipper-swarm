@@ -16,6 +16,9 @@ use shipper_types::{
 
 use super::{events, execution_state};
 
+#[cfg(test)]
+mod completion_tests;
+
 /// Inputs that cannot be recovered from `events.jsonl` alone.
 #[derive(Debug, Clone)]
 pub struct StateRebuildOptions {
@@ -61,6 +64,7 @@ pub fn rebuild_state_from_events(
     let mut packages = BTreeMap::new();
     let mut attempt_history = Vec::new();
     let mut active_attempts: BTreeMap<String, RebuildAttemptDetail> = BTreeMap::new();
+    let mut completed_attempts = BTreeMap::new();
 
     for event in events {
         apply_event(
@@ -69,7 +73,8 @@ pub fn rebuild_state_from_events(
             &mut packages,
             &mut active_attempts,
             &mut attempt_history,
-        );
+            &mut completed_attempts,
+        )?;
     }
     finalize_active_attempts(&mut active_attempts, &mut attempt_history);
 
@@ -108,7 +113,8 @@ fn apply_event(
     packages: &mut BTreeMap<String, PackageProgress>,
     active_attempts: &mut BTreeMap<String, RebuildAttemptDetail>,
     attempt_history: &mut Vec<AttemptDetail>,
-) {
+    completed_attempts: &mut BTreeMap<(String, u32, DateTime<Utc>), AttemptDetail>,
+) -> Result<()> {
     match &event.event_type {
         EventType::PlanCreated {
             plan_id: event_plan_id,
@@ -164,6 +170,77 @@ fn apply_event(
                 progress.attempts = progress.attempts.max(*attempt);
                 progress.last_updated_at = event.timestamp;
             }
+        }
+        EventType::PackageAttemptCompleted { detail } => {
+            let key = format!("{}@{}", detail.package, detail.version);
+            if key != event.package
+                || detail.attempt == 0
+                || detail.max_attempts == 0
+                || detail.ended_at < detail.started_at
+                || detail.ended_at > event.timestamp
+            {
+                bail!(
+                    "invalid completed-attempt identity or bounds for {}",
+                    event.package
+                );
+            }
+            let identity = (key.clone(), detail.attempt, detail.started_at);
+            if let Some(previous) = completed_attempts.get(&identity) {
+                if previous != detail {
+                    bail!(
+                        "conflicting completed-attempt record for {key}#{}",
+                        detail.attempt
+                    );
+                }
+                return Ok(());
+            }
+            if active_attempts.get(&key).is_some_and(|active| {
+                active.attempt != detail.attempt || active.started_at != detail.started_at
+            }) {
+                bail!("completed attempt follows a newer PackageAttempted event for {key}");
+            }
+            let history_index = attempt_history.iter().position(|inferred| {
+                inferred.package == detail.package
+                    && inferred.version == detail.version
+                    && inferred.attempt == detail.attempt
+                    && inferred.started_at == detail.started_at
+            });
+            let inferred = if let Some(index) = history_index {
+                attempt_history.get(index).cloned()
+            } else {
+                active_attempts
+                    .get(&key)
+                    .filter(|active| {
+                        active.attempt == detail.attempt && active.started_at == detail.started_at
+                    })
+                    .cloned()
+                    .map(rebuild_attempt_to_detail)
+            }
+            .with_context(|| {
+                format!(
+                    "completed attempt lacks matching PackageAttempted event: {key}#{}",
+                    detail.attempt
+                )
+            })?;
+            if inferred.error_class != detail.error_class
+                || inferred.redacted_message != detail.redacted_message
+                || inferred.next_attempt_at != detail.next_attempt_at
+            {
+                bail!(
+                    "completed attempt contradicts preceding domain events for {key}#{}",
+                    detail.attempt
+                );
+            }
+            active_attempts.remove(&key);
+            if let Some(index) = history_index {
+                let slot = attempt_history
+                    .get_mut(index)
+                    .context("completed attempt history disappeared")?;
+                *slot = detail.clone();
+            } else {
+                attempt_history.push(detail.clone());
+            }
+            completed_attempts.insert(identity, detail.clone());
         }
         EventType::PackagePublished { .. } => {
             if let Some(active) = active_attempt_for_key_mut(active_attempts, &event.package)
@@ -247,22 +324,8 @@ fn apply_event(
             reason,
             message,
             ..
-        } => {
-            if let Some(active) = active_attempt_for_key_mut(active_attempts, &event.package)
-                && active.attempt == *attempt
-            {
-                apply_retry_wait(
-                    active,
-                    *max_attempts,
-                    *next_attempt_at,
-                    reason,
-                    message,
-                    event.timestamp,
-                );
-                finalize_attempt(active_attempts, attempt_history, &event.package);
-            }
         }
-        EventType::RetryScheduled {
+        | EventType::RetryScheduled {
             attempt,
             max_attempts,
             next_attempt_at,
@@ -270,6 +333,30 @@ fn apply_event(
             message,
             ..
         } => {
+            if let Some(completed) =
+                completed_attempts
+                    .iter()
+                    .find_map(|((package, number, _), detail)| {
+                        (package == &event.package && number == attempt).then_some(detail)
+                    })
+            {
+                // A successful Cargo invocation is already complete while
+                // registry visibility may still need retries. These waits do
+                // not rewrite Cargo history or authorize another upload.
+                if completed.error_class.is_none()
+                    && reason == &ErrorClass::Ambiguous
+                    && packages
+                        .get(&event.package)
+                        .is_some_and(|progress| matches!(progress.state, PackageState::Uploaded))
+                {
+                    return Ok(());
+                }
+                bail!(
+                    "retry schedule follows completed attempt for {}#{}",
+                    event.package,
+                    attempt
+                );
+            }
             if let Some(active) = active_attempt_for_key_mut(active_attempts, &event.package)
                 && active.attempt == *attempt
             {
@@ -282,10 +369,21 @@ fn apply_event(
                     event.timestamp,
                 );
                 finalize_attempt(active_attempts, attempt_history, &event.package);
+            } else if let Some(detail) = attempt_history.iter_mut().rev().find(|detail| {
+                format!("{}@{}", detail.package, detail.version) == event.package
+                    && detail.attempt == *attempt
+                    && detail.error_class == Some(ErrorClass::Permanent)
+            }) {
+                // Legacy Permanent failures finalize immediately. An explicit
+                // permanent policy can now schedule a retry; enrich that same
+                // inferred record without changing historical completion order.
+                detail.max_attempts = *max_attempts;
+                detail.next_attempt_at = Some(*next_attempt_at);
             }
         }
         _ => {}
     }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
