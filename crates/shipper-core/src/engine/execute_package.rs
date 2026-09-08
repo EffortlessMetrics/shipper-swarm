@@ -426,7 +426,6 @@ pub(crate) fn emit_retry_backoff(
 ) -> Result<()> {
     record_retry_backoff(
         event_log,
-        events_path,
         pkg_label,
         attempt,
         max_attempts,
@@ -452,7 +451,6 @@ pub(crate) fn emit_retry_backoff(
 #[allow(clippy::too_many_arguments)]
 fn record_retry_backoff(
     event_log: &Arc<Mutex<events::EventLog>>,
-    events_path: &Path,
     pkg_label: &str,
     attempt: u32,
     max_attempts: u32,
@@ -475,7 +473,6 @@ fn record_retry_backoff(
     ) {
         log.record(event);
     }
-    let _ = events_path;
     Ok(())
 }
 
@@ -1581,11 +1578,23 @@ pub(crate) fn publish_package_with_timeout(
                                 p.version
                             );
                             if let Err(persistence_error) =
-                                flush_package_events(event_log, events_path, &key, pending_events)
+                                commit_pending_with_attempt_detail_transition(
+                                    st,
+                                    state_dir,
+                                    event_log,
+                                    events_path,
+                                    &key,
+                                    PackageState::Failed {
+                                        class: class.clone(),
+                                        message: msg.clone(),
+                                    },
+                                    attempt_detail,
+                                    pending_events,
+                                )
                             {
                                 return PackagePublishResult {
                                     result: Err(error.context(format!(
-                                        "also failed to retain package failure events: {persistence_error:#}"
+                                        "also failed to persist package failure transition: {persistence_error:#}"
                                     ))),
                                 };
                             }
