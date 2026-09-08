@@ -1,5 +1,19 @@
 # Explicit manual full-CI hosted proof
 
+Status: accepted
+Owner: EffortlessMetrics
+Created: 2026-09-07
+Milestone: 0.5 candidate proof availability
+Linked proposal: docs/proposals/SHIPPER-PROP-0001-source-of-truth-and-release-evidence.md
+Linked specs: docs/specs/SHIPPER-SPEC-0001-source-of-truth-stack.md
+Linked ADRs: docs/adr/SHIPPER-ADR-0001-claims-become-checkable-state.md
+Linked plan: plans/swarm/development-control-plane.md
+Linked issues: #370
+Linked PRs: #373
+Support-tier impact: no claim promotion; static routing proof does not establish hosted capacity or full-CI success
+Policy impact: existing command and authority boundaries retained; no new secrets or release authority
+Proof commands: python3 scripts/ci/check-full-ci-hosted.py --test; actionlint -shellcheck=""; cargo xtask check-workflow-surfaces --mode blocking-allowlist; cargo xtask check-process-policy --mode blocking-allowlist; cargo xtask check-network-policy --mode blocking-allowlist; cargo xtask check-file-policy --mode blocking-allowlist
+
 Refs [#370](https://github.com/EffortlessMetrics/shipper-swarm/issues/370).
 The inspected base is `5ac0b5723c16ad45c291ff070a293fc455ba44d3`.
 
