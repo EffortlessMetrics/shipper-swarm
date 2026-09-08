@@ -78,6 +78,16 @@ attempt metadata into `attempt_history`, including retry backoff timestamps.
 Remaining edge cases are only where an event cannot describe the same detail
 that a runtime-only attempt transition could infer locally.
 
+Parallel package workers own the explanatory events for a transition until its
+projection is ready. The canonical executor validates the entire package batch,
+then holds the shared event-log mutex across appending those events and the
+event-first state/attempt-detail commit. Another worker may append or flush
+before that boundary, but cannot replace its pending tail during the commit.
+Lock ordering is event log, then execution state; Cargo, registry queries,
+reporting and retry sleeps remain outside that critical section. This is an
+in-process concurrency guarantee, not an all-or-nothing filesystem transaction
+or a host/power-loss durability claim.
+
 ## Artifact compatibility across the 0.4 to 0.5 line
 
 The compatibility promise is asymmetric:
