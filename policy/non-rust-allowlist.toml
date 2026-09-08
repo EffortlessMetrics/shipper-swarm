@@ -470,6 +470,17 @@ created = "2026-07-18"
 review_after = "2026-10-18"
 
 [[file]]
+path = "scripts/ci/check-full-ci-hosted.py"
+kind = "ci_policy_script"
+surface = "ci"
+classification = "script"
+owner = "release/ci"
+reason = "Validate explicit manual full-CI route exclusivity, all twelve paired jobs, shared proof steps, hosted dependency selection, cache isolation, and runtime budgets with rejecting fixtures. Actionlint remains the YAML syntax authority."
+covered_by = [".github/workflows/ci.yml", "python3 scripts/ci/check-full-ci-hosted.py --test"]
+created = "2026-09-07"
+review_after = "2026-12-07"
+
+[[file]]
 path = ".github/CODEOWNERS"
 kind = "github_codeowners"
 surface = "tooling"
