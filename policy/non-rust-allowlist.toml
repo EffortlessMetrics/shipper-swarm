@@ -481,6 +481,17 @@ created = "2026-09-07"
 review_after = "2026-12-07"
 
 [[file]]
+path = "scripts/ci/check-live-interruption-routing.py"
+kind = "ci_policy_script"
+surface = "ci"
+classification = "script"
+owner = "release/ci"
+reason = "Validate the swarm-only hosted interruption/resume route, fork refusal, shared command ownership, artifact handoff, selected dependency, read-only permissions, cache isolation, and runtime bounds with rejecting fixtures. Actionlint owns YAML syntax."
+covered_by = [".github/workflows/live-runner-interruption-rehearsal.yml", "python3 scripts/ci/check-live-interruption-routing.py --test"]
+created = "2026-09-08"
+review_after = "2026-12-08"
+
+[[file]]
 path = ".github/CODEOWNERS"
 kind = "github_codeowners"
 surface = "tooling"
