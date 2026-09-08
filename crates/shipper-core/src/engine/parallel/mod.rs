@@ -256,13 +256,16 @@ pub(crate) fn drain_retry_waits_to_host(
 
 /// Run publish in parallel mode using `shipper`'s wrapped `RegistryClient`.
 ///
-/// This is the entry point called by `engine::run_publish`. It adapts the
+/// This lower-level entry point adapts the
 /// host crate's types (`crate::registry::RegistryClient`, `crate::engine::Reporter`)
 /// into the inner ones expected by the parallel engine.
 ///
 /// Preserves the preconfigured registry client (including cache directory and
 /// transport configuration) while adapting host reporters for parallel
-/// execution.
+/// execution. The caller owns bootstrap and locking; this wrapper validates
+/// runtime retry options and retained-state admission before any notification
+/// or worker effects. The full `engine::run_publish` orchestrator performs its
+/// own bootstrap and calls the private adapter below.
 pub fn run_publish_parallel(
     ws: &crate::plan::PlannedWorkspace,
     opts: &RuntimeOptions,
@@ -271,6 +274,26 @@ pub fn run_publish_parallel(
     reg: &RegistryClient,
     reporter: &mut dyn crate::engine::Reporter,
 ) -> Result<Vec<PackageReceipt>> {
+    crate::engine::execute_package::retry_policy::validate_runtime_retry_options(opts)?;
+    crate::engine::publish::bootstrap::validate_resume_target(ws, opts)?;
+    let owned_record = match crate::lock::read_lock_contents(&crate::lock::lock_path(
+        state_dir,
+        Some(&ws.workspace_root),
+    ))? {
+        crate::lock::LockContents::Missing => None,
+        _ => Some(
+            crate::engine::publish::bootstrap::validate_observed_publish_lock(ws, state_dir, None)?,
+        ),
+    };
+    let admission = owned_record.as_ref().map_or(
+        crate::engine::RetainedStateAdmission::BeforeLock,
+        crate::engine::RetainedStateAdmission::PublishLockHeld,
+    );
+    // This entry point always uses parallel level selection, independently of
+    // the flag that the full orchestrator uses to choose a scheduler.
+    let mut admission_opts = opts.clone();
+    admission_opts.parallel.enabled = true;
+    crate::engine::validate_retained_publish_state(ws, &admission_opts, state_dir, st, admission)?;
     crate::engine::publish::notify_publish_started(ws, opts);
     run_publish_parallel_without_start(ws, opts, st, state_dir, reg, reporter)
 }

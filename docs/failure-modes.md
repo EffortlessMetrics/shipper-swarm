@@ -109,8 +109,11 @@ Each configured class block becomes that class's complete retry policy after
 omitted fields receive the public defaults. A class-specific `max_attempts` is
 a narrower cumulative ceiling, not a second budget: it can never expand the
 top-level `[retry].max_attempts` ceiling, and the same cumulative count is
-enforced after an interrupted run resumes. Permanent failures remain terminal
-unless `[retry.per_error.permanent]` is explicitly configured.
+enforced on every later `publish` or `resume` invocation. Automatic retries of
+permanent failures require an explicit `[retry.per_error.permanent]` block.
+After repairing the permanent cause, an operator may deliberately invoke
+`publish` or `resume` again while the effective cumulative ceiling still permits
+another attempt; this does not enable automatic permanent retries.
 
 ### CLI overrides
 

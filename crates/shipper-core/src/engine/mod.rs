@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 use chrono::Utc;
 
 use crate::cargo;
+use crate::lock;
 use crate::ops::auth;
 use crate::plan::PlannedWorkspace;
 use crate::registry::{RegistryClient, RegistryPolicy, ValidatedRegistry};
@@ -439,8 +440,32 @@ pub fn run_publish(
     opts: &RuntimeOptions,
     reporter: &mut dyn Reporter,
 ) -> Result<Receipt> {
+    run_publish_with_state_requirement(ws, opts, reporter, false)
+}
+
+fn run_publish_with_state_requirement(
+    ws: &PlannedWorkspace,
+    opts: &RuntimeOptions,
+    reporter: &mut dyn Reporter,
+    require_existing_state: bool,
+) -> Result<Receipt> {
     execute_package::retry_policy::validate_runtime_retry_options(opts)?;
     publish::bootstrap::validate_resume_target(ws, opts)?;
+    let retained_state_dir = resolve_state_dir(&ws.workspace_root, &opts.state_dir);
+    match state::load_state(&retained_state_dir)? {
+        Some(existing) => validate_retained_publish_state(
+            ws,
+            opts,
+            &retained_state_dir,
+            &existing,
+            RetainedStateAdmission::BeforeLock,
+        )?,
+        None if require_existing_state => bail!(
+            "no existing state found in {}; run shipper publish first",
+            retained_state_dir.display()
+        ),
+        None => {}
+    }
     let publish::bootstrap::PublishBootstrap {
         state_dir,
         _lock,
@@ -605,18 +630,29 @@ pub fn run_resume(
     opts: &RuntimeOptions,
     reporter: &mut dyn Reporter,
 ) -> Result<Receipt> {
-    execute_package::retry_policy::validate_runtime_retry_options(opts)?;
+    run_publish_with_state_requirement(ws, opts, reporter, true)
+}
+
+#[derive(Clone, Copy)]
+enum RetainedStateAdmission<'a> {
+    BeforeLock,
+    PublishLockHeld(&'a lock::LockRecord),
+}
+
+fn validate_retained_publish_state(
+    ws: &PlannedWorkspace,
+    opts: &RuntimeOptions,
+    state_dir: &Path,
+    existing_state: &ExecutionState,
+    admission: RetainedStateAdmission<'_>,
+) -> Result<()> {
     let workspace_root = &ws.workspace_root;
-    let state_dir = resolve_state_dir(workspace_root, &opts.state_dir);
-    let Some(existing_state) = state::load_state(&state_dir)? else {
-        bail!(
-            "no existing state found in {}; run shipper publish first",
-            state_dir.display()
-        );
-    };
-    publish::bootstrap::validate_existing_plan_id(&existing_state, ws, opts)?;
-    let observation = crate::state::run_observation::observe_run(&state_dir, Some(workspace_root))?;
-    let reconciliation_path = state::reconciliation_path(&state_dir);
+    if let RetainedStateAdmission::PublishLockHeld(record) = admission {
+        publish::bootstrap::validate_observed_publish_lock(ws, state_dir, Some(record))?;
+    }
+    publish::bootstrap::validate_existing_plan_id(existing_state, ws, opts)?;
+    let observation = crate::state::run_observation::observe_run(state_dir, Some(workspace_root))?;
+    let reconciliation_path = state::reconciliation_path(state_dir);
     let reconciliation = if reconciliation_path.exists() {
         Some(
             std::fs::read_to_string(&reconciliation_path)
@@ -641,7 +677,7 @@ pub fn run_resume(
         None
     };
     let derived_recoverable = crate::state::consistency::has_not_published_retryable_posture(
-        &existing_state,
+        existing_state,
         reconciliation.as_ref(),
     );
     let marker_present = matches!(
@@ -650,6 +686,12 @@ pub fn run_resume(
     );
     if derived_recoverable || marker_present {
         match observation {
+            crate::cli_bridge::RunObservation::Stopped { .. }
+                if matches!(admission, RetainedStateAdmission::PublishLockHeld(_)) =>
+            {
+                // The observed lock still matches the record captured for this
+                // publisher. Its own liveness is not a foreign-publisher veto.
+            }
             crate::cli_bridge::RunObservation::Stopped {
                 liveness: None | Some(crate::cli_bridge::RunLiveness::NotLive),
                 ..
@@ -668,24 +710,23 @@ pub fn run_resume(
                 "retryable NotPublished posture lacks the current controlled-stop marker; resume is blocked"
             ),
         }
-        if state::receipt_path(&state_dir).exists() {
+        if state::receipt_path(state_dir).exists() {
             bail!("controlled-stop evidence unexpectedly includes a receipt");
         }
         crate::state::consistency::verify_controlled_stop_consistency(
-            &events::events_path(&state_dir),
-            &existing_state,
+            &events::events_path(state_dir),
+            existing_state,
             reconciliation.as_ref(),
         )
         .context("controlled-stop evidence does not authorize resume")?;
     }
-    publish::bootstrap::validate_resume_target(ws, opts)?;
     reject_exhausted_resume_retry_ceiling(
         ws,
         opts,
-        &existing_state,
+        existing_state,
         derived_recoverable || marker_present,
     )?;
-    run_publish(ws, opts, reporter)
+    Ok(())
 }
 
 fn reject_exhausted_resume_retry_ceiling(

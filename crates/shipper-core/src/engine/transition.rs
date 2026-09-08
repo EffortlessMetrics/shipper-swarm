@@ -238,7 +238,7 @@ fn validate_attempt_detail(key: &str, detail: &AttemptDetail) -> Result<()> {
             detail_key
         );
     }
-    if detail.attempt == 0 || detail.max_attempts == 0 || detail.ended_at < detail.started_at {
+    if detail.attempt == 0 || detail.max_attempts == 0 {
         bail!("invalid completed-attempt bounds for {key}");
     }
     Ok(())
@@ -267,7 +267,7 @@ fn persist(
     }
     if let Some(detail) = attempt_detail {
         event_log.record(PublishEvent {
-            timestamp: Utc::now(),
+            timestamp: detail.ended_at,
             package: key.to_string(),
             event_type: EventType::PackageAttemptCompleted {
                 detail: detail.clone(),
@@ -653,6 +653,62 @@ mod tests {
                 .map(|event| &event.event_type),
             Some(EventType::PackagePublished { duration_ms: 7 })
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn completed_attempt_preserves_clock_rollback_without_resampling_its_end() -> anyhow::Result<()>
+    {
+        let directory = tempdir()?;
+        let events = events_path(directory.path());
+        let mut state = state();
+        let mut log = EventLog::new();
+        let mut detail = attempt_detail();
+        detail.started_at = Utc::now() + chrono::TimeDelta::seconds(2);
+        detail.ended_at = detail.started_at - chrono::TimeDelta::seconds(1);
+        detail.error_class = Some(crate::types::ErrorClass::Retryable);
+        detail.redacted_message = Some("timeout".into());
+        let mut admitted = attempted_event(1);
+        admitted.timestamp = detail.started_at;
+        commit_attempt(
+            &mut state,
+            directory.path(),
+            &mut log,
+            &events,
+            "demo@1.0.0",
+            1,
+            admitted,
+        )?;
+        commit_with_attempt_detail(
+            &mut state,
+            directory.path(),
+            &mut log,
+            &events,
+            "demo@1.0.0",
+            PackageState::Failed {
+                class: crate::types::ErrorClass::Retryable,
+                message: "timeout".into(),
+            },
+            PublishEvent {
+                timestamp: detail.ended_at,
+                package: "demo@1.0.0".into(),
+                event_type: EventType::PackageFailed {
+                    class: crate::types::ErrorClass::Retryable,
+                    message: "timeout".into(),
+                },
+            },
+            detail.clone(),
+        )?;
+        let persisted = EventLog::read_from_file(&events)?;
+        let completion = persisted.all_events().last().context("completion event")?;
+        anyhow::ensure!(completion.timestamp == detail.ended_at);
+        let rebuilt = crate::state::rebuild::rebuild_state_from_events(
+            &events,
+            crate::state::rebuild::StateRebuildOptions::new(state.registry.clone())
+                .with_fallback_plan_id(&state.plan_id),
+        )?;
+        anyhow::ensure!(rebuilt.attempt_history == vec![detail]);
+        anyhow::ensure!(rebuilt.attempt_history == state.attempt_history);
         Ok(())
     }
 }

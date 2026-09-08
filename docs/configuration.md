@@ -162,10 +162,16 @@ Controls retry behavior for failed publish operations.
 
 - **policy**: Retry policy preset (default: `default`). Options: `default`, `aggressive`, `conservative`, `custom`
 - **strategy**: Retry strategy (default: `exponential`). Options: `immediate`, `exponential`, `linear`, `constant`
-- **max_attempts**: Maximum number of retry attempts per package (default: `6`)
+- **max_attempts**: Positive cumulative attempt ceiling per package, including the initial attempt (default: `6`)
 - **base_delay**: Starting delay for exponential backoff (default: `2s`)
 - **max_delay**: Maximum delay between retries (default: `2m`)
 - **jitter**: Jitter factor for randomized delays (default: `0.5`)
+
+Optional `[retry.per_error.retryable]`, `[retry.per_error.ambiguous]`, and
+`[retry.per_error.permanent]` blocks configure complete policies for each failure
+class. See [per-error retry behavior and CLI precedence](failure-modes.md#per-error-class-overrides).
+Validated loading rejects invalid class values; diagnostic-only library loaders
+retain those values so callers can report field-specific validation errors.
 
 ### Flags
 

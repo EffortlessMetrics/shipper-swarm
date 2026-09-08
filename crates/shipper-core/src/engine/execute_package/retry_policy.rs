@@ -7,8 +7,8 @@ use shipper_types::{ErrorClass, RuntimeOptions};
 /// The top-level runtime policy is the fallback when that class has no
 /// override. CLI overrides have already been projected over every configured
 /// class by `shipper-config` before the engine receives `RuntimeOptions`.
-/// `override_configured` is retained because permanent failures remain
-/// non-retryable unless the operator explicitly configured that class.
+/// `override_configured` is retained because automatic permanent retries
+/// require the operator to explicitly configure that class.
 #[derive(Debug, Clone)]
 pub(in crate::engine) struct RetryDecision {
     pub(in crate::engine) config: RetryStrategyConfig,
@@ -88,7 +88,7 @@ fn effective_retry_decision(
     let hard_ceiling = fallback.max_attempts.max(1);
     let mut config = override_config.cloned().unwrap_or(fallback);
 
-    // Deserialized configuration rejects zero. Keep the engine boundary safe
+    // Validated configuration rejects zero. Keep this pure selector safe
     // for embedders that construct RuntimeOptions directly: one Cargo attempt
     // has already occurred before a classified retry decision exists. A class
     // override may narrow the cumulative package ceiling, but it must never

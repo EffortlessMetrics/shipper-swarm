@@ -85,8 +85,11 @@ completed Cargo attempt and before persisting its state projection. Its detail
 contains the effective classified retry ceiling, original Cargo completion
 time, and any scheduled next-attempt time. `package_attempted.max_attempts`
 remains the package admission ceiling, before the failure class is known.
-Completion records finalize attempt metadata; they do not claim package
-publication or completion of the run. Rebuild checks their package/attempt
+Wall-clock timestamps remain observations: clock adjustments may place the
+recorded end before the start. Completion events use the recorded attempt end
+as their timestamp; identity and domain facts, rather than wall-clock ordering,
+validate the record. Completion records finalize attempt metadata; they do not
+claim package publication or completion of the run. Rebuild checks their package/attempt
 identity and agreement with preceding domain events, replacing the matching
 inferred attempt rather than adding a duplicate.
 

@@ -1301,10 +1301,74 @@ fn run_ambiguous_still_unknown_publish(format: Option<&str>) -> Result<StillUnkn
     })
 }
 
+// Model a process interruption after the attempt admission was persisted but
+// before Cargo produced an outcome. A positive, already-spent budget preserves
+// the incomplete package and exercises completed partial-result rendering.
+fn seed_interrupted_attempt(
+    root: &Path,
+    state_dir: &Path,
+    registry: shipper_types::Registry,
+    plan_registry: Option<shipper_types::Registry>,
+) -> Result<()> {
+    use shipper_types::{EventType, PublishEvent, ReleaseSpec};
+    let workspace = shipper_core::plan::build_plan(&ReleaseSpec {
+        manifest_path: root.join("Cargo.toml"),
+        registry: plan_registry.unwrap_or_else(|| registry.clone()),
+        selected_packages: None,
+    })?;
+    fs::create_dir_all(state_dir)?;
+    let package = workspace
+        .plan
+        .packages
+        .first()
+        .context("interrupted fixture package")?;
+    let key = format!("{}@{}", package.name, package.version);
+    let timestamp = chrono::Utc::now();
+    let path = state_dir.join("events.jsonl");
+    let mut events = shipper_core::state::events::EventLog::new();
+    for event_type in [
+        EventType::PlanCreated {
+            plan_id: workspace.plan.plan_id.clone(),
+            package_count: workspace.plan.packages.len(),
+        },
+        EventType::PackageStarted {
+            name: package.name.clone(),
+            version: package.version.clone(),
+        },
+        EventType::PackageAttempted {
+            attempt: 1,
+            command: "cargo publish (interrupted before outcome)".into(),
+            max_attempts: 1,
+        },
+    ] {
+        events.record(PublishEvent {
+            timestamp,
+            package: key.clone(),
+            event_type,
+        });
+    }
+    events.write_to_file(&path)?;
+    shipper_core::state::rebuild::rebuild_state_file_from_events(
+        state_dir,
+        shipper_core::state::rebuild::StateRebuildOptions::new(registry),
+    )?;
+    Ok(())
+}
+
 fn run_completed_partial_publish(format: Option<&str>) -> Result<CompletedPartialRun> {
     let td = tempdir().context("create completed-partial workspace")?;
     create_single_crate_workspace(td.path());
     let state_dir = td.path().join(".shipper");
+    seed_interrupted_attempt(
+        td.path(),
+        &state_dir,
+        shipper_types::Registry {
+            name: "crates-io".into(),
+            api_base: "http://127.0.0.1:9".into(),
+            index_base: Some("http://127.0.0.1:9".into()),
+        },
+        None,
+    )?;
     let mut command = loopback_shipper_cmd();
     command
         .timeout(Duration::from_secs(20))
@@ -1315,7 +1379,7 @@ fn run_completed_partial_publish(format: Option<&str>) -> Result<CompletedPartia
         .arg("--allow-dirty")
         .arg("--skip-ownership-check")
         .arg("--max-attempts")
-        .arg("0")
+        .arg("1")
         .arg("--quiet")
         .arg("--state-dir")
         .arg(&state_dir);
@@ -1603,7 +1667,7 @@ fn ambiguous_still_unknown_publish_human_and_json_have_safe_error_parity() -> Re
 }
 
 #[test]
-fn multi_registry_later_success_does_not_mask_earlier_partial_result() {
+fn multi_registry_later_success_does_not_mask_earlier_partial_result() -> Result<()> {
     const SECRET: &str = "MULTI_REGISTRY_OUTCOME_SECRET";
 
     let td = tempdir().expect("tempdir");
@@ -1634,6 +1698,17 @@ index_base = "{beta}"
     );
 
     let state_dir = td.path().join("state-multi-registry-outcome");
+    seed_interrupted_attempt(
+        td.path(),
+        &state_dir.join("alpha"),
+        shipper_types::Registry {
+            name: "alpha".into(),
+            api_base: alpha.base_url.clone(),
+            index_base: Some(alpha.base_url.clone()),
+        },
+        // CLI builds one default-registry plan before per-registry dispatch.
+        Some(shipper_types::Registry::crates_io()),
+    )?;
     let output = loopback_shipper_cmd()
         .timeout(Duration::from_secs(20))
         .arg("--manifest-path")
@@ -1649,7 +1724,7 @@ index_base = "{beta}"
         .arg("--verify-poll")
         .arg("0ms")
         .arg("--max-attempts")
-        .arg("0")
+        .arg("1")
         .arg("--state-dir")
         .arg(&state_dir)
         .arg("publish")
@@ -1661,10 +1736,11 @@ index_base = "{beta}"
         .get_output()
         .clone();
 
-    assert_eq!(
-        output.status.code(),
-        Some(2),
-        "the later successful registry must not mask alpha's partial result"
+    ensure!(
+        output.status.code() == Some(2),
+        "the later successful registry must not mask alpha's partial result: stdout={}; stderr={}",
+        String::from_utf8_lossy(&output.stdout).replace(SECRET, "[redacted]"),
+        String::from_utf8_lossy(&output.stderr).replace(SECRET, "[redacted]")
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(
@@ -1722,6 +1798,7 @@ index_base = "{beta}"
         .expect("alpha registry completion");
     beta.finish(Duration::from_secs(2))
         .expect("beta registry completion");
+    Ok(())
 }
 
 #[test]

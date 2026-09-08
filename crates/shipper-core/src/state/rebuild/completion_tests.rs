@@ -113,7 +113,7 @@ fn completion_rejects_missing_foreign_conflicting_and_malformed_records() -> Res
             1 => detail.version = "2.0.0".into(),
             2 => detail.attempt = 2,
             3 => detail.started_at -= TimeDelta::milliseconds(1),
-            4 => detail.ended_at = detail.started_at - TimeDelta::milliseconds(1),
+            4 => detail.attempt = 0,
             5 => detail.error_class = None,
             6 => detail.next_attempt_at = Some(changed.timestamp),
             7 => detail.max_attempts = 0,
@@ -250,5 +250,24 @@ fn readiness_retry_preserves_completed_cargo_facts_for_new_and_legacy_logs() -> 
         rebuild(&failed).is_err(),
         "failed completed Cargo attempt was rescheduled"
     );
+    Ok(())
+}
+
+#[test]
+fn clock_rollback_preserves_observed_attempt_timestamps() -> Result<()> {
+    let (mut input, mut completed) = fixture();
+    let EventType::PackageAttemptCompleted { detail } = &mut completed.event_type else {
+        bail!("fixture")
+    };
+    detail.ended_at = detail.started_at - TimeDelta::seconds(1);
+    input.last_mut().context("failure event")?.timestamp = detail.ended_at;
+    let expected = detail.clone();
+    for completion_timestamp in [detail.ended_at, detail.ended_at - TimeDelta::seconds(1)] {
+        completed.timestamp = completion_timestamp;
+        let mut log = input.clone();
+        log.push(completed.clone());
+        let restored = rebuild(&log)?;
+        ensure!(restored.attempt_history == vec![expected.clone()]);
+    }
     Ok(())
 }

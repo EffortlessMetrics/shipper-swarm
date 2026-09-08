@@ -173,12 +173,7 @@ fn apply_event(
         }
         EventType::PackageAttemptCompleted { detail } => {
             let key = format!("{}@{}", detail.package, detail.version);
-            if key != event.package
-                || detail.attempt == 0
-                || detail.max_attempts == 0
-                || detail.ended_at < detail.started_at
-                || detail.ended_at > event.timestamp
-            {
+            if key != event.package || detail.attempt == 0 || detail.max_attempts == 0 {
                 bail!(
                     "invalid completed-attempt identity or bounds for {}",
                     event.package

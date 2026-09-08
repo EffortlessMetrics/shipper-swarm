@@ -5,7 +5,8 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 
 use crate::engine::{
-    Reporter, init_registry_client, init_state, prevalidate_publish_registry_tokens, rehearsal,
+    Reporter, RetainedStateAdmission, init_registry_client, init_state,
+    prevalidate_publish_registry_tokens, rehearsal, validate_retained_publish_state,
 };
 use crate::git;
 use crate::lock;
@@ -60,6 +61,7 @@ pub(in crate::engine) fn prepare_publish_run(
     rehearsal::enforce_gate(ws, opts, &state_dir, reporter)?;
 
     let lock = acquire_publish_lock(&state_dir, workspace_root, opts, &ws.plan.plan_id)?;
+    let owned_record = validate_observed_publish_lock(ws, &state_dir, None)?;
 
     // Collect git context and environment fingerprint at start of execution.
     let git_context = git::collect_git_context();
@@ -72,7 +74,7 @@ pub(in crate::engine) fn prepare_publish_run(
 
     let events_path = events::events_path(&state_dir);
     let mut event_log = events::EventLog::new();
-    let mut state = load_or_initialize_state(ws, opts, &state_dir, reporter)?;
+    let mut state = load_or_initialize_state(ws, opts, &state_dir, reporter, &owned_record)?;
     let registry = init_registry_client(ws.plan.registry.clone(), &state_dir, opts)?;
 
     reporter.info(&format!("state dir: {}", state_dir.as_path().display()));
@@ -125,9 +127,19 @@ fn load_or_initialize_state(
     opts: &RuntimeOptions,
     state_dir: &Path,
     reporter: &mut dyn Reporter,
+    owned_record: &lock::LockRecord,
 ) -> Result<ExecutionState> {
     match state::load_state(state_dir)? {
         Some(existing) => {
+            // Re-read admission while owning the publish lock: another run may
+            // have consumed the remaining budget after the caller's precheck.
+            validate_retained_publish_state(
+                ws,
+                opts,
+                state_dir,
+                &existing,
+                RetainedStateAdmission::PublishLockHeld(owned_record),
+            )?;
             if validate_existing_plan_id(&existing, ws, opts)? {
                 reporter.warn("forcing resume with mismatched plan_id (unsafe)");
             }
@@ -135,6 +147,46 @@ fn load_or_initialize_state(
         }
         None => Ok(init_state(ws, state_dir)?),
     }
+}
+
+/// Check the observed advisory lock record, without claiming atomic exclusion.
+/// The expected snapshot detects replacement since this publisher acquired it;
+/// it cannot repair the lock's pre-existing check-then-create race.
+pub(in crate::engine) fn validate_observed_publish_lock(
+    ws: &PlannedWorkspace,
+    state_dir: &Path,
+    expected: Option<&lock::LockRecord>,
+) -> Result<lock::LockRecord> {
+    let lock::LockContents::Present(record) =
+        lock::read_lock_contents(&lock::lock_path(state_dir, Some(&ws.workspace_root)))?
+    else {
+        bail!("publish lock record is missing or corrupt after acquisition");
+    };
+    let pid = std::process::id();
+    let hostname = gethostname::gethostname().to_string_lossy().into_owned();
+    if record.info.pid != pid
+        || record.info.hostname != hostname
+        || record.info.plan_id.as_deref() != Some(ws.plan.plan_id.as_str())
+    {
+        bail!("publish lock record no longer identifies this publisher and plan");
+    }
+    // Lock acquisition deliberately tolerates unavailable process identity.
+    // Preserve that support boundary, but verify any identity that was recorded.
+    if let Some(identity) = &record.process_identity
+        && lock::process_identity(pid)?.as_ref() != Some(identity)
+    {
+        bail!("publish lock process identity no longer identifies this publisher");
+    }
+    if let Some(expected) = expected
+        && (record.info.pid != expected.info.pid
+            || record.info.hostname != expected.info.hostname
+            || record.info.acquired_at != expected.info.acquired_at
+            || record.info.plan_id != expected.info.plan_id
+            || record.process_identity != expected.process_identity)
+    {
+        bail!("publish lock record changed after acquisition");
+    }
+    Ok(record)
 }
 
 pub(in crate::engine) fn validate_existing_plan_id(

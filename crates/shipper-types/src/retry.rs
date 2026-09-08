@@ -19,7 +19,7 @@
 
 use std::time::Duration;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 
 /// Strategy type for retry behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -43,10 +43,7 @@ pub struct RetryStrategyConfig {
     #[serde(default)]
     pub strategy: RetryStrategyType,
     /// Maximum cumulative number of attempts for the selected error class.
-    #[serde(
-        default = "default_max_attempts",
-        deserialize_with = "deserialize_max_attempts"
-    )]
+    #[serde(default = "default_max_attempts")]
     pub max_attempts: u32,
     /// Base delay for backoff calculations.
     #[serde(default = "default_base_delay")]
@@ -64,19 +61,6 @@ pub struct RetryStrategyConfig {
 /// Default cumulative attempt ceiling for a class-specific override.
 fn default_max_attempts() -> u32 {
     6
-}
-
-fn deserialize_max_attempts<'de, D>(deserializer: D) -> Result<u32, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let value = u32::deserialize(deserializer)?;
-    if value == 0 {
-        return Err(serde::de::Error::custom(
-            "retry max_attempts must be greater than zero",
-        ));
-    }
-    Ok(value)
 }
 
 /// Default base delay for backoff, used as the `serde` default for
@@ -120,7 +104,8 @@ pub struct PerErrorConfig {
     #[serde(default, rename = "ambiguous")]
     pub ambiguous: Option<RetryStrategyConfig>,
     /// Retry configuration for permanent errors (e.g., authentication failure).
-    /// Permanent errors are not retried unless this override is present.
+    /// Automatic retries of permanent errors require this override. A new
+    /// deliberate invocation after repair may retry within the cumulative ceiling.
     #[serde(default, rename = "permanent")]
     pub permanent: Option<RetryStrategyConfig>,
 }
@@ -189,12 +174,9 @@ mod tests {
     }
 
     #[test]
-    fn explicit_zero_attempt_ceiling_is_rejected() -> anyhow::Result<()> {
-        let error = serde_json::from_str::<RetryStrategyConfig>(r#"{"max_attempts":0}"#)
-            .err()
-            .ok_or_else(|| anyhow::anyhow!("zero attempts became a live retry policy"))?;
-
-        anyhow::ensure!(error.to_string().contains("must be greater than zero"));
+    fn explicit_zero_attempt_ceiling_is_preserved_for_diagnostics() -> anyhow::Result<()> {
+        let config: RetryStrategyConfig = serde_json::from_str(r#"{"max_attempts":0}"#)?;
+        anyhow::ensure!(config.max_attempts == 0);
         Ok(())
     }
 

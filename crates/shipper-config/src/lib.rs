@@ -916,7 +916,7 @@ jitter = 0.5
 # Each block is a complete policy with public defaults for omitted fields.
 # Class ceilings are cumulative across resume and capped by the package ceiling.
 # Explicit CLI retry flags overlay every configured class, including max_attempts.
-# Permanent failures retry only with an explicit [retry.per_error.permanent] block.
+# Automatic permanent retries require an explicit [retry.per_error.permanent] block.
 # [retry.per_error.retryable]
 # strategy = "immediate"
 # max_attempts = 4
@@ -3581,24 +3581,14 @@ mod per_error_validation_tests {
                 "jitter = inf",
             ] {
                 let input = format!("[retry.per_error.{class}]\n{fields}\n");
-                if fields == "max_attempts = 0" {
-                    let error = toml::from_str::<ShipperConfig>(&input)
-                        .err()
-                        .context("zero attempt ceiling decoded")?;
-                    ensure!(
-                        error.to_string().contains("max_attempts"),
-                        "wrong zero rejection: {error}"
-                    );
-                } else {
-                    let config = toml::from_str::<ShipperConfig>(&input)?;
-                    let error = config.validate().err().context("invalid class validated")?;
-                    ensure!(
-                        error
-                            .to_string()
-                            .contains(&format!("retry.per_error.{class}.")),
-                        "wrong class rejection: {error}"
-                    );
-                }
+                let config = toml::from_str::<ShipperConfig>(&input)?;
+                let error = config.validate().err().context("invalid class validated")?;
+                ensure!(
+                    error
+                        .to_string()
+                        .contains(&format!("retry.per_error.{class}.")),
+                    "wrong class rejection: {error}"
+                );
             }
             let input = format!(
                 "[retry.per_error.{class}]\nstrategy = \"immediate\"\nbase_delay = \"0s\"\nmax_delay = \"0s\"\njitter = 0.0\n"
@@ -3608,6 +3598,43 @@ mod per_error_validation_tests {
         let mut config = ShipperConfig::default();
         config.retry.jitter = f64::NAN;
         ensure!(config.validate().is_err(), "top-level NaN accepted");
+        Ok(())
+    }
+    #[test]
+    fn diagnostic_loaders_preserve_zero_class_values_while_validated_loaders_reject() -> Result<()>
+    {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join(".shipper.toml");
+        for class in ["retryable", "ambiguous", "permanent"] {
+            std::fs::write(
+                &path,
+                format!("[retry.per_error.{class}]\nmax_attempts = 0\n"),
+            )?;
+            let diagnostic = ShipperConfig::load_from_file_for_diagnostics(&path)?;
+            let raw = ShipperConfig::load_from_file_without_value_validation(&path)?;
+            let workspace = ShipperConfig::load_from_workspace_for_diagnostics(directory.path())?
+                .context("diagnostic workspace config")?;
+            for config in [diagnostic, raw, workspace] {
+                let policy = match class {
+                    "retryable" => config.retry.per_error.retryable.as_ref(),
+                    "ambiguous" => config.retry.per_error.ambiguous.as_ref(),
+                    _ => config.retry.per_error.permanent.as_ref(),
+                }
+                .context("configured diagnostic class")?;
+                ensure!(policy.max_attempts == 0);
+                let error = config
+                    .validate()
+                    .err()
+                    .context("diagnostic value validated")?;
+                ensure!(
+                    error
+                        .to_string()
+                        .contains(&format!("retry.per_error.{class}.max_attempts"))
+                );
+            }
+            ensure!(ShipperConfig::load_from_file(&path).is_err());
+            ensure!(ShipperConfig::load_from_workspace(directory.path()).is_err());
+        }
         Ok(())
     }
 }
