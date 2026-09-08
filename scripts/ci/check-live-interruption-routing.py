@@ -75,6 +75,7 @@ def check(text):
         test_name = "Create interrupted .shipper artifact" if phase == "interrupt" else "Resume from downloaded .shipper"
         test = sections(named_steps.get(test_name, ""), 8)
         require(set(test) == {"env", "run"}, f"{phase}: test must execute without a condition or error waiver")
+        require(test.get("run", "").removeprefix("|").strip() == TEST_PREFIX + TESTS[phase] + TEST_SUFFIX, f"{phase}: complete run block must execute only the required Cargo test")
         require(sections(test.get("env", ""), 10) == {"SHIPPER_LIVE_REHEARSAL_ROOT": ROOT, "SHIPPER_LIVE_REHEARSAL_REGISTRY_ADDR": "127.0.0.1:39197"}, f"{phase}: test must use the retained root and mock registry")
 
         uploads = [("Upload interrupted .shipper", SEED)] if phase == "interrupt" else [("Upload resumed .shipper", RESUMED)]
@@ -103,6 +104,8 @@ def test_mutations(text):
         ("permission expansion", "contents: read", "contents: write"),
         ("skipped resume test", "      - name: Resume from downloaded .shipper\n", "      - name: Resume from downloaded .shipper\n        if: false\n"),
         ("wrong test", TESTS["resume"], TESTS["interrupt"]),
+        ("early interrupt success", "          " + TEST_PREFIX + TESTS["interrupt"], "          exit 0\n          " + TEST_PREFIX + TESTS["interrupt"]),
+        ("early resume success", "          " + TEST_PREFIX + TESTS["resume"], "          exit 0\n          " + TEST_PREFIX + TESTS["resume"]),
         ("missing hidden evidence", "include-hidden-files: true", "include-hidden-files: false"),
         ("unrelated seed artifact", "name: " + SEED, "name: unrelated-seed"),
         ("cross-run download", "uses: actions/download-artifact@v8", "uses: actions/upload-artifact@v8"),
