@@ -8,6 +8,11 @@
 
 The post-v0.3.0 retrospective organized the product thesis around nine competencies. Issues #100–#109 are the historical implementation ledger for that model; completed competencies are no longer open planning queues. This document is the current roadmap.
 
+The [build-readiness handoff](plans/swarm/build-readiness.md) connects the
+2026-09-08 source and issue audit to bounded implementation work, proof, and
+cleanup. It preserves the current release queue and the explicitly deferred
+post-0.5 lanes; refresh its linked issues before selecting work.
+
 ## 0.5.0 release-line status
 
 The 0.5.0 line is the capstone for the current execution and security work. `shipper-swarm` is the development and proof surface; the separate `EffortlessMetrics/shipper` repository remains the release authority for tags, crates.io publication, GitHub Release creation, and final release evidence.
