@@ -95,9 +95,15 @@ cargo run --package shipper -- plan --help
 
 ### Before You Start
 
-- Check existing [issues](https://github.com/effortlessmetrics/shipper/issues)
-  for related work. Issue tracking remains in the release-authority repo until
-  it is explicitly moved.
+- Check the [development issues](https://github.com/EffortlessMetrics/shipper-swarm/issues)
+  and open PRs for related work before claiming a slice. Start with the
+  [build-readiness handoff](plans/swarm/build-readiness.md) for the audited work
+  order and the current release-freeze boundary.
+- Open routine product, test, documentation, and CI work in `shipper-swarm`.
+  Existing linked [source-repository issues](https://github.com/EffortlessMetrics/shipper/issues)
+  retain their context; implement routine development through swarm PRs and link
+  the original issue. Promotion, rehearsal, publication, and release evidence
+  remain owned by the release-authority issues.
 - For significant changes, open an issue first to discuss the approach.
 - Keep changes focused and atomic.
 
