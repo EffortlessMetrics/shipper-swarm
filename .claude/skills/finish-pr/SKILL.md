@@ -48,6 +48,8 @@ regression that exposes a discovered defect even when the development branch tur
 red. Filing an issue, replying to a review, or resolving its thread does not repair it.
 A candidate-introduced, worsened, or claim-falsifying defect requires
 `CHANGES_REQUIRED`; unavailable evidence stays `NOT_PROVEN`.
+Missing, cancelled, stale, partial, or instrument-failed evidence is not a pass.
+Retain its cause and return `NOT_PROVEN` until the required evidence is established.
 
 The root selects the smallest useful repair route and one writer per candidate:
 
