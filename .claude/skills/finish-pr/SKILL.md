@@ -41,6 +41,49 @@ Stop and report the exact blocker for `NOT_PROVEN`, `BLOCKED_BY_PREREQUISITE`, `
 
 Each PR receives its own challenge, substantive review, and integration posture. A campaign summary may be produced only after those child results exist. Respect dependency order; never let a parent or fan-in outrun an unreviewed child.
 
+## Blocking discoveries and repair stacks
+
+Do not merge known-red work into main. Keep technical results truthful: add the
+regression that exposes a discovered defect even when the development branch turns
+red. Filing an issue, replying to a review, or resolving its thread does not repair it.
+A candidate-introduced, worsened, or claim-falsifying defect requires
+`CHANGES_REQUIRED`; unavailable evidence stays `NOT_PROVEN`.
+
+The root selects the smallest useful repair route and one writer per candidate:
+
+- **Candidate defect:** repair the existing PR by default. A child repair may isolate
+  useful implementation/review work, but its unsafe parent cannot land first. Fold
+  the child into the parent or one combined integration candidate, then prove and
+  review the resulting tree before main receives it.
+- **Independent prerequisite defect:** reuse its existing repair owner or create one
+  bounded repair PR. Dependent work may stack above that repair. After it lands,
+  reconcile the dependent delta and refresh affected integration evidence; do not
+  duplicate the repair across every blocked PR.
+- **Independent non-blocking discovery:** record why the current claim remains true
+  and exposure is not worsened, then retain a durable follow-up. An issue URL alone
+  cannot establish that classification.
+
+Record the exact parent/head, child-only delta, writer, proof basis, and landing
+route for a stack. Parent/child CI is stack-local evidence, not protected-main
+acceptance. Never arm child auto-merge into an unprotected feature branch to bypass
+that boundary. A contiguous independently safe, reviewed, and proved prefix may
+land normally; do not flatten every stack into a giant PR. Preserve unique work
+and findings across squash, retarget, and incorporation, and close only the
+acceptance actually satisfied by the landed result.
+
+A new material finding withdraws readiness even on an unchanged head. If auto-merge
+is armed, disarm it through the available authorized GitHub operation and verify the
+readback before resolving the blocking thread. An unavailable or failed disarm is
+an integration-control blocker; do not claim the merge is contained. After repair,
+affected proof and cumulative rereview must restore `REVIEW_CURRENT` before arming.
+Old green, an unrelated later comment, or a completed agent run cannot restore it.
+
+Keep disjoint work moving. For the selected claim, usable repair/proof work outranks
+passive waiting; genuine remote waits name their owner and decision-changing event
+without an idle polling worker. Batch related findings into one repair wave, preserve
+unaffected review, and do not force branch churn or a global intake freeze. These
+instructions govern agent decisions; they do not install branch protection.
+
 ## Authority boundary
 
 Normal `shipper-swarm` development PRs squash-merge. History-preserving swarm/source synchronization follows its separate merge-commit contract. This skill never authorizes tags, crates.io publication, GitHub Release mutation, signing, deployment, credential movement, or release-authority changes.
