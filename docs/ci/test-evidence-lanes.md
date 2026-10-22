@@ -26,7 +26,7 @@ this inventory aligned when workflows are added, removed, or retargeted.
 | `ci.yml` | `push` + `workflow_dispatch` + weekly `schedule` | Main/manual full-CI evidence + weekly heavy proptest | Required when triggered; not the default PR gate |
 | `coverage.yml` | `push` (main) + `pull_request` + `workflow_dispatch` | Advisory / labeled | Advisory |
 | `fuzz.yml` | `schedule` + `workflow_dispatch` | Nightly | Advisory |
-| `live-runner-interruption-rehearsal.yml` | `workflow_dispatch` + path-scoped `pull_request` | Safe runner-artifact interruption/resume proof | Advisory/manual; required when triggered |
+| `live-runner-interruption-rehearsal.yml` | `workflow_dispatch` + path-scoped same-repository `pull_request` | Safe two-job artifact interruption/resume proof; automatic GitHub-hosted route in swarm | Both selected jobs required when triggered |
 | `mutation.yml` | `schedule` + `workflow_dispatch` + `pull_request` (label-gated) | Weekly + label-gated PR | Advisory |
 | `release.yml` | `push` (tags `v*.*.*`) + `workflow_dispatch` | Tag-triggered | Required (when triggered) |
 | `ripr.yml` | `pull_request` + `workflow_dispatch` | Advisory (`continue-on-error: true`) | Advisory |
@@ -286,6 +286,31 @@ The full-CI proof is the synthetic side: `ci.yml` runs
 a real `shipper publish` interruption/resume sequence against fake Cargo and a
 mock registry, then checks `state.json`, append-only `events.jsonl`, skipped
 published crates, and duplicate-publish invariants.
+
+### Runner artifact interruption/resume proof
+
+`live-runner-interruption-rehearsal.yml` exercises a separate boundary from the
+full-CI BDD run: one job uploads interrupted `.shipper` evidence and a second
+job downloads that artifact before resuming. In `EffortlessMetrics/shipper-swarm`,
+same-repository path-triggered PRs and manual dispatches automatically select
+`interrupt-hosted` and `resume-hosted` on ephemeral Ubuntu runners. Other
+repositories retain the existing scoped self-hosted pair. Fork PRs execute
+neither pair. Shared step anchors preserve the same ignored Cargo tests,
+loopback registry, artifact names and hidden-file transfer across routes.
+
+When this workflow is triggered, both selected jobs must succeed on the current
+candidate or its verified synthetic merge subject. Verify the run's source
+identity, nonempty seed and resumed artifacts, and successful download and
+resume test. The unused route is deliberately skipped; a queued, cancelled,
+failed, or missing selected job is not passing evidence. Local ZIP-transfer
+proof and the ordinary `e2e_rehearse` tests do not replace this GitHub artifact
+handoff. The two hosted jobs have separate 30-minute limits and isolated cache
+keys. `python3 scripts/ci/check-live-interruption-routing.py --test` checks the
+route, dependency, and artifact contract with accepting/rejecting fixtures.
+
+This uses fake Cargo and a mock registry with read-only workflow permissions.
+It establishes runner-artifact recovery evidence, not crates.io publication or
+release-authority authorization. See [#380](https://github.com/EffortlessMetrics/shipper-swarm/issues/380).
 
 ## Evidence Composition
 

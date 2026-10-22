@@ -6,6 +6,7 @@ struct RetryRegistry {
     url: String,
     stop: Arc<AtomicBool>,
     hits: Arc<AtomicUsize>,
+    status: Arc<AtomicUsize>,
     thread: Option<thread::JoinHandle<()>>,
 }
 
@@ -21,6 +22,8 @@ impl RetryRegistry {
         let hits = Arc::new(AtomicUsize::new(0));
         let thread_stop = Arc::clone(&stop);
         let thread_hits = Arc::clone(&hits);
+        let status = Arc::new(AtomicUsize::new(usize::from(status)));
+        let thread_status = Arc::clone(&status);
         let thread = thread::spawn(move || {
             while !thread_stop.load(Ordering::Relaxed) {
                 if let Ok(Some(request)) = server.recv_timeout(Duration::from_millis(5)) {
@@ -28,7 +31,7 @@ impl RetryRegistry {
                     let response_status = if previous < missing_requests {
                         404
                     } else {
-                        status
+                        thread_status.load(Ordering::Relaxed) as u16
                     };
                     let _ = request
                         .respond(Response::from_string("{}").with_status_code(response_status));
@@ -39,6 +42,7 @@ impl RetryRegistry {
             url,
             stop,
             hits,
+            status,
             thread: Some(thread),
         })
     }
@@ -484,6 +488,21 @@ fn per_error_ambiguous_registry_truth_controls_retries_and_completion() -> Resul
                             EventType::RetryScheduled { .. }
                         ))
                     );
+                    // A formerly unknown upload must record the new negative
+                    // reconciliation even when no further attempt is admitted.
+                    registry.status.store(404, Ordering::Relaxed);
+                    opts.retry_per_error.ambiguous = Some(class_policy(1));
+                    let resumed = run_resume(&workspace, &opts, &mut CollectingReporter::default())
+                        .err()
+                        .context("exhausted ambiguous resume unexpectedly succeeded")?;
+                    ensure!(matches!(
+                        classify_publish_stop(&resumed),
+                        Some(PublishStopClassification::RecoverableNotPublished {
+                            evidence_consistent: true
+                        })
+                    ));
+                    ensure!(fs::read_to_string(&cargo_log)?.lines().count() == calls);
+                    check_rebuild(&state_dir, &workspace)?;
                 }
                 Ok(())
             },

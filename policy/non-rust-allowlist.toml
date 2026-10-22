@@ -221,6 +221,17 @@ covered_by = ["issue #269", "manual review"]
 created = "2026-08-20"
 review_after = "2026-11-20"
 
+[[file]]
+path = "plans/swarm/build-readiness.md"
+kind = "development_plan"
+surface = "docs"
+classification = "documentation"
+owner = "agent-maintainers"
+reason = "Dated source and issue audit linking the release queue to bounded builder handoffs without replacing release authority."
+covered_by = ["issue #374", "cargo xtask check-doc-contracts --mode advisory", "cargo xtask check-file-policy --mode blocking-allowlist", "manual review"]
+created = "2026-09-08"
+review_after = "2026-12-08"
+
 # ─── Build / toolchain config ───────────────────────────────────────────────
 
 [[file]]
@@ -468,6 +479,17 @@ reason = "Validate explicit manual full-CI route exclusivity, all twelve paired 
 covered_by = [".github/workflows/ci.yml", "python3 scripts/ci/check-full-ci-hosted.py --test"]
 created = "2026-09-07"
 review_after = "2026-12-07"
+
+[[file]]
+path = "scripts/ci/check-live-interruption-routing.py"
+kind = "ci_policy_script"
+surface = "ci"
+classification = "script"
+owner = "release/ci"
+reason = "Validate the swarm-only hosted interruption/resume route, fork refusal, shared command ownership, artifact handoff, selected dependency, read-only permissions, cache isolation, and runtime bounds with rejecting fixtures. Actionlint owns YAML syntax."
+covered_by = [".github/workflows/live-runner-interruption-rehearsal.yml", "python3 scripts/ci/check-live-interruption-routing.py --test"]
+created = "2026-09-08"
+review_after = "2026-12-08"
 
 [[file]]
 path = ".github/CODEOWNERS"
