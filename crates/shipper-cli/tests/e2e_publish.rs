@@ -4,6 +4,8 @@
 //! verification, --dry-run-like behavior, --package scoping, custom --state-dir,
 //! failed publishes, and re-running publish when everything is already published.
 
+#[path = "e2e_publish/receipt_git_context.rs"]
+mod receipt_git_context;
 #[path = "e2e_publish/registry_failure.rs"]
 mod registry_failure;
 
