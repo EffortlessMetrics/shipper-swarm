@@ -6,7 +6,7 @@ use anyhow::Result;
 
 use crate::types::{
     ControlledStopReason, ExecutionResult, ExecutionState, PlannedWorkspace, ReconciliationReport,
-    ReleaseSpec,
+    ReleaseSpec, RuntimeOptions,
 };
 
 /// Workspace metadata captured before the CLI resolves workspace configuration.
@@ -32,6 +32,12 @@ impl PlanningWorkspace {
     pub fn build_plan(&self, spec: &ReleaseSpec) -> Result<PlannedWorkspace> {
         crate::plan::build_plan_from_metadata(spec, &self.metadata)
     }
+}
+
+/// Apply the engine's resume-selection guard before any selected target runs.
+/// The engine also retains this check for direct publish/resume callers.
+pub fn validate_resume_target(ws: &PlannedWorkspace, opts: &RuntimeOptions) -> Result<()> {
+    crate::engine::validate_resume_target(ws, opts)
 }
 
 /// Why unfinished evidence could not prove whether its publisher is alive.

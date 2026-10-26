@@ -46,9 +46,15 @@ document. To inspect an entry from `[[registries.registries]]`, select it with
 `shipper plan --registries private-reg` or
 `shipper preflight --registries private-reg`. Repeat for each target before a
 multi-registry publish. These two commands reject selectors resolving to more
-than one registry before registry access, verification, or state/event writes;
-they do not silently preview only the default registry. `status` and `doctor`
-retain their multiple-registry reports.
+than one registry before Shipper's execution probes, verification, or state/event
+writes. Workspace discovery still runs Cargo metadata first; dependency resolution
+can contact registries and create or update `Cargo.lock`. `status` and `doctor`
+retain their multiple-registry reports. Doctor attributes a graph failure to its
+registry when diagnosing multiple targets; a metadata discovery failure remains
+one workspace-wide finding.
+
+For `publish` and `resume`, `--resume-from` must name a package in every selected
+registry's plan. Shipper validates every target before starting the first one.
 
 ## Commands at a glance
 

@@ -33,10 +33,7 @@ pub(in crate::engine) struct PublishBootstrap {
     pub(in crate::engine) run_started: DateTime<Utc>,
 }
 
-pub(in crate::engine) fn validate_resume_target(
-    ws: &PlannedWorkspace,
-    opts: &RuntimeOptions,
-) -> Result<()> {
+pub(crate) fn validate_resume_target(ws: &PlannedWorkspace, opts: &RuntimeOptions) -> Result<()> {
     if let Some(ref target) = opts.resume_from
         && !ws.plan.packages.iter().any(|p| &p.name == target)
     {

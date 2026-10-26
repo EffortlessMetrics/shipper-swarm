@@ -142,6 +142,7 @@ fn package_names(report: &Value) -> Vec<&str> {
 }
 
 #[test]
+#[serial_test::serial]
 fn config_and_flags_plan_the_same_private_selection_and_existing_id_contract() {
     let fixture = Fixture::new();
     fixture.config("https://private.example/api");
@@ -231,7 +232,7 @@ impl LocalRegistry {
         let requests_in_thread = Arc::clone(&requests);
         let stop_in_thread = Arc::clone(&stop);
         let thread = thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(60);
+            let deadline = Instant::now() + Duration::from_mins(1);
             while !stop_in_thread.load(Ordering::Relaxed) && Instant::now() < deadline {
                 let Some(request) = server
                     .recv_timeout(Duration::from_millis(50))
@@ -354,6 +355,7 @@ exit /b 0
 }
 
 #[test]
+#[serial_test::serial]
 fn one_catalog_target_agrees_with_flags_status_and_preflight() {
     let fixture = Fixture::new();
     let registry = LocalRegistry::new(&fixture, "private-reg");
@@ -417,7 +419,16 @@ fn one_catalog_target_agrees_with_flags_status_and_preflight() {
 }
 
 fn execution_command(fixture: &Fixture, command: &str, attempts: &str) -> Command {
-    let mut invocation = fixture.command();
+    execution_command_with_format(fixture, command, attempts, "json")
+}
+
+fn execution_command_with_format(
+    fixture: &Fixture,
+    command: &str,
+    attempts: &str,
+    format: &str,
+) -> Command {
+    let mut invocation = fixture.command_with_format(format);
     invocation.args([
         "--allow-loopback",
         "--registries",
@@ -439,6 +450,7 @@ fn execution_command(fixture: &Fixture, command: &str, attempts: &str) -> Comman
 }
 
 #[test]
+#[serial_test::serial]
 fn publish_and_resume_use_each_targets_graph_and_id() {
     let fixture = Fixture::new();
     let public = LocalRegistry::new(&fixture, "crates-io");
@@ -602,6 +614,7 @@ fn publish_and_resume_use_each_targets_graph_and_id() {
 }
 
 #[test]
+#[serial_test::serial]
 fn multiple_plan_or_preflight_targets_refuse_before_effects() {
     let fixture = Fixture::new();
     let public = LocalRegistry::new(&fixture, "crates-io");
@@ -636,6 +649,7 @@ fn multiple_plan_or_preflight_targets_refuse_before_effects() {
 }
 
 #[test]
+#[serial_test::serial]
 fn invalid_later_target_and_unsafe_config_refuse_before_effects() {
     let fixture = Fixture::new();
     let public = LocalRegistry::new(&fixture, "crates-io");
@@ -706,4 +720,267 @@ fn invalid_later_target_and_unsafe_config_refuse_before_effects() {
     );
     fixture.assert_no_execution();
     private.assert_no_requests();
+}
+
+fn restrict_common_to_public(fixture: &Fixture) {
+    write(
+        &fixture.root().join("common/Cargo.toml"),
+        "[package]\nname = \"common\"\nversion = \"0.1.0\"\nedition = \"2021\"\npublish = [\"crates-io\"]\n",
+    );
+}
+
+fn make_disjoint_registry_plans(fixture: &Fixture) {
+    restrict_common_to_public(fixture);
+    write(
+        &fixture.root().join("private-only/Cargo.toml"),
+        "[package]\nname = \"private-only\"\nversion = \"0.1.0\"\nedition = \"2021\"\npublish = [\"private-reg\"]\n",
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn resume_target_missing_from_later_registry_refuses_before_any_execution() {
+    let fixture = Fixture::new();
+    make_disjoint_registry_plans(&fixture);
+    let public = LocalRegistry::new(&fixture, "crates-io");
+    let private = LocalRegistry::new(&fixture, "private-reg");
+    fixture.catalog(&public.api, &private.api);
+
+    for command in ["publish", "resume"] {
+        for format in ["json", "text"] {
+            for parallel in [false, true] {
+                let mut invocation = execution_command_with_format(&fixture, command, "1", format);
+                invocation.args(["--resume-from", "common"]);
+                if parallel {
+                    invocation.arg("--parallel");
+                }
+                let output = invocation.assert().failure().get_output().clone();
+                assert!(output.stdout.is_empty(), "no earlier target may finish");
+                if command == "publish" && format == "json" {
+                    let error: Value = serde_json::from_slice(&output.stderr)
+                        .expect("publish admission error envelope");
+                    assert_eq!(error["schema_version"], "shipper.publish.error.v1");
+                    assert_eq!(error["category"], "publish_failed");
+                    assert_eq!(error["evidence"], serde_json::json!([]));
+                } else {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    assert!(
+                        stderr.contains("invalid resume selection for registry 'private-reg'"),
+                        "{stderr}"
+                    );
+                    assert!(
+                        stderr.contains("resume-from package 'common' not found in publish plan"),
+                        "{stderr}"
+                    );
+                }
+                fixture.assert_no_execution();
+                public.assert_no_requests();
+                private.assert_no_requests();
+            }
+        }
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn invalid_later_resume_target_preserves_existing_first_target_evidence() {
+    let fixture = Fixture::new();
+    make_disjoint_registry_plans(&fixture);
+    let public = LocalRegistry::new(&fixture, "crates-io");
+    let private = LocalRegistry::new(&fixture, "private-reg");
+    fixture.catalog(&public.api, &private.api);
+
+    // A real first-target receipt makes a premature resume observable: even a
+    // terminal skip would append events and replace that receipt before failing
+    // at the invalid later target. The rejected invocation must change neither.
+    let published = json(fixture.command().args([
+        "--allow-loopback",
+        "--registries",
+        "crates-io",
+        "--state-dir",
+        ".shipper/crates-io",
+        "--policy",
+        "fast",
+        "--verify-mode",
+        "none",
+        "--no-readiness",
+        "publish",
+    ]));
+    assert_eq!(published["receipt"]["execution_result"], "success");
+    let before: Vec<_> = ["state.json", "receipt.json", "events.jsonl"]
+        .into_iter()
+        .map(|name| {
+            let path = fixture.root().join(".shipper/crates-io").join(name);
+            let contents = fs::read(&path).expect("existing first-target evidence");
+            (path, contents)
+        })
+        .collect();
+    let cargo_before = fs::read(fixture.root().join("cargo.log")).expect("initial upload");
+    let requests_before = public.requests.lock().expect("requests").clone();
+    private.assert_no_requests();
+
+    for parallel in [false, true] {
+        let mut invocation = execution_command(&fixture, "resume", "1");
+        invocation.args(["--resume-from", "common"]);
+        if parallel {
+            invocation.arg("--parallel");
+        }
+        let output = invocation.assert().failure().get_output().clone();
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("invalid resume selection for registry 'private-reg'"),
+            "{stderr}"
+        );
+        for (path, contents) in &before {
+            assert_eq!(&fs::read(path).expect("retained evidence"), contents);
+        }
+        assert_eq!(
+            fs::read(fixture.root().join("cargo.log")).expect("unchanged Cargo log"),
+            cargo_before
+        );
+        assert_eq!(*public.requests.lock().expect("requests"), requests_before);
+        private.assert_no_requests();
+        assert!(!fixture.root().join(".shipper/private-reg").exists());
+        assert!(!fixture.root().join("markers/private-reg").exists());
+    }
+}
+
+fn doctor_command(fixture: &Fixture, targets: &str, format: &str) -> Command {
+    let mut command = fixture.command_with_format(format);
+    command
+        .args(["--allow-loopback", "--registries", targets, "doctor"])
+        .env("CARGO_REGISTRY_TOKEN", "fixture-token")
+        .env("CARGO_REGISTRIES_PRIVATE_REG_TOKEN", "fixture-token");
+    command
+}
+
+#[test]
+#[serial_test::serial]
+fn doctor_attributes_mixed_target_graph_failure_without_losing_workspace() {
+    let fixture = Fixture::new();
+    // Public common is valid; private-only still depends on common, which the
+    // private registry cannot publish. Metadata succeeds for both graphs.
+    restrict_common_to_public(&fixture);
+    let public = LocalRegistry::new(&fixture, "crates-io");
+    let private = LocalRegistry::new(&fixture, "private-reg");
+    fixture.catalog(&public.api, &private.api);
+    let public_plan =
+        json(
+            fixture
+                .command()
+                .args(["--allow-loopback", "--registries", "crates-io", "plan"]),
+        );
+    assert_eq!(package_names(&public_plan), ["common"]);
+
+    for targets in ["crates-io,private-reg", "private-reg,crates-io"] {
+        let report = json(&mut doctor_command(&fixture, targets, "json"));
+        assert!(report.get("workspace_unavailable").is_none());
+        assert!(report.get("workspace_findings").is_none());
+        assert_eq!(report["summary"]["readiness"], "blocked");
+        assert_eq!(report["summary"]["blocker_count"], 1);
+        let reports = report["reports"].as_array().expect("registry reports");
+        assert_eq!(reports.len(), 2);
+        let mut names: Vec<_> = reports
+            .iter()
+            .map(|target| target["registry"]["name"].as_str().expect("registry name"))
+            .collect();
+        names.sort_unstable();
+        assert_eq!(names, ["crates-io", "private-reg"]);
+        for target in reports {
+            if target["registry"]["name"] == "private-reg" {
+                assert!(
+                    target["plan_unavailable"]
+                        .as_str()
+                        .expect("target graph failure")
+                        .contains("depends on non-publishable workspace member 'common'")
+                );
+                assert_eq!(target["summary"]["readiness"], "blocked");
+                assert_eq!(target["summary"]["blocker_count"], 1);
+                assert!(
+                    target["findings"]
+                        .as_array()
+                        .expect("findings")
+                        .iter()
+                        .any(|finding| finding["id"] == "registry-plan-unavailable"
+                            && finding["evidence"]
+                                .as_str()
+                                .expect("evidence")
+                                .contains("private-reg"))
+                );
+            } else {
+                assert_eq!(target["registry"]["name"], "crates-io");
+                assert!(target.get("plan_unavailable").is_none());
+                assert_eq!(target["summary"]["blocker_count"], 0);
+                assert!(
+                    !target["findings"]
+                        .as_array()
+                        .expect("findings")
+                        .iter()
+                        .any(|finding| finding["id"] == "registry-plan-unavailable")
+                );
+            }
+        }
+
+        let output = doctor_command(&fixture, targets, "text")
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let text = String::from_utf8(output).expect("doctor text");
+        assert!(
+            !text.contains("no release command will work here"),
+            "{text}"
+        );
+        assert!(!text.contains("workspace-plan-unavailable"), "{text}");
+        let blocks: Vec<_> = text
+            .split("🩺 Diagnostics for registry: ")
+            .skip(1)
+            .collect();
+        assert_eq!(blocks.len(), 2, "{text}");
+        for block in blocks {
+            if block.starts_with("private-reg ") {
+                assert!(block.contains("registry-plan-unavailable"), "{block}");
+                assert!(block.contains("Registry doctor: blocked"), "{block}");
+            } else {
+                assert!(block.starts_with("crates-io "), "{block}");
+                assert!(block.contains("registry_plan: available"), "{block}");
+                assert!(!block.contains("registry-plan-unavailable"), "{block}");
+                assert!(!block.contains("Registry doctor: blocked"), "{block}");
+            }
+        }
+    }
+
+    // A single failed target retains the existing envelope contract.
+    let single = json(&mut doctor_command(&fixture, "private-reg", "json"));
+    assert!(single["workspace_unavailable"].is_string());
+    assert_eq!(
+        single["workspace_findings"][0]["id"],
+        "workspace-plan-unavailable"
+    );
+    assert!(single["reports"][0].get("plan_unavailable").is_none());
+
+    // Metadata failure is still one global blocker, never a claimed per-target
+    // graph check. The remaining diagnostics continue for both registries.
+    write(&fixture.root().join("Cargo.toml"), "[workspace\n");
+    let unavailable = json(&mut doctor_command(
+        &fixture,
+        "crates-io,private-reg",
+        "json",
+    ));
+    assert!(unavailable["workspace_unavailable"].is_string());
+    assert_eq!(
+        unavailable["workspace_findings"]
+            .as_array()
+            .expect("global findings")
+            .len(),
+        1
+    );
+    assert_eq!(unavailable["summary"]["blocker_count"], 1);
+    for target in unavailable["reports"].as_array().expect("registry reports") {
+        assert!(target.get("plan_unavailable").is_none());
+        assert_eq!(target["summary"]["blocker_count"], 0);
+    }
+    fixture.assert_no_execution();
 }

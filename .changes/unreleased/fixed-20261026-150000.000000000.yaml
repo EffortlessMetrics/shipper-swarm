@@ -1,5 +1,5 @@
 kind: fixed
-body: Resolve registry configuration before planning; publish and resume use each target's eligible graph and plan ID. Plan and preflight reject multiple targets instead of silently previewing the default registry.
+body: Resolve effective registries before planning and validate all resume targets before execution. Keep each target's graph and ID, reject multi-target plan/preflight, and attribute Doctor graph failures to their registry.
 time: 2026-10-26T15:00:00Z
 custom:
   Audience: Operators

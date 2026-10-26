@@ -1726,21 +1726,28 @@ pub fn run() -> Result<std::process::ExitCode> {
     // Build every execution target before any command runs. A later target
     // with an invalid package selection must not fail after an earlier target
     // has already published. Each graph and ID use the same metadata snapshot.
+    let multiple_targets = target_registries.len() > 1;
     let mut planned_workspaces = Vec::with_capacity(target_registries.len());
+    let mut doctor_plan_statuses = Vec::with_capacity(target_registries.len());
     for registry in target_registries {
         let current_spec = ReleaseSpec {
             registry,
             ..spec.clone()
         };
-        let planned = match planning_workspace.as_ref() {
+        let (planned, target_status) = match planning_workspace.as_ref() {
             Some(workspace) => match workspace.build_plan(&current_spec) {
-                Ok(planned) => planned,
+                Ok(planned) => (planned, Some(doctor::WorkspaceStatus::Planned)),
                 Err(err) if cli.cmd.as_ref().is_some_and(runs_without_workspace) => {
-                    workspace_status =
-                        doctor::WorkspaceStatus::Unavailable(short_error_reason(&err));
+                    let status = doctor::WorkspaceStatus::Unavailable(short_error_reason(&err));
+                    // A graph failure belongs to this target. Keep the existing
+                    // single-target diagnostic, but do not make another valid
+                    // registry's workspace unavailable in a mixed report.
+                    if !multiple_targets {
+                        workspace_status = status.clone();
+                    }
                     let mut unavailable = workspace_less_plan(&current_spec);
                     unavailable.workspace_root = workspace_root.clone();
-                    unavailable
+                    (unavailable, Some(status))
                 }
                 Err(err) => {
                     let target =
@@ -1748,9 +1755,34 @@ pub fn run() -> Result<std::process::ExitCode> {
                     return Err(plan_error(err, target));
                 }
             },
-            None => workspace_less_plan(&current_spec),
+            None => (workspace_less_plan(&current_spec), None),
         };
         planned_workspaces.push(planned);
+        // Metadata failures remain one run-scoped condition; no target graph
+        // was evaluated in that case. Single-target reports retain their shape.
+        doctor_plan_statuses.push(target_status.filter(|_| multiple_targets));
+    }
+
+    if matches!(cli.cmd.as_ref(), Some(Commands::Publish | Commands::Resume)) {
+        // Building a graph does not validate --resume-from. Check the engine's
+        // selection contract for every target before the first can mutate state
+        // or publish, including when an earlier target's graph is valid.
+        for current_planned in &planned_workspaces {
+            if let Err(error) =
+                shipper_core::cli_bridge::validate_resume_target(current_planned, &opts)
+            {
+                let classification = classify_publish_early_error(&error);
+                let error = error.context(format!(
+                    "invalid resume selection for registry '{}'",
+                    current_planned.plan.registry.name
+                ));
+                return Err(if matches!(cli.cmd.as_ref(), Some(Commands::Publish)) {
+                    mark_publish_early_error(error, &cli.format, classification)
+                } else {
+                    error
+                });
+            }
+        }
     }
     let planned = &planned_workspaces[0];
 
@@ -2027,8 +2059,14 @@ pub fn run() -> Result<std::process::ExitCode> {
         Commands::Doctor => {
             if cli.format == "json" {
                 let mut reports = Vec::new();
-                for current_planned in &planned_workspaces {
-                    reports.push(doctor::collect_report(current_planned, &opts)?);
+                for (current_planned, target_status) in
+                    planned_workspaces.iter().zip(&doctor_plan_statuses)
+                {
+                    reports.push(doctor::collect_report(
+                        current_planned,
+                        &opts,
+                        target_status.as_ref(),
+                    )?);
                 }
                 doctor::print_json(reports, &workspace_status)?;
             } else {
@@ -2046,6 +2084,7 @@ pub fn run() -> Result<std::process::ExitCode> {
                         &opts,
                         &mut reporter,
                         &workspace_status,
+                        doctor_plan_statuses[idx].as_ref(),
                         idx == 0,
                     )?;
                 }
@@ -7341,6 +7380,7 @@ mod tests {
                     &opts,
                     &mut reporter,
                     &doctor::WorkspaceStatus::Planned,
+                    None,
                     true,
                 )
                 .expect("doctor");
@@ -7421,6 +7461,7 @@ mod tests {
                     &opts,
                     &mut reporter,
                     &doctor::WorkspaceStatus::Planned,
+                    None,
                     true,
                 )
                 .expect("doctor");
