@@ -4,7 +4,35 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use crate::types::{ControlledStopReason, ExecutionResult, ExecutionState, ReconciliationReport};
+use crate::types::{
+    ControlledStopReason, ExecutionResult, ExecutionState, PlannedWorkspace, ReconciliationReport,
+    ReleaseSpec,
+};
+
+/// Workspace metadata captured before the CLI resolves workspace configuration.
+///
+/// Registry-dependent filtering and plan identity are computed only after the
+/// caller supplies the effective target. Multiple targets share this snapshot
+/// rather than rerunning Cargo or relabeling a plan for another registry.
+pub struct PlanningWorkspace {
+    metadata: cargo_metadata::Metadata,
+}
+
+impl PlanningWorkspace {
+    pub fn load(manifest_path: &Path) -> Result<Self> {
+        Ok(Self {
+            metadata: crate::ops::cargo::load_metadata(manifest_path)?,
+        })
+    }
+
+    pub fn workspace_root(&self) -> &Path {
+        self.metadata.workspace_root.as_std_path()
+    }
+
+    pub fn build_plan(&self, spec: &ReleaseSpec) -> Result<PlannedWorkspace> {
+        crate::plan::build_plan_from_metadata(spec, &self.metadata)
+    }
+}
 
 /// Why unfinished evidence could not prove whether its publisher is alive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -50,6 +50,20 @@ You can also specify a custom configuration file using the `--config` flag:
 shipper publish --config my-config.toml
 ```
 
+The effective registry is resolved before Shipper selects publishable packages
+or computes the plan ID. Values in `[registry]` apply unless the corresponding
+`--registry` or `--api-base` option overrides them. Configuration loaded from the
+workspace root also applies when `--manifest-path` points to a member crate.
+Equivalent configuration and CLI registry values produce the same plan.
+
+For a registry catalog, select entries with `--registries NAME` or
+`--all-registries`; declaring entries alone does not select them. `plan` and
+`preflight` accept one effective target per invocation. Run them with
+`--registries NAME` for each target before publishing to several registries.
+Each publish/resume target uses its own registry-eligible package graph and
+plan ID; multiple-target execution continues to keep state under each registry's
+subdirectory.
+
 ## Configuration Options
 
 ### Policy

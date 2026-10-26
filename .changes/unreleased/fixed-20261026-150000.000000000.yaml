@@ -1,0 +1,6 @@
+kind: fixed
+body: Resolve registry configuration before planning; publish and resume use each target's eligible graph and plan ID. Plan and preflight reject multiple targets instead of silently previewing the default registry.
+time: 2026-10-26T15:00:00Z
+custom:
+  Audience: Operators
+  Importance: Detailed
