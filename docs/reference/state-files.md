@@ -180,6 +180,10 @@ the publish or resume invocation. Its commit, branch, tag, and dirty flag do
 not come from the caller's working directory when `--manifest-path` selects
 another workspace. Unavailable target Git evidence stays absent or unknown;
 Shipper does not substitute the caller's repository.
+Both evidence collection and the cleanliness gate ignore inherited Git
+repository-location, object-store, reference-view, and index overrides such as
+`GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, and `GIT_INDEX_FILE`. Git
+configuration, authentication settings, and `SHIPPER_GIT_BIN` remain available.
 
 `execution_result` is the aggregate receipt outcome: `"success"`,
 `"partial_failure"`, or the compatibility-retained `"complete_failure"` value.
