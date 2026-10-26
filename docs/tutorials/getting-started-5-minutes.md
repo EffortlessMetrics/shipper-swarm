@@ -41,6 +41,12 @@ Treat blocked findings as setup work before planning a publish. Common first
 fixes are logging in to crates.io, cleaning the git tree, or adding missing
 package metadata.
 
+Configuration is optional. To create a documented starting point, run
+`shipper config init`. It preserves an existing `.shipper.toml` and refuses to
+overwrite it. Use `shipper config init --output shipper-example.toml` with an
+unused path to generate a separate template, then review any settings you want
+to copy into your existing configuration.
+
 ## 3. Generate the publish plan
 
 ```bash

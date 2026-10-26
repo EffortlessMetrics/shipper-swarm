@@ -882,9 +882,9 @@ enum CiCommands {
 
 #[derive(Subcommand, Debug, Clone)]
 enum ConfigCommands {
-    /// Generate a default .shipper.toml configuration file.
+    /// Create a new .shipper.toml configuration file; refuse existing paths.
     Init {
-        /// Output path for the configuration file (default: .shipper.toml)
+        /// Output path for the new configuration file (must not exist)
         #[arg(short, long, default_value = ".shipper.toml")]
         output: PathBuf,
     },
@@ -6106,8 +6106,26 @@ fn run_config_with_loopback(cmd: ConfigCommands, allow_loopback: bool) -> Result
     match cmd {
         ConfigCommands::Init { output } => {
             let template = ShipperConfig::default_toml_template();
-            std::fs::write(&output, template)
-                .with_context(|| format!("Failed to write config file to {}", output.display()))?;
+            // Atomic create-new protects existing files, symlinks, and a path
+            // another process creates between invocation and this open.
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&output)
+                .with_context(|| {
+                    format!(
+                        "Failed to create new config file at {}; existing paths are preserved. Choose an unused path with `shipper config init --output <new-path>`",
+                        output.display()
+                    )
+                })?;
+            file.write_all(template.as_bytes())
+                .and_then(|()| file.sync_all())
+                .with_context(|| {
+                    format!(
+                        "Failed to finish new config file at {}; the new file may be incomplete. Inspect it before retrying or choose another --output path",
+                        output.display()
+                    )
+                })?;
             println!("Created configuration file: {}", output.display());
             println!();
             println!("Edit the file to customize shipper settings for your workspace.");

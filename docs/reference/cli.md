@@ -53,7 +53,7 @@ evidence for each targeted registry.
 | `shipper plan-yank` | Generate a reverse-topological yank plan from a receipt | No (prints the plan) |
 | `shipper fix-forward` | Generate a supersession plan from a receipt marked compromised | No (prints the plan) |
 | `shipper remediate` | Generate or execute a receipt-driven remediation plan | Yes (`remediation-plan.json`; `--execute-plan` yanks) |
-| `shipper config init` | Generate a default `.shipper.toml` | No |
+| `shipper config init` | Create a default `.shipper.toml`; refuse an existing output path | No |
 | `shipper config validate` | Validate an existing config | No |
 | `shipper completion <shell>` | Generate shell completion scripts | No |
 | `shipper ci <platform>` | Print a CI workflow template | No |
