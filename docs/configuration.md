@@ -18,13 +18,17 @@ Generate a default configuration file by running:
 shipper config init
 ```
 
-This creates a `.shipper.toml` file in your current directory with sensible defaults and inline documentation.
-
-You can also specify a custom output path:
+This creates a new `.shipper.toml` file in your current directory with defaults
+and inline documentation. An existing destination, including a symlink, causes
+a nonzero refusal and is preserved. To keep an existing configuration and
+generate a separate template, choose an unused output path:
 
 ```bash
 shipper config init -o my-config.toml
 ```
+
+The parent directory must already exist. The global `--force` option controls
+release locks; it does not permit configuration overwrite.
 
 ## Validating a Configuration File
 

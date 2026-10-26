@@ -2,13 +2,13 @@
 source: crates/shipper-cli/tests/e2e_expanded.rs
 expression: normalize_stderr(&stdout)
 ---
-Generate a default .shipper.toml configuration file
+Create a new .shipper.toml configuration file; refuse existing paths
 
 Usage: shipper-cli config init [OPTIONS]
 
 Options:
   -o, --output <OUTPUT>
-          Output path for the configuration file (default: .shipper.toml)
+          Output path for the new configuration file (must not exist)
           
           [default: .shipper.toml]
 

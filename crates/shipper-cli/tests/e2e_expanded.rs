@@ -4039,9 +4039,10 @@ fn resume_minimal_json_state_snapshot() {
 // 47. Config init — overwrite protection
 // ===========================================================================
 
-/// Config init on an already-existing file: snapshot whatever the CLI does.
+/// A valid customized file must survive init, including the unrelated lock flag.
 #[test]
-fn config_init_overwrite_snapshot() {
+#[serial_test::serial]
+fn config_init_preserves_existing_customized_file() {
     let td = tempdir().expect("tempdir");
     let config_path = td.path().join(".shipper.toml");
 
@@ -4051,33 +4052,61 @@ fn config_init_overwrite_snapshot() {
         .assert()
         .success();
 
-    // Second init — capture result regardless of pass/fail
-    let output = loopback_shipper_cmd()
-        .args(["config", "init", "-o", config_path.to_str().unwrap()])
-        .output()
-        .expect("failed to run");
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let combined = format!(
-        "exit_code: {:?}\n--- stdout ---\n{}--- stderr ---\n{}",
-        output.status.code(),
-        stdout
-            .replace(config_path.to_str().unwrap(), "<CONFIG_PATH>")
-            .replace(
-                &config_path.to_str().unwrap().replace('\\', "/"),
-                "<CONFIG_PATH>",
-            ),
-        normalize_stderr(
-            &stderr
-                .replace(config_path.to_str().unwrap(), "<CONFIG_PATH>")
-                .replace(
-                    &config_path.to_str().unwrap().replace('\\', "/"),
-                    "<CONFIG_PATH>",
-                )
-        )
+    let template = fs::read_to_string(&config_path).expect("read template");
+    let customized = format!(
+        "{}\n# Keep the reviewed ownership policy and this sentinel.\n[registry]\nname = \"reviewed-registry\"\napi_base = \"https://registry.example.com\"\nindex_base = \"https://registry.example.com/index\"\n",
+        template.replace("strict_ownership = false", "strict_ownership = true")
     );
-    assert_snapshot!("config_init_overwrite", combined);
+    assert!(customized.contains("strict_ownership = true"));
+    fs::write(&config_path, &customized).expect("customize configuration");
+    loopback_shipper_cmd()
+        .args(["config", "validate", "-p", config_path.to_str().unwrap()])
+        .assert()
+        .success();
+
+    for flags in [&[][..], &["--force"][..]] {
+        let output = loopback_shipper_cmd()
+            .args(flags)
+            .args(["config", "init", "-o", config_path.to_str().unwrap()])
+            .assert()
+            .failure()
+            .get_output()
+            .clone();
+        assert!(
+            output.stdout.is_empty(),
+            "failed init must not claim creation"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("existing paths are preserved"), "{stderr}");
+        assert!(
+            stderr.contains("config init --output <new-path>"),
+            "{stderr}"
+        );
+        assert_eq!(
+            fs::read(&config_path).expect("retained config"),
+            customized.as_bytes()
+        );
+    }
+
+    let alternative = td.path().join("another-config.toml");
+    loopback_shipper_cmd()
+        .arg("config")
+        .arg("init")
+        .arg("--output")
+        .arg(&alternative)
+        .assert()
+        .success();
+    loopback_shipper_cmd()
+        .arg("config")
+        .arg("validate")
+        .arg("--path")
+        .arg(&alternative)
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read(&config_path).expect("original config"),
+        customized.as_bytes()
+    );
 }
 
 // ===========================================================================
