@@ -133,6 +133,7 @@ impl ScopeFixture {
 }
 
 #[test]
+#[serial_test::serial]
 fn resume_scope_pending_prefix_is_partial_in_process_receipt_events_and_status() -> Result<()> {
     for parallel in [false, true] {
         for json in [false, true] {
@@ -187,6 +188,12 @@ fn resume_scope_pending_prefix_is_partial_in_process_receipt_events_and_status()
                         && report["packages"][0]["state"] == "pending"
                 );
                 ensure!(report["outcome"]["next_action"]["kind"] == "resume");
+                ensure!(
+                    report["outcome"]["next_action"]["reason"]
+                        .as_str()
+                        .context("scope guidance")?
+                        .contains("remove --resume-from")
+                );
                 ensure!(report["outcome"]["safe_to_rerun"]["value"] == false);
             } else {
                 ensure!(stdout.contains("Result: partial failure"));
@@ -194,6 +201,7 @@ fn resume_scope_pending_prefix_is_partial_in_process_receipt_events_and_status()
                     "alpha@0.1.0: pending (outside this invocation's receipt; durable attempts=0)"
                 ));
                 ensure!(!stdout.contains("publication is complete"));
+                ensure!(human_outcome_value(&stdout, "Next:")?.contains("remove --resume-from"));
                 let stderr = String::from_utf8(output.stderr)?;
                 ensure!(stderr.contains("Completed 1/2 packages"), "{stderr}");
                 ensure!(
@@ -212,6 +220,184 @@ fn resume_scope_pending_prefix_is_partial_in_process_receipt_events_and_status()
 }
 
 #[test]
+#[serial_test::serial]
+fn resume_scope_guidance_correction_reaches_whole_plan_completion() -> Result<()> {
+    use shipper_core::types::{ErrorClass, EventType, Receipt};
+    const SECRET: &str = "RETRYABLE_PREFIX_SECRET_423";
+    for parallel in [false, true] {
+        for retryable_prefix in [false, true] {
+            // Only beta is checked by the scoped invocation. Removing the
+            // scope later checks alpha; terminal beta requires no new query.
+            let registry = spawn_bounded_registry(vec![200], 2);
+            let fixture = ScopeFixture::new(&registry.base_url, true)?;
+            let result = (|| -> Result<()> {
+                let initial = fixture
+                    .command(parallel, true)
+                    .args(["--resume-from", "beta", "publish"])
+                    .output()?;
+                ensure!(
+                    initial.status.code() == Some(2),
+                    "{}",
+                    String::from_utf8_lossy(&initial.stderr)
+                );
+                if retryable_prefix {
+                    let original_events =
+                        fs::read_to_string(fixture.state_dir.join("events.jsonl"))?;
+                    let receipt: Receipt = serde_json::from_value(fixture.read("receipt.json")?)?;
+                    fixture.seed_prefix_event(
+                        &original_events,
+                        &receipt,
+                        Some(EventType::PackageFailed {
+                            class: ErrorClass::Retryable,
+                            message: SECRET.into(),
+                        }),
+                    )?;
+                }
+
+                let mut guidance = Vec::new();
+                for operation in ["publish", "resume"] {
+                    for json in [false, true] {
+                        let output = fixture
+                            .command(parallel, json)
+                            .args(["--resume-from", "beta", operation])
+                            .output()?;
+                        ensure!(
+                            output.status.code() == Some(2),
+                            "{}",
+                            String::from_utf8_lossy(&output.stderr)
+                        );
+                        let stdout = String::from_utf8(output.stdout)?;
+                        let stderr = String::from_utf8(output.stderr)?;
+                        ensure!(!stdout.contains(SECRET) && !stderr.contains(SECRET));
+                        let reason = if json {
+                            let report: serde_json::Value = serde_json::from_str(&stdout)?;
+                            ensure!(report["outcome"]["next_action"]["kind"] == "resume");
+                            ensure!(report["outcome"]["next_action"].get("command").is_none());
+                            ensure!(report["packages"][0]["name"] == "alpha");
+                            ensure!(
+                                report["packages"][0]["state"]
+                                    == if retryable_prefix {
+                                        "failed"
+                                    } else {
+                                        "pending"
+                                    }
+                            );
+                            ensure!(
+                                report["receipt"]["packages"].as_array().map(Vec::len) == Some(1)
+                            );
+                            ensure!(report["receipt"]["packages"][0]["name"] == "beta");
+                            report["outcome"]["next_action"]["reason"]
+                                .as_str()
+                                .context("JSON guidance")?
+                                .to_string()
+                        } else {
+                            human_outcome_value(&stdout, "Next:")?.to_string()
+                        };
+                        ensure!(
+                            reason.contains("remove --resume-from"),
+                            "{operation}: {reason}"
+                        );
+                        ensure!(reason.contains("includes alpha, the first unfinished package omitted by this invocation"), "{reason}");
+                        guidance.push(reason);
+                    }
+                }
+                ensure!(
+                    guidance.iter().all(|reason| reason == &guidance[0]),
+                    "publish/resume human/JSON guidance must agree"
+                );
+
+                // Apply the recommended correction: retain the workspace,
+                // registry, state and policy, and remove --resume-from.
+                let corrected = fixture.command(parallel, true).arg("resume").output()?;
+                ensure!(
+                    corrected.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&corrected.stderr)
+                );
+                let report: serde_json::Value = serde_json::from_slice(&corrected.stdout)?;
+                let fake_publish_calls = read_publish_log(&fixture.cargo_log);
+                let aggregate = serde_json::json!({
+                    "parallel": parallel,
+                    "retryable_prefix": retryable_prefix,
+                    "execution_result": report["execution_result"],
+                    "published": report["published"],
+                    "skipped": report["skipped"],
+                    "pending": report["pending"],
+                    "failed": report["failed"],
+                    "uploaded": report["uploaded"],
+                    "ambiguous": report["ambiguous"],
+                    "fake_publish_calls": fake_publish_calls.len(),
+                });
+                ensure!(
+                    report["execution_result"] == "success",
+                    "corrected whole-plan aggregates: {aggregate}"
+                );
+                ensure!(
+                    report["published"].as_u64().context("published count")?
+                        + report["skipped"].as_u64().context("skipped count")?
+                        == 2
+                        && report["pending"] == 0
+                        && report["failed"] == 0
+                        && report["uploaded"] == 0
+                        && report["ambiguous"] == 0,
+                    "corrected whole-plan aggregates: {aggregate}"
+                );
+                let packages = report["receipt"]["packages"]
+                    .as_array()
+                    .context("receipt packages")?;
+                ensure!(packages.len() == 2);
+                ensure!(
+                    packages.iter().all(|package| matches!(
+                        package["state"]["state"].as_str(),
+                        Some("published" | "skipped")
+                    )),
+                    "receipt packages must both be successfully terminal: {aggregate}"
+                );
+                // A retained retryable failure may invoke the rejecting fake
+                // before its registry check confirms Published. Pending work
+                // is checked first and becomes Skipped without a Cargo call.
+                ensure!(
+                    fake_publish_calls.len() == usize::from(retryable_prefix),
+                    "unexpected fake publication attempts: {aggregate}"
+                );
+                let mut evidenced_attempts = 0;
+                for package in packages {
+                    for attempt in package["evidence"]["attempts"]
+                        .as_array()
+                        .context("attempt evidence")?
+                    {
+                        ensure!(
+                            attempt["exit_code"] == 71,
+                            "the fake must reject every upload attempt"
+                        );
+                        evidenced_attempts += 1;
+                    }
+                }
+                ensure!(evidenced_attempts == fake_publish_calls.len());
+                let events = fs::read_to_string(fixture.state_dir.join("events.jsonl"))?;
+                for line in events.lines() {
+                    let event: serde_json::Value = serde_json::from_str(line)?;
+                    ensure!(
+                        event["event_type"]["type"] != "package_uploaded",
+                        "the fixture must never accept an upload"
+                    );
+                }
+                ensure!(report["outcome"]["next_action"]["kind"] == "none_complete");
+                let status = fixture.status()?;
+                ensure!(status["outcome"]["execution_result"] == "success");
+                ensure!(status["outcome"]["next_action"]["kind"] == "none_complete");
+                Ok(())
+            })();
+            let registry_result = registry.finish(Duration::from_secs(2));
+            result?;
+            registry_result?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+#[serial_test::serial]
 fn resume_scope_terminal_prefix_remains_success_without_a_fabricated_receipt() -> Result<()> {
     for parallel in [false, true] {
         let registry = spawn_bounded_registry(vec![200], 2);
@@ -257,6 +443,7 @@ fn resume_scope_terminal_prefix_remains_success_without_a_fabricated_receipt() -
 }
 
 #[test]
+#[serial_test::serial]
 fn resume_scope_durable_rejects_deleted_only_selected_terminal_receipt() -> Result<()> {
     for parallel in [false, true] {
         let registry = spawn_bounded_registry(vec![200], 2);
@@ -317,6 +504,7 @@ fn resume_scope_durable_rejects_deleted_only_selected_terminal_receipt() -> Resu
 }
 
 #[test]
+#[serial_test::serial]
 fn resume_scope_parallel_includes_the_targets_whole_dependency_level() -> Result<()> {
     for parallel in [false, true] {
         let registry = spawn_bounded_registry(vec![200], if parallel { 2 } else { 1 });
@@ -339,6 +527,7 @@ fn resume_scope_parallel_includes_the_targets_whole_dependency_level() -> Result
 }
 
 #[test]
+#[serial_test::serial]
 fn resume_scope_keeps_failed_uploaded_unknown_and_missing_prefix_dispositions() -> Result<()> {
     use shipper_core::types::{ErrorClass, EventType, Receipt, ReconciliationOutcome};
 
@@ -408,6 +597,43 @@ fn resume_scope_keeps_failed_uploaded_unknown_and_missing_prefix_dispositions() 
                 report["outcome"]["next_action"]["kind"] == action,
                 "{report}"
             );
+            if action == "resolve_blockers" {
+                ensure!(
+                    report["receipt"]["packages"][0]["name"] == "beta",
+                    "the permanent predecessor has no receipt entry"
+                );
+                let expected = report["outcome"]["next_action"]["reason"]
+                    .as_str()
+                    .context("permanent guidance")?;
+                ensure!(expected.contains("retained state and event evidence"));
+                ensure!(!expected.contains("recorded in the receipt"));
+                for (operation, json) in [("publish", false), ("resume", false), ("resume", true)] {
+                    let output = fixture
+                        .command(parallel, json)
+                        .args(["--resume-from", "beta", operation])
+                        .output()?;
+                    ensure!(
+                        output.status.code() == Some(2),
+                        "{}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    let stdout = String::from_utf8(output.stdout)?;
+                    let actual = if json {
+                        let output: serde_json::Value = serde_json::from_str(&stdout)?;
+                        ensure!(output["outcome"]["next_action"]["kind"] == "resolve_blockers");
+                        output["outcome"]["next_action"]["reason"]
+                            .as_str()
+                            .context("permanent JSON guidance")?
+                            .to_string()
+                    } else {
+                        human_outcome_value(&stdout, "Next:")?.to_string()
+                    };
+                    ensure!(
+                        actual == expected,
+                        "permanent evidence guidance must agree for publish/resume human/JSON"
+                    );
+                }
+            }
             ensure!(report["outcome"]["safe_to_rerun"]["value"] == false);
             let status = fixture.status()?;
             ensure!(status["outcome"]["execution_result"] == "partial_failure");
@@ -422,6 +648,7 @@ fn resume_scope_keeps_failed_uploaded_unknown_and_missing_prefix_dispositions() 
 }
 
 #[test]
+#[serial_test::serial]
 fn resume_scope_omitted_prefix_messages_are_not_printed() -> Result<()> {
     use shipper_core::types::{ErrorClass, EventType, Receipt, ReconciliationOutcome};
     const SECRET: &str = "OMITTED_PREFIX_SECRET_415_MUST_STAY_PRIVATE";
@@ -479,6 +706,7 @@ fn resume_scope_omitted_prefix_messages_are_not_printed() -> Result<()> {
 }
 
 #[test]
+#[serial_test::serial]
 fn resume_scope_durable_oracle_rejects_deleted_receipts_missing_state_and_false_success()
 -> Result<()> {
     let registry = spawn_bounded_registry(vec![200], 1);

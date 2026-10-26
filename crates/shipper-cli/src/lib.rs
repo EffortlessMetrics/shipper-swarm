@@ -1781,7 +1781,7 @@ pub fn run() -> Result<std::process::ExitCode> {
 
                 let packages = full_plan_package_progress(&current_planned.plan, &state)?;
                 if let Some(progress) = reporter.take_progress() {
-                    let counts = command_package_counts(&packages);
+                    let counts = command_package_counts(&packages, &receipt);
                     progress.finish_with_completed(counts.published + counts.skipped);
                 }
 
@@ -1886,7 +1886,7 @@ pub fn run() -> Result<std::process::ExitCode> {
 
                 let packages = full_plan_package_progress(&current_planned.plan, &state)?;
                 if let Some(progress) = reporter.take_progress() {
-                    let counts = command_package_counts(&packages);
+                    let counts = command_package_counts(&packages, &receipt);
                     progress.finish_with_completed(counts.published + counts.skipped);
                 }
 
@@ -4046,6 +4046,9 @@ struct CommandJsonPackageCounts {
     retryable_failures: usize,
     permanent_failures: usize,
     ambiguous_failures: usize,
+    // Derived from this invocation's validated receipt membership, not an
+    // inferred historical resume scope.
+    first_omitted_resumable: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -4126,7 +4129,7 @@ fn print_publish_output(
     state_dir: &Path,
     format: &str,
 ) -> Result<()> {
-    let counts = command_package_counts(packages);
+    let counts = command_package_counts(packages, receipt);
     let evidence_state_dir = publish_evidence_state_dir(workspace_root, state_dir);
     let outcome =
         build_publish_operator_outcome(&receipt.execution_result, &counts, &evidence_state_dir);
@@ -4160,7 +4163,7 @@ fn print_resume_output(
     state_dir: &Path,
     format: &str,
 ) -> Result<()> {
-    let counts = command_package_counts(packages);
+    let counts = command_package_counts(packages, receipt);
     let evidence_state_dir = publish_evidence_state_dir(workspace_root, state_dir);
     let outcome =
         build_resume_operator_outcome(&receipt.execution_result, &counts, &evidence_state_dir);
@@ -4188,7 +4191,7 @@ fn build_publish_json_report<'a>(
 ) -> Result<PublishJsonReport<'a>> {
     let reconciled = reconciled_packages(evidence_state_dir)?;
     let packages = command_package_reports(progress, &reconciled);
-    let counts = command_package_counts(progress);
+    let counts = command_package_counts(progress, receipt);
     let safe_to_rerun = outcome.safe_to_rerun.value;
 
     Ok(PublishJsonReport {
@@ -4221,7 +4224,7 @@ fn build_resume_json_report<'a>(
 ) -> Result<ResumeJsonReport<'a>> {
     let reconciled = reconciled_packages(evidence_state_dir)?;
     let packages = command_package_reports(progress, &reconciled);
-    let counts = command_package_counts(progress);
+    let counts = command_package_counts(progress, receipt);
     let safe_to_resume = legacy_safe_to_resume(&counts);
 
     Ok(ResumeJsonReport {
@@ -4289,7 +4292,15 @@ fn print_omitted_package_states(
     }
 }
 
-fn command_package_counts(packages: &[&PackageProgress]) -> CommandJsonPackageCounts {
+fn command_package_counts(
+    packages: &[&PackageProgress],
+    receipt: &shipper_core::types::Receipt,
+) -> CommandJsonPackageCounts {
+    let receipted: BTreeSet<_> = receipt
+        .packages
+        .iter()
+        .map(|package| (&package.name, &package.version))
+        .collect();
     let mut counts = CommandJsonPackageCounts {
         published: 0,
         pending: 0,
@@ -4301,9 +4312,23 @@ fn command_package_counts(packages: &[&PackageProgress]) -> CommandJsonPackageCo
         retryable_failures: 0,
         permanent_failures: 0,
         ambiguous_failures: 0,
+        first_omitted_resumable: None,
     };
 
     for package in packages {
+        if matches!(
+            package.state,
+            PackageState::Pending
+                | PackageState::Failed {
+                    class: ErrorClass::Retryable,
+                    ..
+                }
+        ) && !receipted.contains(&(&package.name, &package.version))
+        {
+            counts
+                .first_omitted_resumable
+                .get_or_insert_with(|| package.name.clone());
+        }
         match &package.state {
             PackageState::Pending => {
                 counts.pending += 1;
@@ -4346,6 +4371,19 @@ fn command_package_counts(packages: &[&PackageProgress]) -> CommandJsonPackageCo
     counts
 }
 
+fn resume_action(counts: &CommandJsonPackageCounts, state_dir: &Path) -> OperatorAction {
+    let mut reason = format!(
+        "resume from the durable state at {} using the same workspace, manifest, configuration, and registry selection",
+        state_dir.display()
+    );
+    if let Some(package) = &counts.first_omitted_resumable {
+        reason.push_str(&format!(
+            "; remove --resume-from so the next resume includes {package}, the first unfinished package omitted by this invocation"
+        ));
+    }
+    OperatorAction::posture(ActionKind::Resume, reason)
+}
+
 fn build_publish_operator_outcome(
     result: &ExecutionResult,
     counts: &CommandJsonPackageCounts,
@@ -4380,20 +4418,14 @@ fn build_publish_operator_outcome(
             Some("permanent"),
             OperatorAction::posture(
                 ActionKind::ResolveBlockers,
-                "resolve the permanent publish failure recorded in the receipt before continuing",
+                "resolve the permanent failure recorded in retained state and event evidence before resuming",
             ),
             "a permanent failure must be resolved before more publication work",
         )
     } else if counts.retryable_failures > 0 || counts.pending > 0 {
         (
             counts.retryable_failures.gt(&0).then_some("retryable"),
-            OperatorAction::posture(
-                ActionKind::Resume,
-                format!(
-                    "resume from the durable state at {} using the same workspace, manifest, configuration, and registry selection",
-                    state_dir.display()
-                ),
-            ),
+            resume_action(counts, state_dir),
             "unfinished work must continue through the durable resume path",
         )
     } else if matches!(result, ExecutionResult::Success) {
@@ -4463,7 +4495,7 @@ fn build_resume_operator_outcome(
             false,
             OperatorAction::posture(
                 ActionKind::ResolveBlockers,
-                "resolve the permanent failure recorded in the receipt before resuming",
+                "resolve the permanent failure recorded in retained state and event evidence before resuming",
             ),
             "a permanent failure must be resolved before resume is safe",
         )
@@ -4471,13 +4503,7 @@ fn build_resume_operator_outcome(
         (
             counts.retryable_failures.gt(&0).then_some("retryable"),
             true,
-            OperatorAction::posture(
-                ActionKind::Resume,
-                format!(
-                    "resume from the durable state at {} using the same workspace, manifest, configuration, and registry selection",
-                    state_dir.display()
-                ),
-            ),
+            resume_action(counts, state_dir),
             "durable state identifies unfinished work that can continue through resume",
         )
     } else if matches!(result, ExecutionResult::Success) {
@@ -6351,6 +6377,7 @@ mod tests {
             retryable_failures,
             permanent_failures,
             ambiguous_failures,
+            first_omitted_resumable: None,
         };
 
         let cases = [
@@ -6444,6 +6471,50 @@ mod tests {
                 "{}",
                 case.name
             );
+        }
+    }
+
+    #[test]
+    fn omitted_resume_scope_guidance_preserves_blocker_precedence() {
+        for (ambiguous, ambiguous_failures, uploaded, permanent_failures, expected) in [
+            (0, 0, 0, 0, ActionKind::Resume),
+            (1, 0, 0, 0, ActionKind::Reconcile),
+            (0, 1, 0, 0, ActionKind::Reconcile),
+            (0, 0, 1, 0, ActionKind::WaitForRegistry),
+            (0, 0, 0, 1, ActionKind::ResolveBlockers),
+        ] {
+            let counts = CommandJsonPackageCounts {
+                pending: 1,
+                first_omitted_resumable: Some("alpha".to_string()),
+                failed: ambiguous_failures + permanent_failures,
+                ambiguous,
+                ambiguous_failures,
+                uploaded,
+                permanent_failures,
+                ..CommandJsonPackageCounts::default()
+            };
+            let publish = build_publish_operator_outcome(
+                &ExecutionResult::PartialFailure,
+                &counts,
+                Path::new("run-state"),
+            );
+            let resume = build_resume_operator_outcome(
+                &ExecutionResult::PartialFailure,
+                &counts,
+                Path::new("run-state"),
+            );
+            assert_eq!(resume.safe_to_resume.value, expected == ActionKind::Resume);
+            for action in [publish.next_action, resume.next_action] {
+                assert_eq!(action.kind, expected);
+                assert_eq!(
+                    action.reason.contains("remove --resume-from"),
+                    expected == ActionKind::Resume
+                );
+                assert!(
+                    action.command.is_empty(),
+                    "scope guidance must not invent invocation context"
+                );
+            }
         }
     }
 

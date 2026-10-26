@@ -113,6 +113,13 @@ an earlier package does not check its registry visibility or authorize a retry.
 An earlier package with retained published or skipped evidence can contribute to
 whole-plan success without being executed again.
 
+When pending or retryable work was omitted by `--resume-from`, publish and resume
+guidance identifies the first omitted unfinished package and tells you to remove
+`--resume-from` from the next resume invocation. Keep the same workspace,
+manifest, configuration, registry, and state directory while expanding the scope
+to include that work. Reconciliation, uploaded-package visibility, and permanent
+failure blockers still take precedence over a recommendation to resume.
+
 The receipt's `packages` remain the packages handled by this invocation; Shipper
 does not fabricate receipt entries, attempt history, or timestamps for an omitted
 prefix. Human output identifies those omitted packages and their durable states.

@@ -732,7 +732,7 @@ mod tests {
     use chrono::Utc;
     use shipper_core::cli_bridge::UnknownLivenessReason;
     use shipper_core::types::{
-        EnvironmentFingerprint, PackageEvidence, PackageProgress, PackageReceipt,
+        EnvironmentFingerprint, PackageEvidence, PackageProgress, PackageReceipt, PlannedPackage,
     };
 
     use super::*;
@@ -751,7 +751,12 @@ mod tests {
             plan_id: "plan-a".into(),
             created_at: Utc::now(),
             registry: registry(),
-            packages: Vec::new(),
+            packages: vec![PlannedPackage {
+                name: "demo".into(),
+                version: "0.1.0".into(),
+                manifest_path: "demo/Cargo.toml".into(),
+                regime: None,
+            }],
             dependencies: BTreeMap::new(),
         }
     }
@@ -1136,6 +1141,48 @@ mod tests {
             ActionKind::StopAndInvestigate,
             false,
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_rejects_completed_demo_evidence_outside_current_plan() -> Result<()> {
+        let coherent_plan = plan();
+        let empty_plan = ReleasePlan {
+            packages: Vec::new(),
+            ..coherent_plan.clone()
+        };
+        let different_package_plan = ReleasePlan {
+            packages: vec![PlannedPackage {
+                name: "other".into(),
+                version: "0.1.0".into(),
+                manifest_path: "other/Cargo.toml".into(),
+                regime: None,
+            }],
+            ..coherent_plan
+        };
+
+        for (case, mismatched_plan) in [
+            ("empty plan", empty_plan),
+            ("different-package plan", different_package_plan),
+        ] {
+            let mut completed = packet(
+                RunObservation::Finished {
+                    plan_id: Some("plan-a".into()),
+                    result: ExecutionResult::Success,
+                },
+                Some(PackageState::Published),
+            );
+            completed.receipt = Some(receipt(ExecutionResult::Success, PackageState::Published));
+            completed.finalization_consistent = Some(true);
+            assert_posture(
+                &classify(&mismatched_plan, Path::new(".operator-state"), completed),
+                DurableStatus::EvidenceDisagreement,
+                Some(false),
+                ActionKind::StopAndInvestigate,
+                false,
+            )
+            .with_context(|| format!("completed demo evidence must reject {case}"))?;
+        }
         Ok(())
     }
 }
