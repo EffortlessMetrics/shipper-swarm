@@ -13,7 +13,7 @@ The [build-readiness handoff](plans/swarm/build-readiness.md) connects the
 cleanup. It preserves the current release queue and the explicitly deferred
 post-0.5 lanes; refresh its linked issues before selecting work.
 
-## Adoption outcome — before 2026-12-31
+## Adoption outcome — by 2026-12-31
 
 The product goal is for Steven to use Shipper in an actual release workflow
 before the end of 2026. Completion requires an observed consumer outcome:
