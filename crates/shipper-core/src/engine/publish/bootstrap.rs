@@ -61,8 +61,9 @@ pub(in crate::engine) fn prepare_publish_run(
 
     let lock = acquire_publish_lock(&state_dir, workspace_root, opts, &ws.plan.plan_id)?;
 
-    // Collect git context and environment fingerprint at start of execution.
-    let git_context = git::collect_git_context();
+    // Attribute evidence to the same workspace used by the cleanliness gate,
+    // even when an embedding caller or --manifest-path selects it from elsewhere.
+    let git_context = git::collect_git_context_at(workspace_root);
     let environment = environment::collect_environment_fingerprint();
     let auth_evidence = crate::ops::auth::collect_auth_evidence(&ws.plan.registry.name);
 

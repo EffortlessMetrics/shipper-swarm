@@ -175,6 +175,12 @@ Per-attempt recovery fields are under `.attempt_history[]`, keyed by:
 }
 ```
 
+`git_context` describes the selected workspace's repository at the start of
+the publish or resume invocation. Its commit, branch, tag, and dirty flag do
+not come from the caller's working directory when `--manifest-path` selects
+another workspace. Unavailable target Git evidence stays absent or unknown;
+Shipper does not substitute the caller's repository.
+
 `execution_result` is the aggregate receipt outcome: `"success"`,
 `"partial_failure"`, or the compatibility-retained `"complete_failure"` value.
 Current finalized publish/resume runs emit `success` (exit `0`) or

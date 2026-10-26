@@ -1,0 +1,6 @@
+kind: fixed
+body: Attribute publish and resume receipts to the selected workspace's Git repository, including when invoked from another repository with --manifest-path.
+time: 2026-10-26T19:13:14Z
+custom:
+  Audience: Operators
+  Importance: Detailed
