@@ -1,5 +1,5 @@
 kind: fixed
-body: Attribute publish and resume receipts to the selected workspace's Git repository, including when invoked from another repository with --manifest-path, and prevent inherited Git repository or index settings from changing receipt evidence or bypassing the dirty-worktree gate.
+body: Attribute receipts to the selected workspace's Git repository and prevent inherited repository or index settings from changing source evidence or bypassing the dirty-worktree check.
 time: 2026-10-26T19:13:14Z
 custom:
   Audience: Operators
