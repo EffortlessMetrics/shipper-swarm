@@ -40,7 +40,7 @@ handoff does not activate deferred implementation or authorize a release.
 ### Year-end use checkpoints — 2026-10-26
 
 Steven's current delivery goal is to use Shipper in a real release workflow
-before **2026-12-31**. The following are target checkpoints for selecting and
+by **2026-12-31**. The following are target checkpoints for selecting and
 finishing work. Passing a date does not close an issue or waive its acceptance.
 The existing release and adoption issues remain the live boards.
 
