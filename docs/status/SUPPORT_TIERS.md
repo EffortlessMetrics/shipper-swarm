@@ -52,13 +52,11 @@ their named historical or focused proof; they do not establish the affected
 guarantee for this candidate. Apply these limitations when projecting claims
 into the roadmap, README, operator guidance, or a release decision:
 
-| Affected claim | Current limitation and repair owner |
-| --- | --- |
-| Effective-registry planning | [Swarm #409](https://github.com/EffortlessMetrics/shipper-swarm/issues/409): configuration can be applied after graph/ID construction; target filtering and displayed identity can disagree. |
-| Selected-workspace receipt attribution | [Swarm #413](https://github.com/EffortlessMetrics/shipper-swarm/issues/413): a receipt can describe the caller's Git repository instead of the selected workspace. |
-| Ambiguous publish reconciliation | [Swarm #402](https://github.com/EffortlessMetrics/shipper-swarm/issues/402): an unknown registry observation can become absence on an observed path; the intended stop-on-unknown guarantee needs repair and discriminating proof. |
-| Durable recovery and completion | [Swarm #403](https://github.com/EffortlessMetrics/shipper-swarm/issues/403) owns shared retained-state admission; [#415](https://github.com/EffortlessMetrics/shipper-swarm/issues/415) owns false whole-plan success with pending predecessors; [#418](https://github.com/EffortlessMetrics/shipper-swarm/issues/418) owns repeated workflow artifact continuation. Historical two-job recovery does not cover all of these paths. |
-| Live retry narration | [Swarm #414](https://github.com/EffortlessMetrics/shipper-swarm/issues/414): sequential retry notices can arrive after the retry and out of order. |
+- **Effective-registry planning:** [Swarm #409](https://github.com/EffortlessMetrics/shipper-swarm/issues/409) owns configuration being applied after graph/ID construction; target filtering and displayed identity can disagree.
+- **Selected-workspace receipt attribution:** [Swarm #413](https://github.com/EffortlessMetrics/shipper-swarm/issues/413) owns receipts describing the caller's Git repository instead of the selected workspace.
+- **Ambiguous publish reconciliation:** [Swarm #402](https://github.com/EffortlessMetrics/shipper-swarm/issues/402) owns an unknown registry observation becoming absence on an observed path; the intended stop-on-unknown guarantee needs repair and discriminating proof.
+- **Durable recovery and completion:** [Swarm #403](https://github.com/EffortlessMetrics/shipper-swarm/issues/403) owns shared retained-state admission; [#415](https://github.com/EffortlessMetrics/shipper-swarm/issues/415) owns false whole-plan success with pending predecessors; [#418](https://github.com/EffortlessMetrics/shipper-swarm/issues/418) owns repeated workflow artifact continuation. Historical two-job recovery does not cover all of these paths.
+- **Live retry narration:** [Swarm #414](https://github.com/EffortlessMetrics/shipper-swarm/issues/414) owns sequential retry notices arriving after the retry and out of order.
 
 An open fix or a merged implementation does not by itself restore an
 exact-candidate or public-release claim. Update the applicable limitation with
