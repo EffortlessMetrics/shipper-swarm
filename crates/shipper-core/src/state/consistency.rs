@@ -16,8 +16,8 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 
 use shipper_types::{
-    ErrorClass, EventType, ExecutionState, PackageState, Receipt, ReconciliationOutcome,
-    ReconciliationReport, StateEventDrift,
+    ErrorClass, EventType, ExecutionResult, ExecutionState, PackageState, Receipt,
+    ReconciliationOutcome, ReconciliationReport, ReleasePlan, StateEventDrift,
 };
 
 use super::events::EventLog;
@@ -314,6 +314,52 @@ mod drift_summary {
     }
 }
 
+/// Check completion against the entire current plan, including packages omitted
+/// from a scoped invocation's receipt. Missing state is missing evidence, and
+/// nonterminal state can never support a whole-plan success claim.
+pub fn verify_plan_completion(
+    plan: &ReleasePlan,
+    state: &ExecutionState,
+    receipt: &Receipt,
+) -> Result<()> {
+    if !plan.packages.is_empty() && receipt.packages.is_empty() {
+        bail!("nonempty release plan has an empty execution receipt");
+    }
+    let planned: BTreeSet<String> = plan
+        .packages
+        .iter()
+        .map(|package| format!("{}@{}", package.name, package.version))
+        .collect();
+    for key in &planned {
+        let progress = state
+            .packages
+            .get(key)
+            .with_context(|| format!("{key}: planned package has no durable state"))?;
+        if format!("{}@{}", progress.name, progress.version) != *key {
+            bail!("{key}: durable package identity does not match its planned key");
+        }
+        if receipt.execution_result == ExecutionResult::Success
+            && !matches!(
+                progress.state,
+                PackageState::Published | PackageState::Skipped { .. }
+            )
+        {
+            bail!(
+                "{key}: whole-plan success conflicts with {} durable state",
+                state_name(&progress.state)
+            );
+        }
+    }
+    let mut receipted = BTreeSet::new();
+    for package in &receipt.packages {
+        let key = format!("{}@{}", package.name, package.version);
+        if !planned.contains(&key) || !receipted.insert(key.clone()) {
+            bail!("{key}: receipt package is duplicated or outside the current plan");
+        }
+    }
+    Ok(())
+}
+
 /// Verify the end-of-run evidence packet before `receipt.json` becomes the
 /// durable summary.
 ///
@@ -357,6 +403,7 @@ pub fn verify_finalization_consistency(
         &mut findings,
     );
     verify_receipt_matches_state(state, receipt, &mut findings);
+    verify_receipt_coverage(&event_log, state, receipt, &mut findings);
     verify_reconciliation_evidence(
         &event_log,
         &receipt.plan_id,
@@ -601,6 +648,58 @@ fn verify_receipt_matches_state(
             None => findings.push(format!(
                 "{key} receipt drift: receipt has package but state.json has no package entry"
             )),
+        }
+    }
+}
+
+/// Check the coverage that historical events can establish. A current trusted
+/// terminal-skip event is compatible with an omitted predecessor, but the same
+/// event is also emitted for selected terminal packages. It cannot establish
+/// the original resume scope. Runtime finalization checks exact selected
+/// membership separately with the invocation inputs.
+fn verify_receipt_coverage(
+    event_log: &EventLog,
+    state: &ExecutionState,
+    receipt: &Receipt,
+    findings: &mut Vec<String>,
+) {
+    let all_events = event_log.all_events();
+    let start = all_events
+        .iter()
+        .rposition(|event| matches!(event.event_type, EventType::ExecutionStarted))
+        .unwrap_or(0);
+    let current_events = &all_events[start..];
+    let receipted: BTreeSet<String> = receipt
+        .packages
+        .iter()
+        .map(|package| format!("{}@{}", package.name, package.version))
+        .collect();
+    if receipted.len() != receipt.packages.len() {
+        findings.push("receipt contains duplicate package entries".to_string());
+    }
+    for (key, progress) in &state.packages {
+        let terminal = matches!(
+            progress.state,
+            PackageState::Published | PackageState::Skipped { .. }
+        );
+        if receipt.execution_result == ExecutionResult::Success && !terminal {
+            findings.push(format!(
+                "{key}: success receipt conflicts with {} durable state",
+                state_name(&progress.state)
+            ));
+        }
+        if receipted.contains(key) {
+            continue;
+        }
+        let trusted_terminal_omission = terminal && current_events.iter().any(|event| {
+            event.package == *key && matches!(&event.event_type,
+                EventType::PackageSkipped { reason } if reason.starts_with("resume: state already "))
+        });
+        let untouched_nonterminal_prefix = !terminal
+            && receipt.execution_result != ExecutionResult::Success
+            && !current_events.iter().any(|event| event.package == *key);
+        if !trusted_terminal_omission && !untouched_nonterminal_prefix {
+            findings.push(format!("{key} receipt coverage drift: package is omitted without compatible current resume-skip evidence"));
         }
     }
 }
@@ -1293,6 +1392,169 @@ mod tests {
             err.to_string()
                 .contains("state.json says published but events contain no package projection"),
             "{err:#}"
+        );
+    }
+
+    #[test]
+    fn whole_plan_completion_oracle_rejects_missing_or_nonterminal_prefixes() {
+        let plan = ReleasePlan {
+            plan_version: "1".into(),
+            plan_id: "test-plan".into(),
+            created_at: Utc::now(),
+            registry: Registry::crates_io(),
+            packages: ["a", "b"]
+                .into_iter()
+                .map(|name| shipper_types::PlannedPackage {
+                    name: name.into(),
+                    version: "1.0.0".into(),
+                    manifest_path: format!("{name}/Cargo.toml").into(),
+                    regime: None,
+                })
+                .collect(),
+            dependencies: BTreeMap::new(),
+        };
+        let mut state = make_state(vec![
+            pkg_progress("a", "1.0.0", PackageState::Published),
+            pkg_progress("b", "1.0.0", PackageState::Published),
+        ]);
+        let receipt = receipt(vec![package_receipt("b", "1.0.0", PackageState::Published)]);
+        verify_plan_completion(&plan, &state, &receipt).expect("terminal prefix may be omitted");
+        state.packages.get_mut("a@1.0.0").expect("prefix").name = "wrong-package".into();
+        let error =
+            verify_plan_completion(&plan, &state, &receipt).expect_err("malformed prefix identity");
+        assert!(error.to_string().contains("identity does not match"));
+        state.packages.get_mut("a@1.0.0").expect("prefix").name = "a".into();
+        for prefix in [
+            PackageState::Pending,
+            PackageState::Uploaded,
+            PackageState::Failed {
+                class: ErrorClass::Retryable,
+                message: "retry".into(),
+            },
+            PackageState::Failed {
+                class: ErrorClass::Permanent,
+                message: "blocked".into(),
+            },
+            PackageState::Failed {
+                class: ErrorClass::Ambiguous,
+                message: "unknown".into(),
+            },
+            PackageState::Ambiguous {
+                message: "unknown".into(),
+            },
+        ] {
+            state.packages.get_mut("a@1.0.0").expect("prefix").state = prefix;
+            assert!(verify_plan_completion(&plan, &state, &receipt).is_err());
+        }
+        state.packages.remove("a@1.0.0");
+        assert!(
+            verify_plan_completion(&plan, &state, &receipt).is_err(),
+            "missing is not completion evidence"
+        );
+    }
+
+    #[test]
+    fn whole_plan_completion_distinguishes_empty_plan_from_empty_receipt() {
+        let mut state = make_state(vec![]);
+        let mut plan = ReleasePlan {
+            plan_version: "1".into(),
+            plan_id: state.plan_id.clone(),
+            created_at: Utc::now(),
+            registry: state.registry.clone(),
+            packages: vec![],
+            dependencies: BTreeMap::new(),
+        };
+        let receipt = receipt(vec![]);
+        verify_plan_completion(&plan, &state, &receipt)
+            .expect("a genuinely empty plan permits an empty receipt");
+
+        plan.packages.push(shipper_types::PlannedPackage {
+            name: "a".into(),
+            version: "1.0.0".into(),
+            manifest_path: "a/Cargo.toml".into(),
+            regime: None,
+        });
+        let (key, progress) = pkg_progress("a", "1.0.0", PackageState::Published);
+        state.packages.insert(key, progress);
+        let error = verify_plan_completion(&plan, &state, &receipt)
+            .expect_err("a nonempty plan must retain at least one selected receipt entry");
+        assert!(error.to_string().contains("empty execution receipt"));
+    }
+
+    #[test]
+    fn receipt_coverage_rejects_unexplained_omission_and_stale_resume_skip() {
+        let td = tempdir().expect("tempdir");
+        let state = make_state(vec![pkg_progress("a", "1.0.0", PackageState::Published)]);
+        for previous in [
+            published_event("a", "1.0.0"),
+            PublishEvent {
+                timestamp: Utc::now(),
+                package: "a@1.0.0".into(),
+                event_type: EventType::PackageSkipped {
+                    reason: "resume: state already published".into(),
+                },
+            },
+        ] {
+            write_events(
+                td.path(),
+                vec![
+                    plan_created_event(),
+                    previous,
+                    PublishEvent {
+                        timestamp: Utc::now(),
+                        package: "all".into(),
+                        event_type: EventType::ExecutionStarted,
+                    },
+                    published_event("a", "1.0.0"),
+                ],
+            );
+            let receipt = receipt(vec![]);
+            let error = verify_finalization_consistency(
+                &td.path().join(EVENTS_FILE),
+                &state,
+                &receipt,
+                None,
+            )
+            .expect_err("omission has no compatible current skip evidence");
+            assert!(
+                error.to_string().contains("receipt coverage drift"),
+                "{error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn partial_receipt_preserves_untouched_pending_prefix_without_fabrication() {
+        let td = tempdir().expect("tempdir");
+        write_events(
+            td.path(),
+            vec![
+                plan_created_event(),
+                PublishEvent {
+                    timestamp: Utc::now(),
+                    package: "all".into(),
+                    event_type: EventType::ExecutionStarted,
+                },
+                published_event("b", "1.0.0"),
+            ],
+        );
+        let state = make_state(vec![
+            pkg_progress("a", "1.0.0", PackageState::Pending),
+            pkg_progress("b", "1.0.0", PackageState::Published),
+        ]);
+        let mut receipt = receipt(vec![package_receipt("b", "1.0.0", PackageState::Published)]);
+        receipt.execution_result = ExecutionResult::PartialFailure;
+        verify_finalization_consistency(&td.path().join(EVENTS_FILE), &state, &receipt, None)
+            .expect("partial invocation retains pending prefix in state, not fabricated receipts");
+        receipt.execution_result = ExecutionResult::Success;
+        let error =
+            verify_finalization_consistency(&td.path().join(EVENTS_FILE), &state, &receipt, None)
+                .expect_err("changing only completion to success must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("success receipt conflicts with pending"),
+            "{error:#}"
         );
     }
 

@@ -105,6 +105,29 @@ DNS, resolved-address, account, namespace, or administrative isolation.
   selects the target's whole dependency level and later levels, so an earlier
   same-level sibling can block retry-budget admission.
 
+`--resume-from` changes the execution scope, not the meaning of release success.
+Completion still covers the entire release plan. If an earlier package remains
+pending, failed, uploaded, or ambiguous, an otherwise completed invocation returns
+`partial_failure` (exit `2`) and retains that package's recovery posture. Omitting
+an earlier package does not check its registry visibility or authorize a retry.
+An earlier package with retained published or skipped evidence can contribute to
+whole-plan success without being executed again.
+
+The receipt's `packages` remain the packages handled by this invocation; Shipper
+does not fabricate receipt entries, attempt history, or timestamps for an omitted
+prefix. Human output identifies those omitted packages and their durable states.
+The publish/resume JSON envelope's package rows and counts cover the full plan,
+while its nested `receipt.packages` preserves the invocation scope. Completion
+progress and webhook totals also use the full plan. Durable status rejects a
+success claim if any planned package lacks successful terminal evidence.
+
+Runtime finalization checks receipt membership against the invocation's selected
+scope. Historical events do not record that selection: the same terminal-skip
+event can describe an omitted predecessor or a selected package. Durable status
+therefore cannot detect every deletion of a leading selected receipt entry. It
+rejects an entirely empty receipt for a nonempty plan and still requires
+whole-plan completion evidence.
+
 Completed resume output ends with one typed operator outcome. Human output
 renders `Result`, `Safe to resume`, `Next`, and retained `Evidence`; JSON adds
 the same object at `shipper.resume.v1.outcome` while preserving the existing

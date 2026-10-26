@@ -11,7 +11,7 @@ use shipper_core::cli_bridge::{
     RunLiveness, RunObservation, controlled_stop_evidence_consistent, observe_run,
     unfinished_evidence_consistent,
 };
-use shipper_core::state::consistency::verify_finalization_consistency;
+use shipper_core::state::consistency::{verify_finalization_consistency, verify_plan_completion};
 use shipper_core::state::events::{EVENTS_FILE, events_path};
 use shipper_core::state::execution_state::{
     RECEIPT_FILE, RECONCILIATION_FILE, STATE_FILE, load_receipt, load_receipt_encrypted,
@@ -249,6 +249,11 @@ fn classify(
             packet.evidence,
         ),
         RunObservation::Finished { plan_id, result } => {
+            if let (Some(state), Some(receipt)) = (&packet.state, &packet.receipt)
+                && verify_plan_completion(plan, state, receipt).is_err()
+            {
+                return disagreement(plan_id, Some(result), packet.evidence);
+            }
             classify_finished(plan_id, &result, configured_state_dir, packet)
         }
         RunObservation::Stopped {
