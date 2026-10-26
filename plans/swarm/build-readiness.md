@@ -37,6 +37,47 @@ handoff does not activate deferred implementation or authorize a release.
 
 ## Audit boundary and refresh
 
+### Year-end use checkpoints — 2026-10-26
+
+Steven's current delivery goal is to use Shipper in a real release workflow
+before **2026-12-31**. The following are target checkpoints for selecting and
+finishing work. Passing a date does not close an issue or waive its acceptance.
+The existing release and adoption issues remain the live boards.
+
+| Target | Useful outcome | Existing owner and acceptance |
+| --- | --- | --- |
+| By November 8 | Plans and results describe the actual target and complete package set. | Swarm #409, #413, #415: config/CLI registry parity; selected-workspace receipt identity; no whole-plan success with pending work. Each lands through its own reviewed PR. |
+| By November 22 | A candidate can complete and recover a bounded multi-crate run, and the release package is consumable. | Swarm #255 owns the candidate/disposition queue, including #402/#403, #377/#383/#385, #362, #412, and release-path #416–#418. Resolve each finding's release disposition; retain current-source tests, interrupted/resumed evidence, actual archive execution, and full candidate qualification under #370. |
+| By December 6 | An installable, approved release is available; the external consumer has a concrete read-only adoption path. | Swarm #251 and authority #475–#479 own release closure. Authority #455/#456 own RIPR's boundary; #457/#458 own frozen-input validation and historical replay. Actual publication still requires the separate recorded GO. |
+| By December 20 | Shipper is selected for a real package-release workflow, with an operator-readable recovery path. | Shipper's own train supplies the multi-crate consumer. RIPR #455 advances through advisory parity #461 and the accepted cutover #462 after their existing dependencies. Keep preflight adoption distinct from completed transaction cutover. |
+| By December 31 | Retained evidence shows actual use and a subsequent supported inspection or rerun. | Link the real run, exact installed tool/source, selected workspace/registry, package results, receipt, and follow-up command to #251 and #455 as applicable. Close only the outcome actually observed. |
+
+The earliest useful operation is read-only assessment of a real repository.
+It can expose setup or packaging problems before the first publication. The
+2026-10-26 consumer check used Shipper `8e8cc401d02cc239d1db808ff800850118d11f39`
+against RIPR `ec2fcfe0758e52650993da25c6b2da0984f0bd37` and the Shipper workspace:
+
+- `plan --format json` selected RIPR `0.11.0-alpha.2` and excluded its unpublished
+  `xtask`; it selected Shipper's thirteen `0.5.0` packages in seven dependency
+  levels with 29 internal edges.
+- `doctor --format json` reported the missing release credentials and the
+  environment's registry DNS failure as blockers. Registry `status` failed
+  without producing a package-state result. No remote package mutation or
+  successful live-registry qualification was established.
+- The fresh public `cargo install shipper --version 0.4.0 --locked` and Linux
+  startup/plan smoke passed in the product audit. That proves the exercised
+  public 0.4 path, not availability or qualification of 0.5.
+
+Preserve the accepted release scope: #258–#262/#277 remain deferred except for
+their individually selected prerequisites. The full #259 journey and RIPR's
+post-0.5 adoption remain necessary to their own outcomes; they do not silently
+become additional 0.5 freeze gates. Defer generic service/IDP adapters, additional
+registry profiles, remote tag/release/signing features, and architecture work
+without a concrete consumer need. The immediate engineering focus is accurate
+decisions, safe continuation, usable artifacts, and a demonstrated consumer.
+
+### Earlier audit and required refresh
+
 The read-only audit inspected merged swarm source
 `6463971cb32c945d9946ea4e09e91b511e5c61da` and the live boards in both
 repositories on 2026-09-08 UTC. This was an unfrozen source snapshot, not a

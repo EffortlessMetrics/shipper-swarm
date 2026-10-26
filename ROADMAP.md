@@ -13,6 +13,33 @@ The [build-readiness handoff](plans/swarm/build-readiness.md) connects the
 cleanup. It preserves the current release queue and the explicitly deferred
 post-0.5 lanes; refresh its linked issues before selecting work.
 
+## Adoption outcome — before 2026-12-31
+
+The product goal is for Steven to use Shipper in an actual release workflow
+before the end of 2026. Completion requires an observed consumer outcome:
+
+- A pinned, installable Shipper performs the package plan and preflight for a
+  real candidate, with actionable human output and matching machine evidence.
+- An interrupted multi-crate rehearsal continues from transferred evidence,
+  without duplicate upload or a false whole-plan success result.
+- The next selected, explicitly approved release uses Shipper for its package
+  transaction, retains its receipt, and verifies the published packages.
+- A subsequent inspection or rerun answers what completed and what remains
+  through supported commands, without reconstructing the answer from logs.
+
+The first release consumer is Shipper's own thirteen-crate train through the
+existing release-authority workflow. The external adoption target is RIPR's
+package workflow under [shipper#455](https://github.com/EffortlessMetrics/shipper/issues/455).
+RIPR starts with read-only plan/preflight and historical replay; required
+transaction cutover follows the existing identity, parity, and authority
+prerequisites. RIPR currently has one publishable package, so its adoption alone
+does not establish multi-crate recovery.
+
+The [dated delivery checkpoints](plans/swarm/build-readiness.md#year-end-use-checkpoints--2026-10-26)
+connect those outcomes to the existing issue owners. Source fixes, a public
+release, and actual consumer adoption each need their own evidence. The date
+does not waive release review or grant publication authority.
+
 ## 0.5.0 release-line status
 
 The 0.5.0 line is the capstone for the current execution and security work. `shipper-swarm` is the development and proof surface; the separate `EffortlessMetrics/shipper` repository remains the release authority for tags, crates.io publication, GitHub Release creation, and final release evidence.
@@ -35,11 +62,15 @@ Cargo stabilized multi-package workspace publishing. “Publish several crates a
 |---|---|---|
 | **Prove** | Can I show this release is safe *before* the irreversible step? | Implemented base — deterministic plan, structured preflight, package dry-run, ownership evidence where applicable, registry pacing, policy reports, rehearsal, and versioned JSON evidence. Exact release-candidate proof is repeated for every release. |
 | **Dispatch** | Is publication executed in a registry-aware, paced way? | Implemented for the evidence-backed crates.io profile — authoritative publish regimes, first-publish burst/refill behavior, `Retry-After` floors, readiness checks, and duration estimates. Additional registry profiles require their own evidence. |
-| **Reconcile** | When the result is ambiguous, do I check registry truth before retrying? | Implemented — ambiguous exits resolve to Published, NotPublished, or StillUnknown before any safe retry. StillUnknown stops rather than guessing. |
-| **Recover** | If the runner dies mid-train, can I converge from durable state without losing or duplicating work? | Stable/internal proof — events are authoritative, state can be rebuilt, terminal packages are skipped on resume, and a two-job interruption artifact handoff is proven with fake Cargo and a mock registry. The release candidate repeats this proof on its exact tree. |
+| **Reconcile** | When the result is ambiguous, do I check registry truth before retrying? | Implemented state model; [#402](https://github.com/EffortlessMetrics/shipper-swarm/issues/402) tracks an observed path that collapses an unknown registry observation into absence. The stop-on-unknown guarantee must be restored and re-proved before relying on that path. |
+| **Recover** | If the runner dies mid-train, can I converge from durable state without losing or duplicating work? | Events, rebuild, terminal skipping, and a two-job mock interruption proof exist. Retained-state admission ([#403](https://github.com/EffortlessMetrics/shipper-swarm/issues/403)), whole-plan completion ([#415](https://github.com/EffortlessMetrics/shipper-swarm/issues/415)), and repeated workflow continuation ([#418](https://github.com/EffortlessMetrics/shipper-swarm/issues/418)) remain open. Exact-candidate recovery proof must cover the repaired paths. |
 | **Remediate** | If a partial release goes bad, can I contain or fix-forward it mechanically? | Bounded implementation — receipt-driven yank/fix-forward planning, dry-run artifacts, guarded yank execution, and compromise evidence exist. Live registry mutation remains an explicit operator decision. |
 
-The engine therefore has the release-closure shape. The remaining work is not to reimplement these pillars under stale “partial” labels; it is to preserve their evidence while finishing the 0.5 source-authority release, close direct coverage gaps, and prove the actual auth and integration contracts.
+The engine has the release-closure structure. Preserve the existing evidence
+while repairing the observed contract gaps, finishing the 0.5 source-authority
+release, and proving the actual auth and integration consumers. The dated
+[product audit](https://github.com/EffortlessMetrics/shipper-swarm/issues/259)
+records which claims were exercised and their limits.
 
 ## Nine competencies (the implementation ledger)
 
@@ -48,9 +79,9 @@ The five pillars cover the safety story. Narrate, Harden, Integrate, and Ergonom
 | # | Competency | Definition | Current state | Issue |
 |---|---|---|---|---|
 | 1 | **Prove** | Establish before the irreversible step that publication can succeed | Implemented base; repeated per release candidate | [#100](https://github.com/EffortlessMetrics/shipper/issues/100) |
-| 2 | **Survive** | Recover from interruption without losing or duplicating work | Implemented | [#101](https://github.com/EffortlessMetrics/shipper/issues/101) |
-| 3 | **Reconcile** | Close ambiguous outcomes against registry truth | Implemented | [#102](https://github.com/EffortlessMetrics/shipper/issues/102) |
-| 4 | **Narrate** | Tell the operator what is happening live, not only afterward | Implemented | [#103](https://github.com/EffortlessMetrics/shipper/issues/103) |
+| 2 | **Survive** | Recover from interruption without losing or duplicating work | Implemented base; current recovery gaps are tracked above | [#101](https://github.com/EffortlessMetrics/shipper/issues/101) |
+| 3 | **Reconcile** | Close ambiguous outcomes against registry truth | Implemented base; unknown-observation correction remains open | [#102](https://github.com/EffortlessMetrics/shipper/issues/102) |
+| 4 | **Narrate** | Tell the operator what is happening live, not only afterward | Implemented base; delayed sequential retry notices remain in [#414](https://github.com/EffortlessMetrics/shipper-swarm/issues/414) | [#103](https://github.com/EffortlessMetrics/shipper/issues/103) |
 | 5 | **Remediate** | Mechanically contain or fix-forward bad partial outcomes | Bounded implementation | [#104](https://github.com/EffortlessMetrics/shipper/issues/104) |
 | 6 | **Harden** | Default to the proved auth posture and bound supply-chain evidence | Active — exact-source Trusted Publishing proof and provenance decision remain | [#105](https://github.com/EffortlessMetrics/shipper/issues/105) |
 | 7 | **Profile** | Encode evidence-backed registry constraints and regimes | Implemented for crates.io | [#106](https://github.com/EffortlessMetrics/shipper/issues/106) |
