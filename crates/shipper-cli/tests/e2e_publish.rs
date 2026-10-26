@@ -8,6 +8,8 @@
 mod receipt_git_context;
 #[path = "e2e_publish/registry_failure.rs"]
 mod registry_failure;
+#[path = "e2e_publish/resume_scope.rs"]
+mod resume_scope;
 
 use std::fs;
 use std::io::{Read, Write};

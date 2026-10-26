@@ -433,6 +433,25 @@ pub fn run_publish(
     opts: &RuntimeOptions,
     reporter: &mut dyn Reporter,
 ) -> Result<Receipt> {
+    run_publish_with_state(ws, opts, reporter).map(|outcome| outcome.receipt)
+}
+
+/// A completed invocation's receipt and the full-plan state verified with it.
+///
+/// `--resume-from` can omit earlier packages from the receipt. Callers rendering
+/// whole-plan progress should use this snapshot, rather than rereading mutable
+/// state after the execution lock has been released.
+pub struct PublishRunOutcome {
+    pub receipt: Receipt,
+    pub state: ExecutionState,
+}
+
+/// Run publish and retain the final state snapshot used to verify its receipt.
+pub fn run_publish_with_state(
+    ws: &PlannedWorkspace,
+    opts: &RuntimeOptions,
+    reporter: &mut dyn Reporter,
+) -> Result<PublishRunOutcome> {
     publish::bootstrap::validate_resume_target(ws, opts)?;
     let publish::bootstrap::PublishBootstrap {
         state_dir,
@@ -486,7 +505,7 @@ pub fn run_publish(
         };
 
         publish::finalize::record_consistency_drift(&events_path, &st, &mut event_log, reporter);
-        return publish::finalize::finish_parallel_run(
+        let receipt = publish::finalize::finish_parallel_run(
             ws,
             opts,
             &state_dir,
@@ -498,7 +517,8 @@ pub fn run_publish(
             git_context,
             environment,
             auth_evidence,
-        );
+        )?;
+        return Ok(PublishRunOutcome { receipt, state: st });
     }
 
     let receipts = match execute_package::run_sequential_scheduler(
@@ -543,7 +563,7 @@ pub fn run_publish(
         }
     };
     publish::finalize::record_consistency_drift(&events_path, &st, &mut event_log, reporter);
-    publish::finalize::finish_sequential_run(
+    let receipt = publish::finalize::finish_sequential_run(
         ws,
         opts,
         &state_dir,
@@ -555,7 +575,8 @@ pub fn run_publish(
         git_context,
         environment,
         auth_evidence,
-    )
+    )?;
+    Ok(PublishRunOutcome { receipt, state: st })
 }
 
 /// Resume a previously interrupted publish operation.
@@ -598,6 +619,15 @@ pub fn run_resume(
     opts: &RuntimeOptions,
     reporter: &mut dyn Reporter,
 ) -> Result<Receipt> {
+    run_resume_with_state(ws, opts, reporter).map(|outcome| outcome.receipt)
+}
+
+/// Resume and retain the final state snapshot used to verify its receipt.
+pub fn run_resume_with_state(
+    ws: &PlannedWorkspace,
+    opts: &RuntimeOptions,
+    reporter: &mut dyn Reporter,
+) -> Result<PublishRunOutcome> {
     let workspace_root = &ws.workspace_root;
     let state_dir = resolve_state_dir(workspace_root, &opts.state_dir);
     let Some(existing_state) = state::load_state(&state_dir)? else {
@@ -672,7 +702,7 @@ pub fn run_resume(
         publish::bootstrap::validate_resume_target(ws, opts)?;
         reject_exhausted_resume_retry_ceiling(ws, opts, &existing_state)?;
     }
-    run_publish(ws, opts, reporter)
+    run_publish_with_state(ws, opts, reporter)
 }
 
 fn reject_exhausted_resume_retry_ceiling(
@@ -3989,6 +4019,110 @@ mod tests {
         assert_eq!(completed["success_count"], 2);
         assert_eq!(completed["skipped_count"], 0);
         assert_eq!(completed["failure_count"], 0);
+        assert_eq!(completed["result"], "success");
+    }
+
+    #[test]
+    #[serial]
+    fn run_publish_resume_scope_webhook_reports_whole_plan_partial_result() {
+        for parallel in [false, true] {
+            let td = tempdir().expect("tempdir");
+            let bin = td.path().join("bin");
+            write_fake_tools(&bin);
+            let cargo_log = td.path().join("cargo.log");
+            let webhook_server = Server::http("127.0.0.1:0").expect("webhook server");
+            let webhook_url = format!("http://{}", webhook_server.server_addr());
+            let (completed_tx, completed_rx) = std::sync::mpsc::sync_channel(1);
+            let webhook_handle = thread::spawn(move || {
+                while let Ok(Some(mut request)) =
+                    webhook_server.recv_timeout(Duration::from_secs(3))
+                {
+                    let mut body = String::new();
+                    std::io::Read::read_to_string(request.as_reader(), &mut body)
+                        .expect("webhook body");
+                    let payload: serde_json::Value =
+                        serde_json::from_str(&body).expect("webhook JSON");
+                    request
+                        .respond(Response::from_string("ok"))
+                        .expect("respond");
+                    let legacy = payload
+                        .get("extra")
+                        .and_then(|extra| extra.get("legacy"))
+                        .or_else(|| payload.get("legacy"));
+                    if let Some(completed) =
+                        legacy.filter(|value| value["event"] == "publish_completed")
+                    {
+                        completed_tx
+                            .send(completed.clone())
+                            .expect("completion receiver");
+                        break;
+                    }
+                }
+            });
+            let mut env_vars = fake_program_env_vars(&bin);
+            env_vars.extend([
+                ("SHIPPER_CARGO_EXIT", Some("71".into())),
+                (
+                    "SHIPPER_CARGO_ARGS_LOG",
+                    Some(cargo_log.display().to_string()),
+                ),
+            ]);
+            temp_env::with_vars(env_vars, || {
+                let registry = spawn_registry_server(
+                    BTreeMap::from([(
+                        "/api/v1/crates/beta/0.1.0".into(),
+                        vec![(200, "{}".into())],
+                    )]),
+                    1,
+                );
+                let mut ws = planned_workspace(td.path(), registry.base_url.clone());
+                ws.plan.packages = ["alpha", "beta"]
+                    .into_iter()
+                    .map(|name| PlannedPackage {
+                        name: name.into(),
+                        version: "0.1.0".into(),
+                        manifest_path: td.path().join(name).join("Cargo.toml"),
+                        regime: None,
+                    })
+                    .collect();
+                ws.plan.dependencies = BTreeMap::from([("beta".into(), vec!["alpha".into()])]);
+                let mut opts = default_opts(td.path().join(".shipper"));
+                opts.parallel.enabled = parallel;
+                opts.resume_from = Some("beta".into());
+                opts.webhook = crate::webhook::WebhookConfig {
+                    url: webhook_url,
+                    ..Default::default()
+                };
+                let mut reporter = CollectingReporter::default();
+                let outcome =
+                    run_publish_with_state(&ws, &opts, &mut reporter).expect("scoped publish");
+                assert_eq!(
+                    outcome.receipt.execution_result,
+                    ExecutionResult::PartialFailure
+                );
+                assert_eq!(outcome.receipt.packages.len(), 1);
+                assert_eq!(
+                    outcome.state.packages["alpha@0.1.0"].state,
+                    PackageState::Pending
+                );
+                assert_eq!(outcome.state.packages["alpha@0.1.0"].attempts, 0);
+                assert!(
+                    fs::read_to_string(&cargo_log)
+                        .unwrap_or_default()
+                        .is_empty()
+                );
+                registry.join();
+            });
+            let completed = completed_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("completion webhook");
+            webhook_handle.join().expect("webhook worker");
+            assert_eq!(completed["result"], "partial_failure");
+            assert_eq!(completed["total_packages"], 2);
+            assert_eq!(completed["success_count"], 0);
+            assert_eq!(completed["skipped_count"], 1);
+            assert_eq!(completed["failure_count"], 1);
+        }
     }
 
     #[test]
