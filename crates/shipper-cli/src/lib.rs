@@ -1487,7 +1487,7 @@ pub fn run() -> Result<std::process::ExitCode> {
         .unwrap_or_else(|| "https://crates.io".to_string());
     let index_base = cli.api_base.as_ref().map(|_| api_base.clone());
 
-    let spec = ReleaseSpec {
+    let mut spec = ReleaseSpec {
         manifest_path: cli.manifest_path.clone(),
         registry: Registry {
             name: cli
@@ -1510,33 +1510,48 @@ pub fn run() -> Result<std::process::ExitCode> {
         .map(command_name_for_hint)
         .unwrap_or("command");
 
-    // `doctor` and `ci` answer questions about the environment, not about a
-    // specific plan, so a workspace that cannot be planned must not stop
-    // them — `doctor` in particular is what an operator reaches for when
-    // they are in the wrong directory, and failing it with "run `shipper
-    // plan` first" is circular advice.
-    let (mut planned, workspace_status) = match plan::build_plan(&spec) {
-        Ok(planned) => (planned, doctor::WorkspaceStatus::Planned),
-        Err(err) if cli.cmd.as_ref().is_some_and(runs_without_workspace) => {
-            let reason = short_error_reason(&err);
-            (
-                workspace_less_plan(&spec),
-                doctor::WorkspaceStatus::Unavailable(reason),
-            )
-        }
-        Err(err) => {
-            let classification = classify_publish_early_error(&err);
-            let error = err.context(plan_failure_hint(
-                &spec.manifest_path,
-                &cli.packages,
-                command_name,
-            ));
-            if matches!(cli.cmd.as_ref(), Some(Commands::Publish)) {
-                return Err(mark_publish_early_error(error, &cli.format, classification));
-            }
-            return Err(error);
+    let plan_error = |err: anyhow::Error, target: Option<&str>| {
+        // Classify the underlying planning failure before adding diagnostic
+        // target text: the word "registry" must not turn an invalid package
+        // selection into a registry-connectivity error in JSON output.
+        let classification = classify_publish_early_error(&err);
+        let err = if let Some(target) = target {
+            err.context(format!("failed to build plan for registry '{target}'"))
+        } else {
+            err
+        };
+        let error = err.context(plan_failure_hint(
+            &cli.manifest_path,
+            &cli.packages,
+            command_name,
+        ));
+        if matches!(cli.cmd.as_ref(), Some(Commands::Publish)) {
+            mark_publish_early_error(error, &cli.format, classification)
+        } else {
+            error
         }
     };
+
+    // Discover the workspace without choosing a registry. Its configuration
+    // must be loaded before publish eligibility and plan identity are computed.
+    // `doctor` and `ci` still diagnose environments whose metadata or plan is
+    // unavailable; neither should require a successful plan to explain why.
+    let (planning_workspace, workspace_root, mut workspace_status) =
+        match shipper_core::cli_bridge::PlanningWorkspace::load(&spec.manifest_path) {
+            Ok(workspace) => {
+                let root = workspace.workspace_root().to_path_buf();
+                (Some(workspace), root, doctor::WorkspaceStatus::Planned)
+            }
+            Err(err) if cli.cmd.as_ref().is_some_and(runs_without_workspace) => {
+                let reason = short_error_reason(&err);
+                (
+                    None,
+                    workspace_less_plan(&spec).workspace_root,
+                    doctor::WorkspaceStatus::Unavailable(reason),
+                )
+            }
+            Err(err) => return Err(plan_error(err, None)),
+        };
 
     // Load configuration file
     let config = if let Some(ref config_path) = cli.config {
@@ -1550,8 +1565,7 @@ pub fn run() -> Result<std::process::ExitCode> {
     } else {
         // Try to parse .shipper.toml from the workspace root. Value and
         // destination validation belongs to the flag-aware boundary below.
-        let load =
-            ShipperConfig::load_from_workspace_without_value_validation(&planned.workspace_root);
+        let load = ShipperConfig::load_from_workspace_without_value_validation(&workspace_root);
         load.with_context(|| "Failed to load config from workspace")?
     };
 
@@ -1563,7 +1577,7 @@ pub fn run() -> Result<std::process::ExitCode> {
         let config_path = cli
             .config
             .clone()
-            .unwrap_or_else(|| planned.workspace_root.join(".shipper.toml"));
+            .unwrap_or_else(|| workspace_root.join(".shipper.toml"));
         let validation = cfg.validate_with_loopback(cli.allow_loopback);
         let validation = validation.or_else(|error| {
             if matches!(cli.cmd.as_ref(), Some(Commands::Doctor))
@@ -1582,16 +1596,17 @@ pub fn run() -> Result<std::process::ExitCode> {
         })?;
     }
 
-    // Apply registry from config if CLI didn't set it
+    // Resolve the single-target registry before building any plan. CLI fields
+    // retain their existing precedence over the workspace configuration.
     if let Some(ref cfg) = config
         && let Some(ref reg_config) = cfg.registry
     {
         if cli.registry.is_none() {
-            planned.plan.registry.name = reg_config.name.clone();
+            spec.registry.name = reg_config.name.clone();
         }
         if cli.api_base.is_none() {
-            planned.plan.registry.api_base = reg_config.api_base.clone();
-            planned.plan.registry.index_base = reg_config.index_base.clone();
+            spec.registry.api_base = reg_config.api_base.clone();
+            spec.registry.index_base = reg_config.index_base.clone();
         }
     }
 
@@ -1677,17 +1692,111 @@ pub fn run() -> Result<std::process::ExitCode> {
     let config_for_merge = config.clone().unwrap_or_default();
     let opts: RuntimeOptions = config_for_merge.build_runtime_options(cli_overrides);
 
+    // Rehearsal deliberately keeps the live plan: its selected registry is the
+    // alternate destination whose isolation the engine checks. Other secondary
+    // commands retain their single-target planning contract.
+    let uses_selected_registries = matches!(
+        cli.cmd.as_ref(),
+        Some(
+            Commands::Plan
+                | Commands::Preflight { .. }
+                | Commands::Publish
+                | Commands::Resume
+                | Commands::Status { .. }
+                | Commands::Doctor
+        )
+    );
+    let target_registries = if uses_selected_registries && !opts.registries.is_empty() {
+        opts.registries.clone()
+    } else {
+        vec![spec.registry.clone()]
+    };
+    if target_registries.len() > 1
+        && matches!(
+            cli.cmd.as_ref(),
+            Some(Commands::Plan | Commands::Preflight { .. })
+        )
+    {
+        bail!(
+            "{command_name} supports one registry at a time; keep the other options and replace the multi-registry selector with `--registries {}`, then repeat for each registry",
+            target_registries[0].name
+        );
+    }
+
+    // Build every execution target before any command runs. A later target
+    // with an invalid package selection must not fail after an earlier target
+    // has already published. Each graph and ID use the same metadata snapshot.
+    let multiple_targets = target_registries.len() > 1;
+    let mut planned_workspaces = Vec::with_capacity(target_registries.len());
+    let mut doctor_plan_statuses = Vec::with_capacity(target_registries.len());
+    for registry in target_registries {
+        let current_spec = ReleaseSpec {
+            registry,
+            ..spec.clone()
+        };
+        let (planned, target_status) = match planning_workspace.as_ref() {
+            Some(workspace) => match workspace.build_plan(&current_spec) {
+                Ok(planned) => (planned, Some(doctor::WorkspaceStatus::Planned)),
+                Err(err) if cli.cmd.as_ref().is_some_and(runs_without_workspace) => {
+                    let status = doctor::WorkspaceStatus::Unavailable(short_error_reason(&err));
+                    // A graph failure belongs to this target. Keep the existing
+                    // single-target diagnostic, but do not make another valid
+                    // registry's workspace unavailable in a mixed report.
+                    if !multiple_targets {
+                        workspace_status = status.clone();
+                    }
+                    let mut unavailable = workspace_less_plan(&current_spec);
+                    unavailable.workspace_root = workspace_root.clone();
+                    (unavailable, Some(status))
+                }
+                Err(err) => {
+                    let target =
+                        (opts.registries.len() > 1).then_some(current_spec.registry.name.as_str());
+                    return Err(plan_error(err, target));
+                }
+            },
+            None => (workspace_less_plan(&current_spec), None),
+        };
+        planned_workspaces.push(planned);
+        // Metadata failures remain one run-scoped condition; no target graph
+        // was evaluated in that case. Single-target reports retain their shape.
+        doctor_plan_statuses.push(target_status.filter(|_| multiple_targets));
+    }
+
+    if matches!(cli.cmd.as_ref(), Some(Commands::Publish | Commands::Resume)) {
+        // Building a graph does not validate --resume-from. Check the engine's
+        // selection contract for every target before the first can mutate state
+        // or publish, including when an earlier target's graph is valid.
+        for current_planned in &planned_workspaces {
+            if let Err(error) =
+                shipper_core::cli_bridge::validate_resume_target(current_planned, &opts)
+            {
+                let classification = classify_publish_early_error(&error);
+                let error = error.context(format!(
+                    "invalid resume selection for registry '{}'",
+                    current_planned.plan.registry.name
+                ));
+                return Err(if matches!(cli.cmd.as_ref(), Some(Commands::Publish)) {
+                    mark_publish_early_error(error, &cli.format, classification)
+                } else {
+                    error
+                });
+            }
+        }
+    }
+    let planned = &planned_workspaces[0];
+
     let structured_publish =
         matches!(cli.cmd.as_ref(), Some(Commands::Publish)) && cli.format == "json";
     let mut reporter = CliReporter::new(cli.quiet || structured_publish, structured_publish);
 
     match cli.cmd.expect("subcommand checked above") {
         Commands::Plan => {
-            print_plan(&planned, cli.verbose, &cli.format);
+            print_plan(planned, cli.verbose, &cli.format);
         }
         Commands::Preflight { preflight_only } => {
             let rep = engine::run_preflight_in_place_with_options(
-                &mut planned,
+                &mut planned_workspaces[0],
                 &opts,
                 &mut reporter,
                 engine::PreflightRunOptions {
@@ -1698,13 +1807,7 @@ pub fn run() -> Result<std::process::ExitCode> {
             print_preflight(&rep, &cli.format);
         }
         Commands::Publish => {
-            let target_registries = if opts.registries.is_empty() {
-                vec![planned.plan.registry.clone()]
-            } else {
-                opts.registries.clone()
-            };
-
-            if let Err(error) = engine::prevalidate_publish_registry_tokens(&planned, &opts) {
+            if let Err(error) = engine::prevalidate_publish_registry_tokens(planned, &opts) {
                 let classification = classify_publish_early_error(&error);
                 let error = error.context(
                     "publish token prevalidation failed before execution; configure a token for every selected registry, then rerun publish",
@@ -1718,16 +1821,14 @@ pub fn run() -> Result<std::process::ExitCode> {
             }
 
             let mut worst_outcome: Option<ExecutionResult> = None;
-            for reg in target_registries {
+            for current_planned in planned_workspaces {
+                let reg = &current_planned.plan.registry;
                 if opts.registries.len() > 1 && !structured_publish {
                     println!(
                         "\n🚀 Publishing to registry: {} ({})",
                         reg.name, reg.api_base
                     );
                 }
-
-                let mut current_planned = planned.clone();
-                current_planned.plan.registry = reg.clone();
 
                 let mut current_opts = opts.clone();
                 // Segregate state dir by registry name if multiple registries
@@ -1801,14 +1902,9 @@ pub fn run() -> Result<std::process::ExitCode> {
                 .map_or(std::process::ExitCode::SUCCESS, exit_code_for_result));
         }
         Commands::Resume => {
-            let target_registries = if opts.registries.is_empty() {
-                vec![planned.plan.registry.clone()]
-            } else {
-                opts.registries.clone()
-            };
-
             let mut worst_outcome: Option<ExecutionResult> = None;
-            for reg in target_registries {
+            for current_planned in planned_workspaces {
+                let reg = &current_planned.plan.registry;
                 if opts.registries.len() > 1 {
                     if cli.format == "json" {
                         eprintln!();
@@ -1820,9 +1916,6 @@ pub fn run() -> Result<std::process::ExitCode> {
                         );
                     }
                 }
-
-                let mut current_planned = planned.clone();
-                current_planned.plan.registry = reg.clone();
 
                 let mut current_opts = opts.clone();
                 if opts.registries.len() > 1 {
@@ -1906,7 +1999,7 @@ pub fn run() -> Result<std::process::ExitCode> {
                 .map_or(std::process::ExitCode::SUCCESS, exit_code_for_result));
         }
         Commands::Rehearse => {
-            let outcome = engine::run_rehearsal(&planned, &opts, &mut reporter)?;
+            let outcome = engine::run_rehearsal(planned, &opts, &mut reporter)?;
 
             // Stdout is the operator-facing receipt: mirrors the live
             // publish path, so a human scanning the terminal sees one
@@ -1933,7 +2026,7 @@ pub fn run() -> Result<std::process::ExitCode> {
         }
         Commands::Status { watch, durable } => {
             if durable {
-                let state_dir = absolute_state_dir(&planned, &opts);
+                let state_dir = absolute_state_dir(planned, &opts);
                 status_durable::run(
                     &planned.plan,
                     &planned.workspace_root,
@@ -1944,29 +2037,22 @@ pub fn run() -> Result<std::process::ExitCode> {
                 )?;
                 return Ok(std::process::ExitCode::SUCCESS);
             }
-            let target_registries = if opts.registries.is_empty() {
-                vec![planned.plan.registry.clone()]
-            } else {
-                opts.registries.clone()
-            };
-
             if watch {
-                if target_registries.len() > 1 {
+                if planned_workspaces.len() > 1 {
                     bail!(
                         "status --watch supports one registry at a time; pass --registry once or inspect the registry-specific state directory directly"
                     );
                 }
-                run_status_watch(&planned, &opts, &cli.format)?;
+                run_status_watch(planned, &opts, &cli.format)?;
                 return Ok(std::process::ExitCode::SUCCESS);
             }
 
             let mut registry_reports = Vec::new();
             let mut report_plan_id = None;
-            for reg in target_registries {
-                let current_planned = build_status_plan(&spec, reg)?;
+            for current_planned in &planned_workspaces {
                 report_plan_id.get_or_insert_with(|| current_planned.plan.plan_id.clone());
                 registry_reports.push(build_status_registry_report(
-                    &current_planned,
+                    current_planned,
                     &mut reporter,
                     &opts,
                 )?);
@@ -1982,46 +2068,44 @@ pub fn run() -> Result<std::process::ExitCode> {
             write_status_report(&report, &cli.format)?;
         }
         Commands::Doctor => {
-            let target_registries = if opts.registries.is_empty() {
-                vec![planned.plan.registry.clone()]
-            } else {
-                opts.registries.clone()
-            };
-
             if cli.format == "json" {
                 let mut reports = Vec::new();
-                for reg in target_registries {
-                    let mut current_planned = planned.clone();
-                    current_planned.plan.registry = reg;
-                    reports.push(doctor::collect_report(&current_planned, &opts)?);
+                for (current_planned, target_status) in
+                    planned_workspaces.iter().zip(&doctor_plan_statuses)
+                {
+                    reports.push(doctor::collect_report(
+                        current_planned,
+                        &opts,
+                        target_status.as_ref(),
+                    )?);
                 }
                 doctor::print_json(reports, &workspace_status)?;
             } else {
-                for (idx, reg) in target_registries.into_iter().enumerate() {
+                for (idx, current_planned) in planned_workspaces.iter().enumerate() {
                     if opts.registries.len() > 1 {
+                        let reg = &current_planned.plan.registry;
                         println!(
                             "\n🩺 Diagnostics for registry: {} ({})",
                             reg.name,
                             doctor::redact_diagnostic_value(&reg.api_base)
                         );
                     }
-                    let mut current_planned = planned.clone();
-                    current_planned.plan.registry = reg;
                     doctor::run(
-                        &current_planned,
+                        current_planned,
                         &opts,
                         &mut reporter,
                         &workspace_status,
+                        doctor_plan_statuses[idx].as_ref(),
                         idx == 0,
                     )?;
                 }
             }
         }
         Commands::InspectEvents { follow } => {
-            run_inspect_events(&planned, &opts, &cli.format, follow)?;
+            run_inspect_events(planned, &opts, &cli.format, follow)?;
         }
         Commands::InspectReceipt => {
-            run_inspect_receipt(&planned, &opts, &cli.format)?;
+            run_inspect_receipt(planned, &opts, &cli.format)?;
         }
         Commands::Ci(ci_cmd) => {
             run_ci(ci_cmd, &opts.state_dir, &planned.workspace_root)?;
@@ -5109,17 +5193,6 @@ struct StatusPackageReport {
     exists: bool,
 }
 
-fn build_status_plan(spec: &ReleaseSpec, registry: Registry) -> Result<plan::PlannedWorkspace> {
-    let registry_name = registry.name.clone();
-    let status_spec = ReleaseSpec {
-        manifest_path: spec.manifest_path.clone(),
-        registry,
-        selected_packages: spec.selected_packages.clone(),
-    };
-    plan::build_plan(&status_spec)
-        .with_context(|| format!("failed to build status plan for registry '{registry_name}'"))
-}
-
 fn build_status_registry_report(
     ws: &plan::PlannedWorkspace,
     reporter: &mut dyn Reporter,
@@ -7453,6 +7526,7 @@ mod tests {
                     &opts,
                     &mut reporter,
                     &doctor::WorkspaceStatus::Planned,
+                    None,
                     true,
                 )
                 .expect("doctor");
@@ -7533,6 +7607,7 @@ mod tests {
                     &opts,
                     &mut reporter,
                     &doctor::WorkspaceStatus::Planned,
+                    None,
                     true,
                 )
                 .expect("doctor");

@@ -48,6 +48,7 @@ use crate::types::{
     AttemptEvidence, PackageReceipt, PublishRegime, ReadinessEvidence, ReconciliationOutcome,
 };
 pub use preflight::PreflightRunOptions;
+pub(crate) use publish::bootstrap::validate_resume_target;
 #[cfg(test)]
 use test_readiness::verify_published;
 

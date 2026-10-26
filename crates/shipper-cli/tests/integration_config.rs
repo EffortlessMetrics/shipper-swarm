@@ -74,6 +74,7 @@ fn run_plan_with_config(
     config: &Path,
     state_dir: &Path,
     allow_loopback: bool,
+    registries: &str,
 ) -> std::process::Output {
     let mut command = shipper_cmd();
     command
@@ -85,7 +86,7 @@ fn run_plan_with_config(
         .arg("--state-dir")
         .arg(state_dir)
         .arg("--registries")
-        .arg("alpha,beta");
+        .arg(registries);
     if allow_loopback {
         command.arg("--allow-loopback");
     }
@@ -218,6 +219,7 @@ fn config_flag_with_missing_file_fails() {
 }
 
 #[test]
+#[serial]
 fn two_configured_loopback_registries_require_explicit_flag() {
     let td = tempdir().expect("tempdir");
     create_workspace(td.path());
@@ -225,7 +227,7 @@ fn two_configured_loopback_registries_require_explicit_flag() {
     write_two_loopback_registries(&config);
 
     let denied_state = td.path().join("state-denied");
-    let denied = run_plan_with_config(td.path(), &config, &denied_state, false);
+    let denied = run_plan_with_config(td.path(), &config, &denied_state, false, "alpha,beta");
     assert_eq!(denied.status.code(), Some(1));
     let denied_stderr = String::from_utf8_lossy(&denied.stderr);
     assert!(
@@ -234,15 +236,33 @@ fn two_configured_loopback_registries_require_explicit_flag() {
     );
     assert_secret_absent_and_no_execution_state(&denied, td.path(), &denied_state);
 
-    let allowed_state = td.path().join("state-allowed");
-    let allowed = run_plan_with_config(td.path(), &config, &allowed_state, true);
-    assert_eq!(allowed.status.code(), Some(0));
-    assert!(allowed.stderr.is_empty(), "plan stderr must stay empty");
+    // Loopback trust does not broaden plan's single-target output contract.
+    let multiple_state = td.path().join("state-multiple");
+    let multiple = run_plan_with_config(td.path(), &config, &multiple_state, true, "alpha,beta");
+    assert_eq!(multiple.status.code(), Some(1));
+    assert!(multiple.stdout.is_empty(), "refusal must not emit a plan");
+    let stderr = String::from_utf8_lossy(&multiple.stderr);
     assert!(
-        String::from_utf8_lossy(&allowed.stdout).contains("alpha@0.1.0"),
-        "plan should complete after flag-aware validation"
+        stderr.contains("plan supports one registry at a time"),
+        "{stderr}"
     );
-    assert_secret_absent_and_no_execution_state(&allowed, td.path(), &allowed_state);
+    assert!(stderr.contains("--registries alpha"), "{stderr}");
+    assert_secret_absent_and_no_execution_state(&multiple, td.path(), &multiple_state);
+
+    // Follow the refusal's guidance and select each configured target alone.
+    for registry in ["alpha", "beta"] {
+        let allowed_state = td.path().join(format!("state-allowed-{registry}"));
+        let allowed = run_plan_with_config(td.path(), &config, &allowed_state, true, registry);
+        assert_eq!(allowed.status.code(), Some(0));
+        assert!(allowed.stderr.is_empty(), "plan stderr must stay empty");
+        let stdout = String::from_utf8_lossy(&allowed.stdout);
+        assert!(stdout.contains("alpha@0.1.0"), "{stdout}");
+        assert!(
+            stdout.contains(&format!("registry: {registry} (")),
+            "{stdout}"
+        );
+        assert_secret_absent_and_no_execution_state(&allowed, td.path(), &allowed_state);
+    }
 }
 
 #[test]
@@ -320,6 +340,7 @@ fn config_validate_honors_explicit_loopback_flag() {
 }
 
 #[test]
+#[serial]
 fn parse_only_cli_boundary_rejects_unsupported_schema() {
     let td = tempdir().expect("tempdir");
     create_workspace(td.path());
@@ -331,7 +352,7 @@ schema_version = "shipper.config.v2"
 "#,
     );
     let state_dir = td.path().join("state-unsupported-schema");
-    let output = run_plan_with_config(td.path(), &config, &state_dir, true);
+    let output = run_plan_with_config(td.path(), &config, &state_dir, true, "alpha,beta");
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("unsupported"), "{stderr}");
@@ -340,6 +361,7 @@ schema_version = "shipper.config.v2"
 }
 
 #[test]
+#[serial]
 fn allow_loopback_does_not_authorize_other_unsafe_destinations() {
     let td = tempdir().expect("tempdir");
     create_workspace(td.path());
@@ -390,7 +412,7 @@ index_base = "{beta_base}"
             ),
         );
         let state_dir = td.path().join(format!("state-{case}"));
-        let output = run_plan_with_config(td.path(), &config, &state_dir, true);
+        let output = run_plan_with_config(td.path(), &config, &state_dir, true, "alpha,beta");
         assert_eq!(output.status.code(), Some(1));
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains(expected), "{case}: {stderr}");

@@ -26,7 +26,8 @@ pub(crate) use redaction::redact_diagnostic_value;
 pub(crate) struct DoctorOutput {
     schema_version: &'static str,
     summary: summary::DoctorSummary,
-    /// Reason no publish plan could be built, when that is the case.
+    /// Run-scoped workspace failure, including the legacy single-target
+    /// planning failure. Mixed-target graph failures live in their reports.
     ///
     /// Envelope-level, not per-report: "this directory has no workspace"
     /// is one condition about the run, and `--registries` fans the
@@ -41,7 +42,7 @@ pub(crate) struct DoctorOutput {
     reports: Vec<DoctorReport>,
 }
 
-/// Whether `shipper doctor` is reporting on a real workspace plan.
+/// Whether workspace discovery or a particular target's planning succeeded.
 ///
 /// `doctor` is the "why is my environment broken" command, so it must
 /// still run when `cargo metadata` cannot produce a plan — wrong
@@ -49,9 +50,11 @@ pub(crate) struct DoctorOutput {
 /// the caller passes [`WorkspaceStatus::Unavailable`] with the reason,
 /// and every environment-level check (auth, tools, connectivity, git,
 /// encryption) still runs against the fallback root.
+/// With multiple registries and successful metadata discovery, target graph
+/// failures are carried separately from this run-scoped workspace condition.
 #[derive(Debug, Clone)]
 pub(crate) enum WorkspaceStatus {
-    /// `cargo metadata` produced a plan; `workspace_root` is authoritative.
+    /// Workspace discovery or target planning succeeded.
     Planned,
     /// No plan could be built. Carries the short reason for the report.
     Unavailable(String),
@@ -90,12 +93,32 @@ impl WorkspaceStatus {
             docs: Some("docs/tutorials/getting-started-5-minutes.md"),
         })
     }
+
+    fn registry_finding(&self, registry: &str) -> Option<findings::Finding> {
+        let reason = self.reason()?;
+        Some(findings::Finding {
+            id: "registry-plan-unavailable",
+            severity: findings::FindingLevel::Blocked,
+            status: findings::FindingLevel::Blocked,
+            title: "no publish plan could be built for this registry",
+            why_it_matters: "release commands for this registry need a valid target plan; other registry targets are evaluated independently",
+            evidence: redact_diagnostic_value(&format!("registry '{registry}': {reason}")),
+            try_next: vec![
+                "check this registry's package publish restrictions and workspace dependencies",
+                "run `shipper plan --registries <name>` for the registry named in this report",
+                "resolve the reported planning error, then rerun `shipper doctor`",
+            ],
+            docs: Some("docs/configuration.md"),
+        })
+    }
 }
 
 #[derive(Debug, Serialize)]
 pub(crate) struct DoctorReport {
     workspace_root: String,
     registry: DoctorRegistryReport,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    plan_unavailable: Option<String>,
     auth: checks::auth::AuthCheck,
     state_dir: checks::state_dir::StateDirCheck,
     tools: Vec<checks::tools::ToolCheck>,
@@ -121,6 +144,7 @@ fn summarize_report(
     connectivity: &checks::connectivity::ConnectivityCheck,
     git: &checks::git::GitCheck,
     encryption: &checks::encryption::EncryptionCheck,
+    target_plan: Option<&WorkspaceStatus>,
 ) -> summary::DoctorSummary {
     let mut statuses = vec![(
         "registry auth",
@@ -174,12 +198,17 @@ fn summarize_report(
         },
     ));
 
+    if let Some(target_plan) = target_plan {
+        statuses.push(("registry plan", target_plan.check_status()));
+    }
+
     summary::DoctorSummary::from_checks(statuses)
 }
 
 pub(crate) fn collect_report(
     ws: &plan::PlannedWorkspace,
     opts: &RuntimeOptions,
+    target_plan: Option<&WorkspaceStatus>,
 ) -> Result<DoctorReport> {
     let auth = checks::auth::inspect(ws, opts)?;
     let state_dir = checks::state_dir::inspect(ws, opts);
@@ -194,8 +223,19 @@ pub(crate) fn collect_report(
     findings.extend(connectivity.findings.clone());
     findings.extend(git.findings.clone());
     findings.extend(encryption.findings.clone());
+    if let Some(target_plan) = target_plan {
+        findings.extend(target_plan.registry_finding(&ws.plan.registry.name));
+    }
 
-    let summary = summarize_report(&auth, &state_dir, &tools, &connectivity, &git, &encryption);
+    let summary = summarize_report(
+        &auth,
+        &state_dir,
+        &tools,
+        &connectivity,
+        &git,
+        &encryption,
+        target_plan,
+    );
 
     Ok(DoctorReport {
         workspace_root: ws.workspace_root.display().to_string(),
@@ -209,6 +249,9 @@ pub(crate) fn collect_report(
                 .as_deref()
                 .map(redact_diagnostic_value),
         },
+        plan_unavailable: target_plan
+            .and_then(WorkspaceStatus::reason)
+            .map(redact_diagnostic_value),
         auth,
         state_dir,
         tools,
@@ -240,9 +283,9 @@ pub(crate) fn print_json(reports: Vec<DoctorReport>, workspace: &WorkspaceStatus
 /// Render one registry's diagnostics as text.
 ///
 /// `emit_workspace_finding` exists because `--registries` calls this
-/// once per registry, while a missing workspace plan is a property of
-/// the run, not of any registry. The header line repeats it as context
-/// for whichever block you are reading; the finding itself is listed
+/// once per registry, while a metadata discovery failure is a property of
+/// the run. A target graph failure is separate. The header repeats a global
+/// failure as context for whichever block you are reading; the finding itself is listed
 /// once, by the first block, so the findings list stays a list of
 /// distinct problems.
 pub(crate) fn run(
@@ -250,6 +293,7 @@ pub(crate) fn run(
     opts: &RuntimeOptions,
     reporter: &mut dyn Reporter,
     workspace: &WorkspaceStatus,
+    target_plan: Option<&WorkspaceStatus>,
     emit_workspace_finding: bool,
 ) -> Result<()> {
     let mut all = Vec::new();
@@ -270,6 +314,16 @@ pub(crate) fn run(
         ws.plan.registry.name,
         redact_diagnostic_value(&ws.plan.registry.api_base)
     );
+    if let Some(target_plan) = target_plan {
+        match target_plan.reason() {
+            None => println!("registry_plan: available"),
+            Some(reason) => println!(
+                "registry_plan: unavailable ({})",
+                redact_diagnostic_value(reason)
+            ),
+        }
+        all.extend(target_plan.registry_finding(&ws.plan.registry.name));
+    }
 
     if emit_workspace_finding {
         all.extend(workspace.finding());
@@ -297,8 +351,15 @@ pub(crate) fn run(
 
     findings::print_findings(&all);
 
-    let report_summary =
-        summarize_report(&auth, &state_dir, &tools, &connectivity, &git, &encryption);
+    let report_summary = summarize_report(
+        &auth,
+        &state_dir,
+        &tools,
+        &connectivity,
+        &git,
+        &encryption,
+        target_plan,
+    );
     if opts.registries.len() > 1 {
         // Multi-registry text output is one block per registry. Keep these
         // totals registry-scoped and do not count the run-scoped workspace

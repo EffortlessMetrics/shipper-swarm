@@ -35,6 +35,27 @@ and `shipper resume` support `--format json`. `publish` and `resume` emit
 command-owned JSON envelopes with artifact paths and nested release receipt
 evidence for each targeted registry.
 
+Workspace configuration and CLI registry overrides are resolved before package
+eligibility, dependency order, and plan ID are computed. A package restricted by
+`publish = ["private-reg"]` is included only when that registry is the effective
+target. Each selected publish/resume target gets its own plan; changing the API
+base changes the plan ID under the existing API-and-ordered-packages hash contract.
+
+`plan` and `preflight` inspect one target at a time and each emit one JSON
+document. To inspect an entry from `[[registries.registries]]`, select it with
+`shipper plan --registries private-reg` or
+`shipper preflight --registries private-reg`. Repeat for each target before a
+multi-registry publish. These two commands reject selectors resolving to more
+than one registry before Shipper's execution probes, verification, or state/event
+writes. Workspace discovery still runs Cargo metadata first; dependency resolution
+can contact registries and create or update `Cargo.lock`. `status` and `doctor`
+retain their multiple-registry reports. Doctor attributes a graph failure to its
+registry when diagnosing multiple targets; a metadata discovery failure remains
+one workspace-wide finding.
+
+For `publish` and `resume`, `--resume-from` must name a package in every selected
+registry's plan. Shipper validates every target before starting the first one.
+
 ## Commands at a glance
 
 | Command | What it does | Writes state? |
