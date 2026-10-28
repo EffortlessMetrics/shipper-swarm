@@ -211,6 +211,15 @@ but its output does not establish whether the registry accepted the crate.
 5. **If `StillUnknown`:** persists reconciliation evidence and stops before
    another Cargo attempt.
 
+With readiness enabled, temporary probe errors may recover while polling. If
+the final poll still cannot query a selected authority, the outcome remains
+`StillUnknown`; a timeout is not proof that the version is absent. `Both`
+requires conclusive API and index absence in the same final poll, while either
+positive observation establishes publication. Invalid index content and
+unreadable local/cache files are unknown, and failed probes are not recorded
+as successful negative observations. The same rule applies on resume and in
+both scheduler modes.
+
 **Recovery:**
 ```bash
 shipper status --durable

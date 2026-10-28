@@ -50,9 +50,71 @@ pub fn contains_version(content: &str, version: &str) -> bool {
         .any(|entry| entry.vers == version)
 }
 
+/// Observe version presence without treating unreadable records as absence.
+///
+/// A valid matching record proves presence even if another record is malformed.
+/// Absence requires at least one record and every nonblank record to parse. An
+/// empty or malformed response cannot authorize another upload. Callers with a
+/// conclusive HTTP 404 should handle that absence at the transport boundary.
+/// The permissive [`contains_version`] helper retains its existing contract.
+pub fn observe_version(content: &str, version: &str) -> Result<bool, InvalidIndexObservation> {
+    let mut records = 0;
+    let mut invalid = false;
+    for line in content.lines().filter(|line| !line.trim().is_empty()) {
+        records += 1;
+        match serde_json::from_str::<SparseIndexEntry>(line) {
+            Ok(entry) if entry.vers == version => return Ok(true),
+            Ok(_) => {}
+            Err(_) => invalid = true,
+        }
+    }
+    if records == 0 || invalid {
+        Err(InvalidIndexObservation)
+    } else {
+        Ok(false)
+    }
+}
+
+/// The index response could not establish absence. Contains no response bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidIndexObservation;
+
+impl std::fmt::Display for InvalidIndexObservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("sparse index contains empty or invalid version records")
+    }
+}
+
+impl std::error::Error for InvalidIndexObservation {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn observe_version_distinguishes_valid_absence_from_unreadable_records() {
+        assert_eq!(observe_version(r#"{"vers":"1.0.0"}"#, "2.0.0"), Ok(false));
+        for content in [
+            "",
+            " \n\t",
+            "not json",
+            r#"{"error":"secret"}"#,
+            r#"{"vers":null}"#,
+            r#"[{"vers":"1.0.0"}]"#,
+        ] {
+            assert_eq!(
+                observe_version(content, "2.0.0"),
+                Err(InvalidIndexObservation)
+            );
+        }
+        let mixed = "not json\n{\"vers\":\"1.0.0\"}\n";
+        assert_eq!(observe_version(mixed, "1.0.0"), Ok(true));
+        assert_eq!(
+            observe_version(mixed, "2.0.0"),
+            Err(InvalidIndexObservation)
+        );
+        assert!(!InvalidIndexObservation.to_string().contains("secret"));
+    }
 
     #[test]
     fn sparse_index_path_matches_cargo_layout() {

@@ -6211,16 +6211,18 @@ mod property_tests_extra {
 //
 // Ambiguous classification is triggered by cargo exiting non-zero with
 // empty stdout/stderr (see `shipper-cargo-failure::classify_publish_failure`
-// edge-case tests). To keep readiness-polling bounded to a single call per
-// reconcile site (avoiding flaky request counts), each test disables the
-// readiness backoff loop: `readiness.enabled = false`.
+// edge-case tests). Enabled readiness with a zero wait budget performs one
+// complete observation per reconciliation site, exercising the default polling
+// branch without adding timing-dependent request counts.
 // ---------------------------------------------------------------------------
 
-/// Build a RuntimeOptions with readiness polling disabled — every reconcile
-/// site reduces to a single registry query. Simplifies mock request math.
+/// Exercise enabled polling with one observation per reconciliation site.
 fn reconcile_scenario_opts(state_dir: PathBuf) -> RuntimeOptions {
     let mut opts = default_opts(state_dir);
-    opts.readiness.enabled = false;
+    opts.readiness.enabled = true;
+    opts.readiness.method = shipper_types::ReadinessMethod::Api;
+    opts.readiness.initial_delay = Duration::ZERO;
+    opts.readiness.max_total_wait = Duration::ZERO;
     opts
 }
 
@@ -6232,7 +6234,7 @@ fn reconcile_bdd_ambiguous_resolves_to_published() {
     // the second reconciler poll sees the version as visible. Expected: the
     // package becomes Published after one retry.
     //
-    // Request sequence (readiness disabled):
+    // Request sequence (enabled readiness, zero wait budget):
     //   1. entry "already published" check (execute_package.rs) → 404
     //   2. first reconcile's version_exists (via is_version_visible_with_backoff) → 404
     //   3. second reconcile's version_exists (via is_version_visible_with_backoff) → 200
@@ -6813,10 +6815,10 @@ fn reconcile_bdd_ambiguous_resolves_to_still_unknown() {
     // NOT retried (no blind-retry after StillUnknown), and an operator-visible
     // `PublishReconciled { outcome: StillUnknown }` event is persisted.
     //
-    // Request sequence (readiness disabled):
+    // Request sequence (enabled readiness, zero wait budget):
     //   1. entry "already published" check (execute_package.rs) → 500 → Err
     //   2. reconcile's single version_exists (via is_version_visible_with_backoff,
-    //      enabled=false) → 500 → Err → StillUnknown
+    //      enabled=true, zero wait budget) → 500 → Err → StillUnknown
     let td = tempdir().expect("tempdir");
     let bin = td.path().join("bin");
     write_fake_tools(&bin);

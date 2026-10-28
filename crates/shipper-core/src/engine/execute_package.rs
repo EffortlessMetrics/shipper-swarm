@@ -1001,7 +1001,7 @@ pub(crate) fn publish_package_with_timeout(
                             timestamp: Utc::now(),
                             event_type: EventType::ReadinessComplete {
                                 duration_ms: readiness_started_at.elapsed().as_millis() as u64,
-                                attempts: readiness_evidence.len() as u32,
+                                attempts: readiness_evidence.last().map_or(0, |poll| poll.attempt),
                             },
                             package: pkg_label.clone(),
                         },
@@ -1757,7 +1757,7 @@ pub(crate) fn publish_package_with_timeout(
                             timestamp: Utc::now(),
                             event_type: EventType::ReadinessComplete {
                                 duration_ms: readiness_started_at.elapsed().as_millis() as u64,
-                                attempts: readiness_evidence.len() as u32,
+                                attempts: readiness_evidence.last().map_or(0, |poll| poll.attempt),
                             },
                             package: pkg_label.clone(),
                         },
@@ -1929,7 +1929,7 @@ pub(crate) fn publish_package_with_timeout(
             &mut emit_readiness_event,
         ) {
             Ok((visible, checks)) => {
-                let check_count = checks.len() as u32;
+                let check_count = checks.last().map_or(0, |poll| poll.attempt);
                 if !checks.is_empty() {
                     readiness_evidence.extend(checks);
                 }

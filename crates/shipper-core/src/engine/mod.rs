@@ -3571,80 +3571,117 @@ mod tests {
 
     #[test]
     #[serial]
-    fn sequential_ambiguous_publish_still_unknown_stops_without_retry() {
-        let td = tempdir().expect("tempdir");
-        let bin = td.path().join("bin");
-        write_fake_tools(&bin);
-        let cargo_log = td.path().join("cargo-calls.log");
-        let mut env_vars = fake_program_env_vars(&bin);
-        env_vars.extend([
-            ("SHIPPER_CARGO_EXIT", Some("1".to_string())),
-            ("SHIPPER_CARGO_STDERR", Some(String::new())),
-            ("SHIPPER_CARGO_STDOUT", Some(String::new())),
-            (
-                "SHIPPER_CARGO_ARGS_LOG",
-                Some(cargo_log.to_string_lossy().to_string()),
-            ),
-        ]);
-        temp_env::with_vars(env_vars, || {
-            let server = spawn_registry_server(
-                std::collections::BTreeMap::from([(
-                    "/api/v1/crates/demo/0.1.0".to_string(),
-                    vec![(404, "{}".to_string()), (500, "{}".to_string())],
-                )]),
-                2,
-            );
-            let ws = planned_workspace(td.path(), server.base_url.clone());
-            let state_dir = td.path().join(".shipper");
-            let mut opts = default_opts(state_dir.clone());
-            opts.max_attempts = 2;
-            opts.readiness.enabled = false;
+    fn enabled_reconciliation_still_unknown_stops_publish_and_resume_in_both_modes() {
+        for (parallel, method) in [
+            (false, crate::types::ReadinessMethod::Api),
+            (true, crate::types::ReadinessMethod::Api),
+            (false, crate::types::ReadinessMethod::Index),
+        ] {
+            let td = tempdir().expect("tempdir");
+            let bin = td.path().join("bin");
+            write_fake_tools(&bin);
+            let cargo_log = td.path().join("cargo-calls.log");
+            let mut env_vars = fake_program_env_vars(&bin);
+            env_vars.extend([
+                ("SHIPPER_CARGO_EXIT", Some("1".to_string())),
+                ("SHIPPER_CARGO_STDERR", Some(String::new())),
+                ("SHIPPER_CARGO_STDOUT", Some(String::new())),
+                (
+                    "SHIPPER_CARGO_ARGS_LOG",
+                    Some(cargo_log.to_string_lossy().to_string()),
+                ),
+            ]);
+            temp_env::with_vars(env_vars, || {
+                let server = spawn_registry_server(
+                    std::collections::BTreeMap::from([
+                        (
+                            "/api/v1/crates/demo/0.1.0".into(),
+                            vec![(404, "{}".into()), (500, "secret-response-sentinel".into())],
+                        ),
+                        (
+                            "/de/mo/demo".into(),
+                            vec![(200, "secret-response-sentinel".into())],
+                        ),
+                    ]),
+                    3,
+                );
+                let ws = planned_workspace(td.path(), server.base_url.clone());
+                let state_dir = td.path().join(".shipper");
+                let mut opts = default_opts(state_dir.clone());
+                opts.parallel.enabled = parallel;
+                opts.max_attempts = 2;
+                opts.readiness.enabled = true;
+                opts.readiness.method = method;
+                opts.readiness.max_total_wait = Duration::ZERO;
+                opts.readiness.initial_delay = Duration::ZERO;
 
-            let mut reporter = CollectingReporter::default();
-            let err = run_publish(&ws, &opts, &mut reporter).expect_err("publish should stop");
-            let msg = format!("{err:#}");
-            assert!(
-                msg.contains("reconciliation inconclusive"),
-                "expected inconclusive error, got: {msg}"
-            );
-            assert!(
-                reporter
-                    .errors
-                    .iter()
-                    .any(|msg| msg.contains("reconciliation outcome: StillUnknown")
-                        && msg.contains("stop before blind retry")),
-                "errors: {:?}",
-                reporter.errors
-            );
-
-            let cargo_invocations = std::fs::read_to_string(&cargo_log)
-                .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
-                .unwrap_or(0);
-            assert_eq!(cargo_invocations, 1, "must not retry after StillUnknown");
-
-            let state = state::load_state(&state_dir)
-                .expect("load state")
-                .expect("state exists");
-            let progress = state.packages.get("demo@0.1.0").expect("package");
-            assert!(
-                matches!(progress.state, PackageState::Ambiguous { .. }),
-                "expected Ambiguous state, got {:?}",
-                progress.state
-            );
-
-            let events_path = events::events_path(&state_dir);
-            let events = events::EventLog::read_from_file(&events_path).expect("events");
-            assert!(events.all_events().iter().any(|e| {
-                matches!(
-                    &e.event_type,
-                    EventType::PublishReconciled {
-                        outcome: ReconciliationOutcome::StillUnknown { .. }
-                    }
-                )
-            }));
-
-            server.join();
-        });
+                for resume in [false, true] {
+                    let mut reporter = CollectingReporter::default();
+                    let result = if resume {
+                        run_resume(&ws, &opts, &mut reporter)
+                    } else {
+                        run_publish(&ws, &opts, &mut reporter)
+                    };
+                    let error = result.expect_err("unknown observation must stop");
+                    assert!(
+                        error.downcast_ref::<PublishStillUnknownError>().is_some(),
+                        "{error:#}"
+                    );
+                    assert!(
+                        reporter.errors.iter().any(|message| {
+                            message.contains("reconciliation outcome: StillUnknown")
+                                && message.contains("stop before blind retry")
+                        }),
+                        "{:?}",
+                        reporter.errors
+                    );
+                    assert!(!format!("{error:#}").contains("secret-response-sentinel"));
+                    let cargo_invocations = std::fs::read_to_string(&cargo_log)
+                        .expect("cargo log")
+                        .lines()
+                        .filter(|line| !line.trim().is_empty())
+                        .count();
+                    assert_eq!(
+                        cargo_invocations, 1,
+                        "neither scheduler nor resume may blind-retry"
+                    );
+                    let retained = state::load_state(&state_dir)
+                        .expect("load state")
+                        .expect("state");
+                    let package = retained.packages.get("demo@0.1.0").expect("package");
+                    assert!(matches!(package.state, PackageState::Ambiguous { .. }));
+                    assert_eq!(package.attempts, 1);
+                    assert!(
+                        !state::receipt_path(&state_dir).exists(),
+                        "no success receipt"
+                    );
+                    let report: crate::types::ReconciliationReport = serde_json::from_slice(
+                        &std::fs::read(state::reconciliation_path(&state_dir)).expect("report"),
+                    )
+                    .expect("report JSON");
+                    assert!(matches!(
+                        report.records.last().expect("record").outcome,
+                        ReconciliationOutcome::StillUnknown { attempts: 1, .. }
+                    ));
+                    let log = events::EventLog::read_from_file(&events::events_path(&state_dir))
+                        .expect("events");
+                    assert!(log.all_events().iter().any(|event| matches!(
+                        event.event_type,
+                        EventType::PublishReconciled {
+                            outcome: ReconciliationOutcome::StillUnknown { attempts: 1, .. }
+                        }
+                    )));
+                    assert!(!log.all_events().iter().any(|event| matches!(
+                        event.event_type,
+                        EventType::PublishReconciled {
+                            outcome: ReconciliationOutcome::NotPublished { .. }
+                        }
+                    )));
+                }
+                assert_eq!(server.seen.lock().expect("requests").len(), 3);
+                server.join();
+            });
+        }
     }
 
     #[test]
@@ -4206,37 +4243,109 @@ mod tests {
 
     #[test]
     #[serial]
-    fn run_publish_treats_500_as_not_visible_during_readiness() {
-        // With the readiness-driven verify, 500 errors are treated as "not visible"
-        // (graceful degradation). The publish succeeds via cargo but readiness times out,
-        // leading to an ambiguous failure on the final registry check.
-        let td = tempdir().expect("tempdir");
-        let bin = td.path().join("bin");
-        write_fake_tools(&bin);
-        let mut env_vars = fake_program_env_vars(&bin);
-        env_vars.extend([("SHIPPER_CARGO_EXIT", Some("0".to_string()))]);
-        temp_env::with_vars(env_vars, || {
-            let server = spawn_registry_server(
-                std::collections::BTreeMap::from([(
-                    "/api/v1/crates/demo/0.1.0".to_string(),
-                    vec![
-                        (404, "{}".to_string()),
-                        (500, "{}".to_string()),
-                        (404, "{}".to_string()),
-                    ],
-                )]),
-                3,
-            );
-            let ws = planned_workspace(td.path(), server.base_url.clone());
-            let mut opts = default_opts(PathBuf::from(".shipper"));
-            opts.max_attempts = 1;
-            opts.readiness.max_total_wait = Duration::from_millis(0);
-
-            let mut reporter = CollectingReporter::default();
-            let err = run_publish(&ws, &opts, &mut reporter).expect_err("must fail");
-            assert!(format!("{err:#}").contains("failed"));
-            server.join();
-        });
+    fn readiness_success_reports_actual_polls_after_errors_in_publish_and_uploaded_resume() {
+        for (parallel, resume_uploaded) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let td = tempdir().expect("tempdir");
+            let bin = td.path().join("bin");
+            write_fake_tools(&bin);
+            let cargo_log = td.path().join("cargo.log");
+            let mut env_vars = fake_program_env_vars(&bin);
+            env_vars.extend([
+                ("SHIPPER_CARGO_EXIT", Some("0".to_string())),
+                (
+                    "SHIPPER_CARGO_ARGS_LOG",
+                    Some(cargo_log.to_string_lossy().to_string()),
+                ),
+            ]);
+            temp_env::with_vars(env_vars, || {
+                let mut statuses = vec![404];
+                if resume_uploaded {
+                    statuses.push(500);
+                }
+                statuses.extend([500, 500, 200]);
+                let expected_requests = statuses.len();
+                let server = spawn_registry_server(
+                    std::collections::BTreeMap::from([(
+                        "/api/v1/crates/demo/0.1.0".to_string(),
+                        statuses
+                            .into_iter()
+                            .map(|status| (status, "{}".to_string()))
+                            .collect(),
+                    )]),
+                    expected_requests,
+                );
+                let ws = planned_workspace(td.path(), server.base_url.clone());
+                let state_dir = td.path().join(".shipper");
+                let mut opts = default_opts(state_dir.clone());
+                opts.parallel.enabled = parallel;
+                opts.max_attempts = 1;
+                if resume_uploaded {
+                    opts.readiness.max_total_wait = Duration::ZERO;
+                    run_publish(&ws, &opts, &mut CollectingReporter::default()).expect_err(
+                        "successful upload with unknown readiness must retain Uploaded",
+                    );
+                    let retained = state::load_state(&state_dir).expect("load").expect("state");
+                    assert!(matches!(
+                        retained.packages["demo@0.1.0"].state,
+                        PackageState::Uploaded
+                    ));
+                    assert!(!state::receipt_path(&state_dir).exists());
+                }
+                opts.readiness.max_total_wait = Duration::from_secs(2);
+                let receipt = if resume_uploaded {
+                    run_resume(&ws, &opts, &mut CollectingReporter::default())
+                } else {
+                    run_publish(&ws, &opts, &mut CollectingReporter::default())
+                }
+                .expect("transient errors recover to visible");
+                assert!(matches!(receipt.execution_result, ExecutionResult::Success));
+                let evidence = &receipt.packages[0].evidence.readiness_checks;
+                assert_eq!(
+                    evidence.len(),
+                    1,
+                    "only the successful third poll is conclusive"
+                );
+                assert_eq!(evidence[0].attempt, 3);
+                assert!(evidence[0].visible);
+                let log = events::EventLog::read_from_file(&events::events_path(&state_dir))
+                    .expect("events");
+                let completions = log
+                    .all_events()
+                    .iter()
+                    .filter_map(|event| match event.event_type {
+                        EventType::ReadinessComplete { attempts, .. } => Some(attempts),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    completions,
+                    vec![3],
+                    "terminal event must report actual polls, not evidence length"
+                );
+                assert!(
+                    !log.all_events().iter().any(|event| matches!(
+                        event.event_type,
+                        EventType::ReadinessPoll { visible: false, .. }
+                    )),
+                    "failed probes must not fabricate negative observations"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(&cargo_log)
+                        .expect("cargo log")
+                        .lines()
+                        .count(),
+                    1,
+                    "Uploaded resume verifies without invoking Cargo again"
+                );
+                assert_eq!(
+                    server.seen.lock().expect("requests").len(),
+                    expected_requests
+                );
+                server.join();
+            });
+        }
     }
 
     #[test]
