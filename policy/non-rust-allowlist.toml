@@ -557,6 +557,28 @@ covered_by = ["manual review", ".github/workflows/ripr.yml"]
 created = "2026-05-12"
 review_after = "2026-08-12"
 
+[[file]]
+path = "scripts/release/verify_binary.py"
+kind = "release_binary_verifier"
+surface = "release"
+classification = "script"
+owner = "release/ci"
+reason = "Extract and execute each exact native release archive, bind source/version/toolchain/digests in its smoke receipt, and reject missing or mismatched four-target evidence before publication."
+covered_by = [".github/workflows/release.yml", "cargo test -p xtask --test release_binary_workflow"]
+created = "2026-10-28"
+review_after = "2027-01-28"
+
+[[file]]
+path = "scripts/ci/test-release-binary-proof.py"
+kind = "ci_policy_script"
+surface = "ci"
+classification = "script"
+owner = "release/ci"
+reason = "Exercise actual native smoke and aggregate workflow steps with explicit synthetic protocol fixtures and invalid executable, identity, missing-proof, and tamper controls without publication."
+covered_by = ["cargo test -p xtask --test release_binary_workflow"]
+created = "2026-10-28"
+review_after = "2027-01-28"
+
 # ─── Per-crate agent docs and per-crate README ──────────────────────────────
 
 [[glob]]

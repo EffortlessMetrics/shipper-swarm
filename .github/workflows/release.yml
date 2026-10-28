@@ -205,6 +205,11 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install Python for packaged executable proof
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+
       - name: Cache Cargo
         uses: actions/cache@v6
         with:
@@ -216,7 +221,7 @@ jobs:
           restore-keys: ${{ runner.os }}-${{ matrix.target }}-release-
 
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }} -p shipper
+        run: cargo build --locked --release --target ${{ matrix.target }} -p shipper
 
       - name: Package binary (Unix)
         if: matrix.archive != 'zip'
@@ -261,6 +266,22 @@ jobs:
             '}' \
             > "$artifact.metadata.json"
 
+      - name: Smoke packaged release executable
+        shell: bash
+        env:
+          APPROVED_SHA: ${{ needs.release-identity-gate.outputs.approved_sha }}
+          APPROVED_TREE: ${{ needs.release-identity-gate.outputs.approved_tree }}
+          APPROVED_VERSION: ${{ needs.release-identity-gate.outputs.approved_version }}
+        run: |
+          set -euo pipefail
+          python scripts/release/verify_binary.py smoke \
+            --target "${{ matrix.target }}" \
+            --archive "shipper-${{ matrix.target }}.${{ matrix.archive }}" \
+            --approved-sha "$APPROVED_SHA" \
+            --approved-tree "$APPROVED_TREE" \
+            --approved-version "$APPROVED_VERSION" \
+            --output "shipper-${{ matrix.target }}.${{ matrix.archive }}.smoke.json"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
@@ -271,8 +292,8 @@ jobs:
   # ---------------------------------------------------------------------------
   # Verify that every uploaded binary artifact is still bound to the approved
   # source identity before publication can begin. This catches missing,
-  # substituted, or checksum-mismatched artifacts rather than trusting only
-  # the matrix job conclusions.
+  # substituted, or checksum-mismatched artifacts and requires retained proof
+  # that each exact archive executable ran on its matching native host.
   # ---------------------------------------------------------------------------
   verify-binaries:
     name: Verify release binaries
@@ -290,6 +311,15 @@ jobs:
       group: em-ci-small
       labels: [self-hosted, linux, x64, em-ci, cx53, rust-large, trusted-pr]
     steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ needs.release-identity-gate.outputs.approved_sha }}
+
+      - name: Install Python for packaged executable proof
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+
       - name: Download binary artifacts
         uses: actions/download-artifact@v8
         with:
@@ -301,6 +331,7 @@ jobs:
         env:
           APPROVED_SHA: ${{ needs.release-identity-gate.outputs.approved_sha }}
           APPROVED_TREE: ${{ needs.release-identity-gate.outputs.approved_tree }}
+          APPROVED_VERSION: ${{ needs.release-identity-gate.outputs.approved_version }}
         run: |
           set -euo pipefail
           specs=(
@@ -333,6 +364,19 @@ jobs:
               "$metadata" >/dev/null
             (cd "$directory" && sha256sum --check "$(basename "$checksum")")
           done
+          python scripts/release/verify_binary.py aggregate \
+            --artifacts artifacts \
+            --approved-sha "$APPROVED_SHA" \
+            --approved-tree "$APPROVED_TREE" \
+            --approved-version "$APPROVED_VERSION" \
+            --output target/policy/release-binary-smoke.json
+
+      - name: Retain packaged executable verification
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-binary-smoke
+          path: target/policy/release-binary-smoke.json
+          retention-days: 90
 
   # ---------------------------------------------------------------------------
   # MSRV sanity check gates the publish train. The published crates declare
@@ -899,6 +943,7 @@ jobs:
             artifacts/**/shipper-*.zip
             artifacts/**/shipper-*.sha256
             artifacts/**/shipper-*.metadata.json
+            artifacts/**/shipper-*.smoke.json
             artifacts/shipper-release-state.tar.gz
           body_path: RELEASE_NOTES_v${{ needs.release-identity-gate.outputs.approved_version }}.md
           generate_release_notes: false
