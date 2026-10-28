@@ -492,6 +492,17 @@ created = "2026-09-08"
 review_after = "2026-12-08"
 
 [[file]]
+path = "scripts/ci/test-release-identity-gate.py"
+kind = "ci_policy_script"
+surface = "ci"
+classification = "script"
+owner = "release/ci"
+reason = "Execute the tag-only release identity workflow step with the production validator, clean authentication fixtures, and rejecting read and main-drift controls without publication."
+covered_by = ["cargo test -p xtask --test release_identity_workflow"]
+created = "2026-10-28"
+review_after = "2027-01-28"
+
+[[file]]
 path = ".github/CODEOWNERS"
 kind = "github_codeowners"
 surface = "tooling"

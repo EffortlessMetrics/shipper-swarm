@@ -1,0 +1,6 @@
+kind: fixed
+body: Authenticate the tag-time release identity read with the job's read-only token and exercise the actual gate against missing credentials, failed reads, malformed responses, and main drift.
+time: 2026-10-28T12:00:00Z
+custom:
+  Audience: Maintainers
+  Importance: Detailed
