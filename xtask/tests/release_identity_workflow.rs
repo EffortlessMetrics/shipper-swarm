@@ -4,7 +4,7 @@
 
 #[cfg(unix)]
 #[test]
-fn tag_identity_gate_uses_explicit_auth_and_rejects_invalid_reads() {
+fn tag_identity_reads_use_explicit_auth_and_reject_invalid_reads() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("xtask lives in the repository root");

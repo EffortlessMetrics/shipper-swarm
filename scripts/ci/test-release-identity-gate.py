@@ -1,9 +1,11 @@
-"""Run the tag-only release gate with its production xtask validator, offline.
+"""Run both tag-only identity reads with their production xtask validator, offline.
 
 The workflow run block and step environment are consumed directly. Git is real;
 the GitHub API and cargo metadata have bounded fixtures. The cargo shim only
 dispatches the actual release-identity binary or serves fixture metadata, and
 rejects every other command. This cannot publish or dispatch a workflow.
+Metadata includes the approved package set without dependency edges; these cases
+exercise authentication/source binding, not dependency-graph correctness.
 """
 
 import argparse
@@ -24,11 +26,16 @@ PACKAGES = [
     "shipper-sparse-index", "shipper-types", "shipper-webhook",
 ]
 TOKEN = "fixture-read-token-not-a-credential"
+CONSUMERS = {
+    "gate": ("release-identity-gate", "Validate approved source identity", "target/policy/release-identity.json"),
+    "plan": ("publish-crates-io", "shipper plan", ".shipper/release-identity.json"),
+}
 
 
-def gate_step(workflow):
-    job = workflow.split("  release-identity-gate:\n", 1)[1].split("\n  build-binaries:", 1)[0]
-    step = job.split("      - name: Validate approved source identity\n", 1)[1].split("\n      - ", 1)[0]
+def gate_step(workflow, consumer):
+    job_name, step_name, _ = CONSUMERS[consumer]
+    job = re.search(r"(?ms)^  " + re.escape(job_name) + r":\n(.*?)(?=^  [\w-]+:|\Z)", workflow)[1]
+    step = job.split("      - name: " + step_name + "\n", 1)[1].split("\n      - ", 1)[0]
     before_run, body = step.split("        run: |\n", 1)
     script = "\n".join(line[10:] if line.startswith("          ") else line for line in body.splitlines())
     environment = {}
@@ -41,6 +48,9 @@ def gate_step(workflow):
                     environment[key] = TOKEN
                 else:
                     raise AssertionError(f"unrecognized gate environment input: {key}")
+    for output in ["approved_sha", "approved_tree", "approved_version", "approval_record_ref", "approval_record_sha", "approved_registry", "approved_auth_posture"]:
+        script = script.replace("${{ needs.release-identity-gate.outputs." + output + " }}", "$" + output.upper())
+    assert "${{" not in script, "unrecognized workflow expression in exercised step"
     return script, environment
 
 
@@ -50,11 +60,11 @@ def write_executable(path, text):
 
 
 def checked(command, cwd, env):
-    return subprocess.check_output(command, cwd=cwd, env=env, text=True).strip()
+    return subprocess.check_output(command, cwd=cwd, env=env, text=True, timeout=10).strip()
 
 
-def run_case(workflow, xtask, *, event="push", response="valid", strip_binding=False):
-    script, step_environment = gate_step(workflow)
+def run_case(workflow, xtask, *, consumer="gate", event="push", response="valid", strip_binding=False):
+    script, step_environment = gate_step(workflow, consumer)
     if strip_binding:
         step_environment.pop("GH_TOKEN", None)
     with tempfile.TemporaryDirectory(prefix="shipper-release-gate-") as temp:
@@ -73,11 +83,14 @@ def run_case(workflow, xtask, *, event="push", response="valid", strip_binding=F
             "GIT_AUTHOR_NAME": "Release fixture", "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
             "GIT_COMMITTER_NAME": "Release fixture", "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
             "GIT_AUTHOR_DATE": "2026-10-28T12:00:00Z", "GIT_COMMITTER_DATE": "2026-10-28T12:00:00Z",
+            "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
         })
         git = shutil.which("git")
         if not git:
             raise AssertionError("git is required for the source identity fixture")
         checked([git, "init", "-q"], root, env)
+        checked([git, "config", "commit.gpgsign", "false"], root, env)
+        checked([git, "config", "tag.gpgsign", "false"], root, env)
         (root / "CHANGELOG.md").write_text("## [0.5.0] - 2026-10-28\n", encoding="utf-8")
         (root / "RELEASE_NOTES_v0.5.0.md").write_text("Fixture release notes\n", encoding="utf-8")
         checked([git, "add", "CHANGELOG.md", "RELEASE_NOTES_v0.5.0.md"], root, env)
@@ -117,6 +130,15 @@ elif sys.argv[1:3] == ["xtask", "release-identity"]:
 else:
     raise SystemExit("unexpected cargo command; publication is prohibited")
 ''')
+        write_executable(shims / "shipper", "#!" + sys.executable + "\n" + '''
+import json, os, pathlib, sys
+root = pathlib.Path(os.environ["FIXTURE_ROOT"])
+with (root / "shipper-calls.jsonl").open("a") as stream:
+    stream.write(json.dumps(sys.argv[1:]) + "\\n")
+assert sys.argv[1:] == ["plan", "--registry", "crates-io", "--state-dir", ".shipper", "--format", "json"]
+assert (root / ".shipper/release-identity.json").is_file()
+print('{"fixture_plan": true}')
+''')
         env.update({
             "PATH": str(shims) + os.pathsep + os.environ["PATH"],
             "FIXTURE_ROOT": str(root), "FIXTURE_XTASK": str(xtask),
@@ -128,40 +150,42 @@ else:
             "APPROVED_REGISTRY": "crates-io", "APPROVED_AUTH_POSTURE": "trusted_publishing",
         })
         env.update(step_environment)
-        result = subprocess.run(["bash", "-c", script], cwd=root, env=env, text=True, capture_output=True, timeout=10)
-        identity_path = root / "target/policy/release-identity.json"
+        result = subprocess.run(["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script], cwd=root, env=env, text=True, capture_output=True, timeout=10)
+        identity_path = root / CONSUMERS[consumer][2]
         identity = json.loads(identity_path.read_text()) if identity_path.exists() else None
         outputs = (root / "outputs").read_text() if (root / "outputs").exists() else ""
         calls = {}
-        for name in ["gh", "cargo"]:
+        for name in ["gh", "cargo", "shipper"]:
             path = root / (name + "-calls.jsonl")
             calls[name] = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
         return result, identity, outputs, calls, sha
 
 
 def test(workflow, xtask):
-    result, identity, outputs, calls, sha = run_case(workflow, xtask)
-    assert result.returncode == 0, result.stderr
-    assert identity["approved_sha"] == sha and identity["tag"] == "v0.5.0"
-    assert f"approved_sha={sha}\n" in outputs
-    assert len(calls["gh"]) == 1
-    assert "--main-sha" in calls["cargo"][0] and "--tag-date" in calls["cargo"][0]
-    for response, needle in [
-        ("auth_failure", "HTTP 401"), ("api_missing", "HTTP 404"),
-        ("empty", "40-character hexadecimal SHA"), ("null", "40-character hexadecimal SHA"),
-        ("malformed", "40-character hexadecimal SHA"), ("drift", "release-authority main mismatch"),
-    ]:
-        result, identity, outputs, calls, _ = run_case(workflow, xtask, response=response)
-        assert result.returncode != 0 and needle in result.stderr, (response, result.stderr)
-        assert identity is None and not outputs, response
-        assert len(calls["gh"]) == 1, response
-    result, identity, outputs, calls, _ = run_case(workflow, xtask, strip_binding=True)
-    assert result.returncode != 0 and "missing explicit read token" in result.stderr
-    assert identity is None and not outputs and not calls["cargo"]
+    for consumer in CONSUMERS:
+        result, identity, outputs, calls, sha = run_case(workflow, xtask, consumer=consumer)
+        assert result.returncode == 0, (consumer, result.stderr)
+        assert identity["approved_sha"] == sha and identity["tag"] == "v0.5.0"
+        assert (f"approved_sha={sha}\n" in outputs) == (consumer == "gate")
+        assert len(calls["shipper"]) == (1 if consumer == "plan" else 0)
+        assert len(calls["gh"]) == 1
+        assert "--main-sha" in calls["cargo"][0] and "--tag-date" in calls["cargo"][0]
+        for response, needle in [
+            ("auth_failure", "HTTP 401"), ("api_missing", "HTTP 404"),
+            ("empty", "40-character hexadecimal SHA"), ("null", "40-character hexadecimal SHA"),
+            ("malformed", "40-character hexadecimal SHA"), ("drift", "release-authority main mismatch"),
+        ]:
+            result, identity, outputs, calls, _ = run_case(workflow, xtask, consumer=consumer, response=response)
+            assert result.returncode != 0 and needle in result.stderr, (consumer, response, result.stderr)
+            assert identity is None and not outputs and not calls["shipper"], (consumer, response)
+            assert len(calls["gh"]) == 1, (consumer, response)
+        result, identity, outputs, calls, _ = run_case(workflow, xtask, consumer=consumer, strip_binding=True)
+        assert result.returncode != 0 and "missing explicit read token" in result.stderr
+        assert identity is None and not outputs and not calls["cargo"] and not calls["shipper"]
     result, identity, outputs, calls, _ = run_case(workflow, xtask, event="workflow_dispatch", strip_binding=True)
     assert result.returncode == 0 and identity["tag"] is None, result.stderr
     assert not calls["gh"] and "--main-sha" not in calls["cargo"][0]
-    print("Passed 9 actual-step cases: authenticated tag, six failed reads, removed binding, non-tag dispatch.")
+    print("Passed 17 actual-step cases: both authenticated tag reads, twelve failed reads, two removed bindings, non-tag dispatch.")
 
 
 def main():
