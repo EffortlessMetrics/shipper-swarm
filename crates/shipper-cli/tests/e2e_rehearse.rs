@@ -896,6 +896,146 @@ fn rehearsal_interrupted_publish_then_resume_preserves_invariants() {
     );
 }
 
+/// Model upload-artifact's directory contents and download-artifact's single-ID
+/// extraction into the requested path. Names come from the production workflow;
+/// the selector's API/refusal behavior is executed by the xtask workflow test.
+fn transfer_release_artifact(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination).expect("artifact destination");
+    for entry in fs::read_dir(source).expect("source artifact must exist") {
+        let entry = entry.expect("artifact entry");
+        let target = destination.join(entry.file_name());
+        if entry.file_type().expect("artifact type").is_dir() {
+            transfer_release_artifact(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), target).expect("copy retained artifact byte-for-byte");
+        }
+    }
+}
+
+fn release_artifact_step(job: &str, name: &str) -> &'static str {
+    let workflow = include_str!("../../../.github/workflows/release.yml");
+    workflow
+        .split(&format!("  {job}:\n"))
+        .nth(1)
+        .expect("release job")
+        .split(&format!("      - name: {name}\n"))
+        .nth(1)
+        .expect("release artifact step")
+        .split("\n      - ")
+        .next()
+        .expect("release step body")
+}
+
+#[test]
+#[serial]
+fn release_artifact_supports_publish_then_two_resume_dispatches() {
+    let upload_name = |job, step| {
+        release_artifact_step(job, step)
+            .lines()
+            .find_map(|line| line.strip_prefix("          name: "))
+            .expect("literal artifact upload name")
+    };
+    let publish_name = upload_name("publish-crates-io", "Upload .shipper/ (final state)");
+    let resume_name = upload_name("release-resume", "Upload .shipper/ (post-resume state)");
+    let selected_name =
+        release_artifact_step("release-resume", "Select prior .shipper/ state artifact")
+            .split("select(.name == \"")
+            .nth(1)
+            .expect("exact artifact name selector")
+            .split('"')
+            .next()
+            .expect("selected artifact name");
+
+    let td = tempdir().expect("tempdir");
+    let root = td.path();
+    create_three_crate_workspace(root);
+    let bin = root.join("fake-bin");
+    fs::create_dir(&bin).expect("fake cargo directory");
+    let fake_cargo = write_fake_cargo(&bin);
+    let (registry_url, registry_stop, registry) = spawn_registry();
+    registry.pin_404("crate-c");
+    let artifact_store = root.join("artifacts");
+    let mut previous_events = Vec::new();
+
+    for (run, command, ceiling) in [(1, "publish", "1"), (2, "resume", "2"), (3, "resume", "3")] {
+        let state_dir = root.join(format!("run-{run}/.shipper"));
+        if run > 1 {
+            let predecessor = artifact_store
+                .join(format!("run-{}", run - 1))
+                .join(selected_name);
+            transfer_release_artifact(&predecessor, &state_dir);
+            assert_eq!(
+                fs::read(state_dir.join("events.jsonl")).expect("transferred events"),
+                previous_events
+            );
+            let state: serde_json::Value = serde_json::from_slice(
+                &fs::read(state_dir.join("state.json")).expect("transferred state"),
+            )
+            .expect("state JSON");
+            assert_eq!(state["packages"]["crate-c@0.1.0"]["attempts"], run - 1);
+        }
+        if run == 3 {
+            // The two prior failed attempts are now visible at the registry.
+            // Following the latest artifact must retain both attempts and skip
+            // this already-visible version without issuing another upload.
+            registry.clear_pins();
+        }
+        let mut cmd = loopback_shipper_cmd();
+        common_args_with_max_attempts(
+            &mut cmd,
+            &root.join("Cargo.toml"),
+            &registry_url,
+            &state_dir,
+            &fake_cargo,
+            ceiling,
+        );
+        cmd.arg(command)
+            .env("SHIPPER_FAKE_CARGO_LOG", fake_cargo_log(&state_dir))
+            .env("SHIPPER_FAKE_EXIT_FOR_C", "1");
+        if run < 3 {
+            cmd.assert().failure();
+            assert_live_rehearsal_interrupted_state(&state_dir);
+        } else {
+            cmd.assert().success();
+        }
+        let events = fs::read(state_dir.join("events.jsonl")).expect("current events");
+        assert!(
+            events.starts_with(&previous_events),
+            "every continuation must retain the complete predecessor event history"
+        );
+        previous_events = events;
+        let state: serde_json::Value =
+            serde_json::from_slice(&fs::read(state_dir.join("state.json")).expect("current state"))
+                .expect("state JSON");
+        assert_eq!(
+            count_fake_cargo_publishes(&fake_cargo_log(&state_dir), "crate-c"),
+            run.min(2),
+            "a version already visible before the final continuation must not be uploaded again"
+        );
+        assert_eq!(state["packages"]["crate-c@0.1.0"]["attempts"], run.min(2));
+        assert_eq!(
+            count_fake_cargo_publishes(&fake_cargo_log(&state_dir), "crate-a"),
+            1
+        );
+        assert_eq!(
+            count_fake_cargo_publishes(&fake_cargo_log(&state_dir), "crate-b"),
+            1
+        );
+        assert_eq!(
+            count_events_matching(&read_events(&state_dir.join("events.jsonl")), |event| {
+                event_type_matches(event, "ExecutionStarted")
+            }),
+            run
+        );
+        let name = if run == 1 { publish_name } else { resume_name };
+        transfer_release_artifact(
+            &state_dir,
+            &artifact_store.join(format!("run-{run}")).join(name),
+        );
+    }
+    let _ = registry_stop.send(());
+}
+
 #[test]
 #[ignore = "workflow-driven: creates the interrupted .shipper artifact for a later runner job"]
 #[serial]
