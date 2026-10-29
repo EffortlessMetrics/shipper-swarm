@@ -40,6 +40,8 @@ pub(super) fn run_supervised(
     timeout: Option<Duration>,
     capture: CaptureMode,
 ) -> Result<CapturedCommandOutput> {
+    let interruption_lease = super::super::interruption::InterruptionLease::acquire()?;
+    super::super::interruption::check()?;
     let started = Instant::now();
     let execution_deadline = timeout
         .map(|duration| {
@@ -67,9 +69,11 @@ pub(super) fn run_supervised(
     let mut group_gone = false;
     let mut exit_code = -1;
     let mut timed_out = false;
+    let mut interrupted = false;
 
     loop {
         let made_progress = stdout.drain_turn() | stderr.drain_turn();
+        interrupted |= super::super::interruption::requested();
 
         if cleanup_deadline.is_none() {
             // Unlike Child::try_wait, NOWAIT observes an exit without releasing
@@ -80,7 +84,10 @@ pub(super) fn run_supervised(
                     cleanup_deadline = Some(Instant::now() + CLEANUP_ALLOWANCE);
                 }
                 Ok(None) => {
-                    if execution_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                    if interrupted {
+                        cleanup_deadline = Some(Instant::now() + CLEANUP_ALLOWANCE);
+                    } else if execution_deadline.is_some_and(|deadline| Instant::now() >= deadline)
+                    {
                         timed_out = true;
                         cleanup_deadline = Some(Instant::now() + CLEANUP_ALLOWANCE);
                     }
@@ -167,6 +174,11 @@ pub(super) fn run_supervised(
     }
     let (stdout, stdout_loss) = stdout.buffer.finish();
     let (stderr, stderr_loss) = stderr.buffer.finish();
+    interrupted |= super::super::interruption::requested();
+    // Carry every lease through the caller's immediate outcome decision. A
+    // signal can arrive after the last observation above but before handoff;
+    // the caller must still own the deferral when it observes that request.
+    // Interrupted/uncertain outcomes retain it through evidence persistence.
     Ok(CapturedCommandOutput {
         output: CommandOutput {
             exit_code,
@@ -180,6 +192,8 @@ pub(super) fn run_supervised(
             stderr: stderr_loss,
         },
         cleanup_failure,
+        interrupted,
+        interruption_lease,
     })
 }
 

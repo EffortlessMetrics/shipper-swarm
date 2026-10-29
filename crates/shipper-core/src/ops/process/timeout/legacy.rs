@@ -94,6 +94,8 @@ pub(super) fn run_supervised(
         let (stderr, stderr_loss) = stderr.finish();
         Ok(CapturedCommandOutput {
             cleanup_failure: None,
+            interrupted: false,
+            interruption_lease: None,
             output: CommandOutput {
                 exit_code,
                 stdout,

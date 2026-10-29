@@ -31,6 +31,8 @@ pub(crate) struct CapturedCargoPublish {
     pub(crate) output: CargoOutput,
     pub(crate) capture: process::CaptureStatus,
     pub(crate) cleanup_failure: Option<process::CleanupFailure>,
+    pub(crate) interrupted: bool,
+    pub(crate) _interruption_lease: Option<process::interruption::InterruptionLease>,
 }
 
 pub(crate) const PUBLISH_CAPTURE_OMITTED: &str =
@@ -167,6 +169,9 @@ pub fn cargo_publish(
             failure.description()
         );
     }
+    if captured.interrupted || process::interruption::requested() {
+        return Err(process::interruption::Interrupted.into());
+    }
     Ok(captured.output)
 }
 
@@ -252,6 +257,8 @@ fn finish_publish_capture(
     }
     CapturedCargoPublish {
         cleanup_failure: captured.cleanup_failure,
+        interrupted: captured.interrupted,
+        _interruption_lease: captured.interruption_lease,
         output: CargoOutput {
             exit_code,
             stdout_tail,

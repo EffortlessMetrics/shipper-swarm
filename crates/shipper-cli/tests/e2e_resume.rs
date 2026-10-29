@@ -14,6 +14,10 @@ use serial_test::serial;
 use tempfile::tempdir;
 use tiny_http::{Header, Response, Server, StatusCode};
 
+#[cfg(target_os = "linux")]
+#[path = "e2e_resume/interruption.rs"]
+mod interruption;
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

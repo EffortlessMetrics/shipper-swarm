@@ -36,9 +36,10 @@ result types.
 
 ## Visibility
 
-Everything in this subsystem is `pub(crate)`. None of it is part of shipper-core's
-public API — it's an internal implementation detail that callers (primarily
-`ops::cargo`) consume via the `ops::process` facade.
+This subsystem is crate-private. Callers (primarily `ops::cargo`) consume it via
+the `ops::process` facade. The hidden `engine::PublishInterruption` re-export is
+an unsupported bridge for the separate executable-only CLI entry point; it owns
+process-lifetime flags and leases but installs no OS handlers.
 
 `run_command_with_timeout` keeps complete stdout/stderr. Only the explicit
 `run_command_with_publish_capture` entry point bounds retention, including when
@@ -56,6 +57,22 @@ cannot be established, closing owned readers without leaving blocked threads.
 authorize another upload. Early exit 0/42 keeps that exit and `timed_out=false`.
 Group-signal failure is provisional: confirmed reap, group absence and both EOFs
 prove cleanup complete even when an exited leader's group rejects the signal.
+
+The explicit process-only CLI signal context supplies an interruption flag and
+conditional-default flag. The supervisor holds a counted lease before spawn;
+every result retains that lease through the engine's immediate outcome decision.
+Interrupted/uncertain outcomes retain it through persistence; ordinary success
+retains it through the Uploaded write, then releases before registry/backoff waits.
+Core entry points
+never install handlers, and interruption is separate from cleanup failure: proved
+cleanup plus interruption preserves ambiguous attempt evidence without a permanent
+cleanup hold. No request reset, handler unregistration, or deadline extension is
+allowed between commands.
+
+On Linux, zombie descendants can keep the group-absence probe positive when
+their reparent target does not reap them. The supervisor conservatively retains
+a hold even if no descendant is running. Containers should use an init process
+that reaps orphaned children; zombie-only groups are not treated as absent.
 
 The group contains cooperative descendants, not descendants that deliberately
 change groups/sessions. An escaped pipe holder produces incomplete cleanup; an

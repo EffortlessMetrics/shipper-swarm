@@ -5,7 +5,6 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
 
 use anyhow::{Result, bail};
 
@@ -16,7 +15,7 @@ use crate::registry::RegistryClient;
 use crate::state::events;
 use shipper_types::{ExecutionState, PackageReceipt, PublishLevel, RuntimeOptions};
 
-use super::{Reporter, SendReporter, drain_retry_waits};
+use super::{Reporter, SendReporter, replay_buffered_messages};
 
 struct WorkerHandle {
     handle: thread::JoinHandle<PackagePublishResult>,
@@ -41,6 +40,15 @@ fn finish_publish_errors(mut errors: Vec<anyhow::Error>) -> Result<()> {
         let cleanup = errors.swap_remove(index);
         return Err(cleanup.context(format!(
             "parallel publish stopped after incomplete process cleanup: {summary}"
+        )));
+    }
+    if let Some(index) = errors.iter().position(|error| {
+        error
+            .downcast_ref::<crate::ops::process::interruption::Interrupted>()
+            .is_some()
+    }) {
+        return Err(errors.swap_remove(index).context(format!(
+            "parallel publication interrupted after joining active workers: {summary}"
         )));
     }
     if let Some(index) = errors.iter().position(|error| {
@@ -188,10 +196,10 @@ pub(crate) fn run_publish_level(
         }
 
         while handles.iter().any(|handle| !handle.is_finished()) {
-            drain_retry_waits(reporter, send_reporter.as_ref());
-            thread::sleep(Duration::from_millis(25));
+            send_reporter.wait_for_messages();
+            replay_buffered_messages(reporter, send_reporter.as_ref());
         }
-        drain_retry_waits(reporter, send_reporter.as_ref());
+        replay_buffered_messages(reporter, send_reporter.as_ref());
 
         let mut join_failures = 0;
         for handle in handles {
@@ -216,9 +224,12 @@ pub(crate) fn run_publish_level(
         } else if join_failures > 0 {
             bail!("parallel publish worker join failed for {join_failures} package(s)");
         }
-        if cleanup_incomplete {
+        if cleanup_incomplete || crate::ops::process::interruption::requested() {
             // All already-admitted peers have been joined. Never launch a
             // later chunk after an owned process may still be running.
+            if !cleanup_incomplete {
+                errors.push(crate::ops::process::interruption::Interrupted.into());
+            }
             return finish_publish_errors(errors).map(|()| all_receipts);
         }
     }

@@ -9,6 +9,7 @@
 
 mod capture;
 mod cargo;
+pub(crate) mod interruption;
 mod run;
 mod timeout;
 mod types;

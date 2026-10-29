@@ -120,20 +120,36 @@ pub(crate) fn run_sequential_scheduler(
             // Already-terminal packages (Published / Skipped) are handled
             // inside publish_package_with_timeout so sequential and parallel
             // share the same resume-skip event + receipt shape (#153).
-            let result = publish_package_with_timeout(
-                package,
-                ws,
-                opts,
-                reg,
-                &st_arc,
-                state_dir,
-                &event_log_arc,
-                events_path,
-                &send_reporter,
-                sequential_cargo_timeout(opts),
-            );
-            crate::engine::parallel::drain_retry_waits_to_host(reporter, &send_reporter);
-            crate::engine::parallel::replay_buffered_messages_to_host(reporter, &send_reporter);
+            // Keep the host reporter on its calling thread while the same
+            // canonical executor owns Cargo, retry sleeps, and transitions.
+            // Only one package worker is live in sequential mode.
+            let result = std::thread::scope(|scope| {
+                let handle = scope.spawn(|| {
+                    publish_package_with_timeout(
+                        package,
+                        ws,
+                        opts,
+                        reg,
+                        &st_arc,
+                        state_dir,
+                        &event_log_arc,
+                        events_path,
+                        &send_reporter,
+                        sequential_cargo_timeout(opts),
+                    )
+                });
+                while !handle.is_finished() {
+                    send_reporter.wait_for_messages();
+                    crate::engine::parallel::replay_buffered_messages_to_host(
+                        reporter,
+                        &send_reporter,
+                    );
+                }
+                let result = handle.join();
+                crate::engine::parallel::replay_buffered_messages_to_host(reporter, &send_reporter);
+                result
+                    .map_err(|_| anyhow::anyhow!("sequential publish worker join failed for {key}"))
+            })?;
 
             match result.result {
                 Ok(receipt) => receipts.push(receipt),
@@ -141,7 +157,6 @@ pub(crate) fn run_sequential_scheduler(
             }
         }
 
-        crate::engine::parallel::drain_retry_waits_to_host(reporter, &send_reporter);
         crate::engine::parallel::replay_buffered_messages_to_host(reporter, &send_reporter);
         Ok(receipts)
     })();
@@ -623,16 +638,30 @@ fn wait_after_retry(
 fn write_reconciliation_report_best_effort(
     state_dir: &Path,
     ws: &PlannedWorkspace,
+    event_log: &Arc<Mutex<events::EventLog>>,
     events_path: &Path,
     reporter: &Arc<SendReporter>,
 ) -> bool {
-    if let Err(err) = crate::state::reconciliation::write_report_from_events(
-        state_dir,
-        &ws.plan.plan_id,
-        &ws.plan.registry,
-        events_path,
-    ) {
-        reporter.warn(&format!("failed to write reconciliation report: {err}"));
+    // Call after the package transition releases its guards. The complete
+    // durable-event snapshot and report replacement share the append gate:
+    // locking only the rename would still let an older snapshot win later.
+    // Transitions acquire event log before execution state; this path never
+    // acquires execution state or holds the gate during Cargo/registry work.
+    let result = event_log
+        .lock()
+        .map_err(|_| anyhow::anyhow!("event log lock poisoned while writing reconciliation report"))
+        .and_then(|_log_guard| {
+            crate::state::reconciliation::write_report_from_events(
+                state_dir,
+                &ws.plan.plan_id,
+                &ws.plan.registry,
+                events_path,
+            )
+        });
+    // Report errors after releasing the persistence gate. A warning/false
+    // result remains failure evidence; it never authorizes a recovery.
+    if let Err(err) = result {
+        reporter.warn(&format!("failed to write reconciliation report: {err:#}"));
         return false;
     }
     true
@@ -712,6 +741,9 @@ pub(crate) fn publish_package_with_timeout(
             }
         }
     };
+    if let Err(error) = crate::ops::process::interruption::check() {
+        return PackagePublishResult { result: Err(error) };
+    }
 
     if matches!(
         progress.state,
@@ -734,11 +766,10 @@ pub(crate) fn publish_package_with_timeout(
                 &mut log,
             ) {
                 return PackagePublishResult {
-                    result: Err(anyhow::anyhow!(
-                        "{}@{}: failed to write package-skip event: {err}",
-                        p.name,
-                        p.version
-                    )),
+                    result: Err(err.context(format!(
+                        "{}@{}: failed to write package-skip event",
+                        p.name, p.version
+                    ))),
                 };
             }
         }
@@ -778,11 +809,10 @@ pub(crate) fn publish_package_with_timeout(
         });
         if let Err(err) = log.write_to_file(events_path) {
             return PackagePublishResult {
-                result: Err(anyhow::anyhow!(
-                    "{}@{}: failed to write package-start event: {err}",
-                    p.name,
-                    p.version
-                )),
+                result: Err(err.context(format!(
+                    "{}@{}: failed to write package-start event",
+                    p.name, p.version
+                ))),
             };
         }
         log.clear();
@@ -879,8 +909,13 @@ pub(crate) fn publish_package_with_timeout(
                 ) {
                     return PackagePublishResult { result: Err(e) };
                 }
-                let _ =
-                    write_reconciliation_report_best_effort(state_dir, ws, events_path, reporter);
+                let _ = write_reconciliation_report_best_effort(
+                    state_dir,
+                    ws,
+                    event_log,
+                    events_path,
+                    reporter,
+                );
                 reporter.info(&format!(
                     "{}@{}: reconciliation outcome: Published; action: mark published and continue without republish (evidence: {})",
                     p.name,
@@ -927,8 +962,13 @@ pub(crate) fn publish_package_with_timeout(
                 ) {
                     return PackagePublishResult { result: Err(e) };
                 }
-                let _ =
-                    write_reconciliation_report_best_effort(state_dir, ws, events_path, reporter);
+                let _ = write_reconciliation_report_best_effort(
+                    state_dir,
+                    ws,
+                    event_log,
+                    events_path,
+                    reporter,
+                );
                 reporter.info(&format!(
                     "{}@{}: reconciliation outcome: NotPublished; action: retry under publish policy (evidence: {})",
                     p.name,
@@ -951,8 +991,13 @@ pub(crate) fn publish_package_with_timeout(
                 ) {
                     return PackagePublishResult { result: Err(e) };
                 }
-                let reconciliation_written =
-                    write_reconciliation_report_best_effort(state_dir, ws, events_path, reporter);
+                let reconciliation_written = write_reconciliation_report_best_effort(
+                    state_dir,
+                    ws,
+                    event_log,
+                    events_path,
+                    reporter,
+                );
                 reporter.error(&format!(
                     "{}@{}: reconciliation outcome: StillUnknown; action: stop before blind retry; operator action required (evidence: {}): {}",
                     p.name,
@@ -1042,11 +1087,10 @@ pub(crate) fn publish_package_with_timeout(
                         },
                     ) {
                         return PackagePublishResult {
-                            result: Err(anyhow::anyhow!(
-                                "{}@{}: failed to promote uploaded package to published: {e}",
-                                p.name,
-                                p.version
-                            )),
+                            result: Err(e.context(format!(
+                                "{}@{}: failed to promote uploaded package to published",
+                                p.name, p.version
+                            ))),
                         };
                     }
                     maybe_send_event(
@@ -1118,11 +1162,10 @@ pub(crate) fn publish_package_with_timeout(
                     };
                 }
                 return PackagePublishResult {
-                    result: Err(anyhow::anyhow!(
-                        "{}@{}: failed to verify uploaded package visibility before publish: {error}",
-                        p.name,
-                        p.version
-                    )),
+                    result: Err(error.context(format!(
+                        "{}@{}: failed to verify uploaded package visibility before publish",
+                        p.name, p.version
+                    ))),
                 };
             }
         }
@@ -1155,11 +1198,10 @@ pub(crate) fn publish_package_with_timeout(
                     },
                 ) {
                     return PackagePublishResult {
-                        result: Err(anyhow::anyhow!(
-                            "{}@{}: failed to mark package as already published: {err}",
-                            p.name,
-                            p.version
-                        )),
+                        result: Err(err.context(format!(
+                            "{}@{}: failed to mark package as already published",
+                            p.name, p.version
+                        ))),
                     };
                 }
 
@@ -1206,6 +1248,9 @@ pub(crate) fn publish_package_with_timeout(
     let mut is_new_crate_cached: Option<bool> = p.regime.map(PublishRegime::is_new_crate);
 
     while attempt < opts.max_attempts {
+        if let Err(error) = crate::ops::process::interruption::check() {
+            return PackagePublishResult { result: Err(error) };
+        }
         attempt += 1;
 
         let command = format!(
@@ -1321,16 +1366,62 @@ pub(crate) fn publish_package_with_timeout(
                 });
                 if let Err(err) = log.write_to_file(events_path) {
                     return PackagePublishResult {
-                        result: Err(anyhow::anyhow!(
-                            "{}@{}: failed to write package-output event: {err}",
-                            p.name,
-                            p.version
-                        )),
+                        result: Err(err.context(format!(
+                            "{}@{}: failed to write package-output event",
+                            p.name, p.version
+                        ))),
                     };
                 }
                 log.clear();
             }
 
+            if captured.interrupted || crate::ops::process::interruption::requested() {
+                let message = "cargo publish interrupted; process cleanup confirmed; registry reconciliation required".to_string();
+                let ended_at = Utc::now();
+                let failure = PublishEvent {
+                    timestamp: ended_at,
+                    event_type: EventType::PackageFailed {
+                        class: ErrorClass::Ambiguous,
+                        message: message.clone(),
+                    },
+                    package: pkg_label.clone(),
+                };
+                let result = commit_pending_with_attempt_detail_transition(
+                    st,
+                    state_dir,
+                    event_log,
+                    events_path,
+                    &key,
+                    PackageState::Failed {
+                        class: ErrorClass::Ambiguous,
+                        message: message.clone(),
+                    },
+                    AttemptDetail {
+                        package: p.name.clone(),
+                        version: p.version.clone(),
+                        attempt,
+                        max_attempts: opts.max_attempts,
+                        started_at: attempt_started_at,
+                        ended_at,
+                        error_class: Some(ErrorClass::Ambiguous),
+                        next_attempt_at: None,
+                        redacted_message: Some(message),
+                    },
+                    // The first failure records the attempt outcome; the
+                    // terminal failure seals it, as in ordinary exhaustion.
+                    // A later run must not finalize these old attempts in its
+                    // new parallel reconciliation order.
+                    vec![failure.clone(), failure],
+                );
+                // `captured` retains the interruption lease until this event-
+                // first transition finishes, including its failure path.
+                return PackagePublishResult {
+                    result: Err(match result {
+                        Ok(()) => crate::ops::process::interruption::Interrupted.into(),
+                        Err(error) => error.context(crate::ops::process::interruption::Interrupted),
+                    }),
+                };
+            }
             if out.exit_code == 0 && !out.timed_out {
                 let completion_timestamp = Utc::now();
                 let attempt_detail = AttemptDetail {
@@ -1365,7 +1456,15 @@ pub(crate) fn publish_package_with_timeout(
                 ) {
                     return PackagePublishResult { result: Err(e) };
                 }
+                drop(captured._interruption_lease);
+                if let Err(error) = crate::ops::process::interruption::check() {
+                    return PackagePublishResult { result: Err(error) };
+                }
             } else {
+                // The cleaned ordinary outcome has passed the immediate
+                // interruption decision. Registry waits below retain normal
+                // process termination rather than deferring it indefinitely.
+                drop(captured._interruption_lease);
                 let failure_output = format!("{}\n{}", out.stderr_tail, out.stdout_tail);
                 // Killing Cargo cannot establish whether the upload reached the
                 // registry. The typed timeout owns this decision even when the
@@ -1466,6 +1565,7 @@ pub(crate) fn publish_package_with_timeout(
                             let _ = write_reconciliation_report_best_effort(
                                 state_dir,
                                 ws,
+                                event_log,
                                 events_path,
                                 reporter,
                             );
@@ -1489,6 +1589,7 @@ pub(crate) fn publish_package_with_timeout(
                             let _ = write_reconciliation_report_best_effort(
                                 state_dir,
                                 ws,
+                                event_log,
                                 events_path,
                                 reporter,
                             );
@@ -1559,6 +1660,7 @@ pub(crate) fn publish_package_with_timeout(
                             let reconciliation_written = write_reconciliation_report_best_effort(
                                 state_dir,
                                 ws,
+                                event_log,
                                 events_path,
                                 reporter,
                             );
@@ -1895,11 +1997,10 @@ pub(crate) fn publish_package_with_timeout(
                             message,
                         ) {
                             return PackagePublishResult {
-                                result: Err(anyhow::anyhow!(
-                                    "{}@{}: failed to schedule retry backoff: {err}",
-                                    p.name,
-                                    p.version
-                                )),
+                                result: Err(err.context(format!(
+                                    "{}@{}: failed to schedule retry backoff",
+                                    p.name, p.version
+                                ))),
                             };
                         }
                     }
@@ -2105,11 +2206,10 @@ pub(crate) fn publish_package_with_timeout(
                     };
                 }
                 return PackagePublishResult {
-                    result: Err(anyhow::anyhow!(
-                        "{}@{}: failed to verify final visibility after last error: {error}",
-                        p.name,
-                        p.version
-                    )),
+                    result: Err(error.context(format!(
+                        "{}@{}: failed to verify final visibility after last error",
+                        p.name, p.version
+                    ))),
                 };
             }
         }

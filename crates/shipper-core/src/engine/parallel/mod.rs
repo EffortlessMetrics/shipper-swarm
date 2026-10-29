@@ -8,7 +8,7 @@
 
 use std::collections::VecDeque;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -115,26 +115,31 @@ impl<'a> Reporter for HostReporterAdapter<'a> {
     }
 }
 
-pub(super) struct RetryWaitNotice {
-    pub(super) pkg_name: String,
-    pub(super) pkg_version: String,
-    pub(super) attempt: u32,
-    pub(super) max_attempts: u32,
-    pub(super) delay: Duration,
-    pub(super) reason: shipper_types::ErrorClass,
-    pub(super) message: String,
-    pub(super) started_at: Instant,
+struct RetryWaitNotice {
+    pkg_name: String,
+    pkg_version: String,
+    attempt: u32,
+    max_attempts: u32,
+    delay: Duration,
+    reason: shipper_types::ErrorClass,
+    message: String,
+    started_at: Instant,
+}
+
+enum ReporterMessage {
+    Info(String),
+    Warn(String),
+    Error(String),
+    RetryWait(RetryWaitNotice),
 }
 
 #[derive(Default)]
 pub(crate) struct SendReporter {
-    infos: Mutex<Vec<String>>,
-    warns: Mutex<Vec<String>>,
-    errors: Mutex<Vec<String>>,
-    retry_waits: Mutex<VecDeque<RetryWaitNotice>>,
+    messages: Mutex<VecDeque<ReporterMessage>>,
+    available: Condvar,
 }
 
-// The `Reporter` trait returns `()`/`Vec`, not `Result`, so poison cannot
+// The `Reporter` trait returns `()`, not `Result`, so poison cannot
 // propagate as a typed error. A poisoned reporter mutex means a publish
 // thread panicked mid-push; recovering the guard (possibly with a partial
 // buffer) and continuing is safer than panicking the orchestrator, which
@@ -142,25 +147,24 @@ pub(crate) struct SendReporter {
 // `events.jsonl`, not this in-memory buffer. See `flow.rs` for the typed
 // sites that CAN propagate poison as an error.
 impl SendReporter {
-    pub(crate) fn info(&self, msg: &str) {
-        self.infos
+    fn push(&self, message: ReporterMessage) {
+        self.messages
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .push(msg.to_string());
+            .push_back(message);
+        self.available.notify_one();
+    }
+
+    pub(crate) fn info(&self, msg: &str) {
+        self.push(ReporterMessage::Info(msg.to_string()));
     }
 
     pub(crate) fn warn(&self, msg: &str) {
-        self.warns
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(msg.to_string());
+        self.push(ReporterMessage::Warn(msg.to_string()));
     }
 
     pub(crate) fn error(&self, msg: &str) {
-        self.errors
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(msg.to_string());
+        self.push(ReporterMessage::Error(msg.to_string()));
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -174,67 +178,62 @@ impl SendReporter {
         reason: shipper_types::ErrorClass,
         message: &str,
     ) {
-        self.retry_waits
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push_back(RetryWaitNotice {
-                pkg_name: pkg_name.to_string(),
-                pkg_version: pkg_version.to_string(),
-                attempt,
-                max_attempts,
-                delay,
-                reason,
-                message: message.to_string(),
-                started_at: Instant::now(),
-            });
-        thread::sleep(delay);
+        let started_at = Instant::now();
+        self.push(ReporterMessage::RetryWait(RetryWaitNotice {
+            pkg_name: pkg_name.to_string(),
+            pkg_version: pkg_version.to_string(),
+            attempt,
+            max_attempts,
+            delay,
+            reason,
+            message: message.to_string(),
+            started_at,
+        }));
+        // Reporting and execution observe the same monotonic wait. The host
+        // may render a countdown, return immediately, or be slow; none of
+        // those choices owns or restarts the worker's retry delay.
+        thread::sleep(delay.saturating_sub(started_at.elapsed()));
     }
 
-    fn drain_infos(&self) -> Vec<String> {
-        std::mem::take(&mut *self.infos.lock().unwrap_or_else(|e| e.into_inner()))
+    fn drain_messages(&self) -> VecDeque<ReporterMessage> {
+        std::mem::take(&mut *self.messages.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
-    fn drain_warns(&self) -> Vec<String> {
-        std::mem::take(&mut *self.warns.lock().unwrap_or_else(|e| e.into_inner()))
-    }
-
-    fn drain_errors(&self) -> Vec<String> {
-        std::mem::take(&mut *self.errors.lock().unwrap_or_else(|e| e.into_inner()))
-    }
-
-    fn drain_retry_waits(&self) -> Vec<RetryWaitNotice> {
-        self.retry_waits
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .drain(..)
-            .collect()
+    pub(crate) fn wait_for_messages(&self) {
+        let messages = self.messages.lock().unwrap_or_else(|e| e.into_inner());
+        // The bound also lets schedulers observe worker completion or panic
+        // when there is no final message. No consumer callback holds this lock.
+        drop(
+            self.available
+                .wait_timeout_while(messages, Duration::from_millis(25), |queue| {
+                    queue.is_empty()
+                })
+                .unwrap_or_else(|e| e.into_inner()),
+        );
     }
 }
 
 pub(crate) fn replay_buffered_messages(reporter: &mut dyn Reporter, send_reporter: &SendReporter) {
-    for msg in send_reporter.drain_infos() {
-        reporter.info(&msg);
-    }
-    for msg in send_reporter.drain_warns() {
-        reporter.warn(&msg);
-    }
-    for msg in send_reporter.drain_errors() {
-        reporter.error(&msg);
-    }
-}
-
-pub(crate) fn drain_retry_waits(reporter: &mut dyn Reporter, send_reporter: &SendReporter) {
-    for notice in send_reporter.drain_retry_waits() {
-        let remaining = notice.delay.saturating_sub(notice.started_at.elapsed());
-        reporter.retry_wait(
-            &notice.pkg_name,
-            &notice.pkg_version,
-            notice.attempt,
-            notice.max_attempts,
-            remaining,
-            notice.reason,
-            &notice.message,
-        );
+    // Drain under one lock to preserve mixed-severity and retry-notice order.
+    // Release the lock before invoking potentially slow embedding callbacks.
+    for message in send_reporter.drain_messages() {
+        match message {
+            ReporterMessage::Info(message) => reporter.info(&message),
+            ReporterMessage::Warn(message) => reporter.warn(&message),
+            ReporterMessage::Error(message) => reporter.error(&message),
+            ReporterMessage::RetryWait(notice) => {
+                let remaining = notice.delay.saturating_sub(notice.started_at.elapsed());
+                reporter.retry_wait(
+                    &notice.pkg_name,
+                    &notice.pkg_version,
+                    notice.attempt,
+                    notice.max_attempts,
+                    remaining,
+                    notice.reason,
+                    &notice.message,
+                );
+            }
+        }
     }
 }
 
@@ -244,14 +243,6 @@ pub(crate) fn replay_buffered_messages_to_host(
 ) {
     let mut adapter = HostReporterAdapter { inner: reporter };
     replay_buffered_messages(&mut adapter, send_reporter);
-}
-
-pub(crate) fn drain_retry_waits_to_host(
-    reporter: &mut dyn crate::engine::Reporter,
-    send_reporter: &SendReporter,
-) {
-    let mut adapter = HostReporterAdapter { inner: reporter };
-    drain_retry_waits(&mut adapter, send_reporter);
 }
 
 /// Run publish in parallel mode using `shipper`'s wrapped `RegistryClient`.
@@ -278,6 +269,7 @@ pub fn run_publish_parallel(
     reg: &RegistryClient,
     reporter: &mut dyn crate::engine::Reporter,
 ) -> Result<Vec<PackageReceipt>> {
+    crate::ops::process::interruption::check()?;
     crate::config::validate_per_error_config(&opts.retry_per_error)?;
     crate::engine::publish::admission::ensure_no_cleanup_hold(st)?;
     // Direct calls always schedule complete dependency levels, independently

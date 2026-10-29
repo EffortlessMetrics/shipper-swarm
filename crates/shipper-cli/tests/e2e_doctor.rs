@@ -846,6 +846,7 @@ fn doctor_shows_workspace_info() {
 
 /// 6. Doctor reports .shipper directory status (not yet created)
 #[test]
+#[serial_test::serial]
 fn doctor_reports_shipper_directory_status() {
     let td = tempdir().expect("tempdir");
     create_workspace(td.path());
@@ -866,9 +867,14 @@ fn doctor_reports_shipper_directory_status() {
         .env_remove("CARGO_REGISTRIES_CRATES_IO_TOKEN")
         .assert()
         .success()
-        .stdout(contains("state_dir_exists: false (will be created)"));
+        .stdout(contains(
+            "state_dir_exists: false (prospective; write access is unverified)",
+        ))
+        .stdout(contains("state-dir-not-created"))
+        .stdout(contains("Unknown: state directory"));
 
     registry.join();
+    assert!(!td.path().join(".shipper").exists());
 }
 
 /// 7. Doctor reports state file if present (.shipper dir exists with state.json)

@@ -63,6 +63,8 @@ pub(crate) struct CapturedCommandOutput {
     pub(crate) output: CommandOutput,
     pub(crate) capture: CaptureStatus,
     pub(crate) cleanup_failure: Option<CleanupFailure>,
+    pub(crate) interrupted: bool,
+    pub(crate) interruption_lease: Option<super::interruption::InterruptionLease>,
 }
 
 #[derive(Clone, Copy)]

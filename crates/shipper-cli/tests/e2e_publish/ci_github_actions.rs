@@ -9,9 +9,13 @@ const SECRET: &str = "ci-recipe-secret-sentinel";
 const GUIDE: &str = include_str!("../../../../docs/how-to/run-in-github-actions.md");
 
 fn documented_workflow() -> Result<Value> {
+    documented_yaml_after("## Minimal workflow\n")
+}
+
+fn documented_yaml_after(heading: &str) -> Result<Value> {
     let section = GUIDE
-        .split_once("## Minimal workflow\n")
-        .context("minimal workflow section")?
+        .split_once(heading)
+        .context("documented workflow section")?
         .1;
     let yaml = section
         .split_once("```yaml\n")
@@ -21,6 +25,152 @@ fn documented_workflow() -> Result<Value> {
         .context("workflow closing fence")?
         .0;
     Ok(serde_yaml::from_str(yaml)?)
+}
+
+fn documented_auth_steps() -> Result<Vec<Value>> {
+    let workflow = documented_yaml_after("### Token vs Trusted Publishing\n")?;
+    ensure!(workflow["permissions"]["id-token"] == "write");
+    ensure!(workflow["jobs"]["publish"]["environment"] == "release");
+    Ok(workflow["jobs"]["publish"]["steps"]
+        .as_sequence()
+        .context("documented auth steps")?
+        .clone())
+}
+
+#[test]
+fn ci_github_actions_auth_example_keeps_explicit_fallback_control() -> Result<()> {
+    let steps = documented_auth_steps()?;
+    let auth_index = steps
+        .iter()
+        .position(|step| step["id"] == "auth")
+        .context("auth action")?;
+    let auth = &steps[auth_index];
+    ensure!(auth["uses"] == "rust-lang/crates-io-auth-action@v1");
+    ensure!(
+        auth["continue-on-error"] == true,
+        "failed mint must reach the explicit fallback"
+    );
+    let publish = publish_step(&steps)?;
+    ensure!(
+        steps.get(auth_index + 1) == Some(publish),
+        "token selection must immediately follow authentication"
+    );
+    ensure!(publish["shell"] == "bash");
+    ensure!(publish["if"].is_null() && publish["continue-on-error"].is_null());
+    ensure!(
+        publish["env"]["CARGO_REGISTRY_TOKEN"]
+            == "${{ steps.auth.outputs.token || secrets.CARGO_REGISTRY_TOKEN }}",
+        "keep the release owner's selected-token expression"
+    );
+    ensure!(publish["env"]["SHIPPER_TOKEN_MINTED"] == "${{ steps.auth.outputs.token != '' }}");
+    Ok(())
+}
+
+#[test]
+#[cfg(unix)]
+#[serial]
+fn ci_github_actions_auth_example_selects_tokens_and_refuses_missing_credentials() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    const MINTED: &str = "auth-guide-minted-sentinel";
+    const FALLBACK: &str = "auth-guide-fallback-sentinel";
+    ci_github_actions_auth_example_keeps_explicit_fallback_control()?;
+    let steps = documented_auth_steps()?;
+    let script = publish_step(&steps)?["run"]
+        .as_str()
+        .context("documented auth publish script")?;
+    // The exact expressions and continuation setting are checked above. Feed
+    // their synthetic string results to the actual documented Bash; this is
+    // not a GitHub Actions interpreter or a real token-exchange test.
+    for (name, minted, fallback, expected, source) in [
+        (
+            "minted wins",
+            MINTED,
+            FALLBACK,
+            Some(MINTED),
+            "trusted_publishing",
+        ),
+        (
+            "failed mint with fallback",
+            "",
+            FALLBACK,
+            Some(FALLBACK),
+            "fallback_secret",
+        ),
+        (
+            "minted only",
+            MINTED,
+            "",
+            Some(MINTED),
+            "trusted_publishing",
+        ),
+        ("neither token", "", "", None, ""),
+        ("blank fallback", "", " \t\r\n", None, ""),
+        ("blank selected mint", " \t", FALLBACK, None, ""),
+    ] {
+        let runner = tempdir()?;
+        let bin = runner.path().join("bin");
+        fs::create_dir(&bin)?;
+        let spy = bin.join("shipper");
+        fs::write(
+            &spy,
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SHIPPER_AUTH_TEST_CALLS\"\ntest \"${CARGO_REGISTRY_TOKEN-}\" = \"$SHIPPER_AUTH_TEST_EXPECTED\"\n",
+        )?;
+        fs::set_permissions(&spy, fs::Permissions::from_mode(0o755))?;
+        let calls = runner.path().join("publish-calls");
+        let mut search_paths = vec![bin];
+        search_paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").context("Bash fixture search path")?,
+        ));
+        let fixture_path = std::env::join_paths(search_paths)?;
+        let selected = if minted.is_empty() { fallback } else { minted };
+        let output = Command::new("bash")
+            .current_dir(runner.path())
+            .timeout(Duration::from_secs(10))
+            .args([
+                "--noprofile",
+                "--norc",
+                "-e",
+                "-o",
+                "pipefail",
+                "-c",
+                script,
+            ])
+            .env_clear()
+            .env("PATH", fixture_path)
+            .env("CARGO_REGISTRY_TOKEN", selected)
+            .env("SHIPPER_TOKEN_MINTED", (!minted.is_empty()).to_string())
+            .env("SHIPPER_AUTH_TEST_EXPECTED", expected.unwrap_or(""))
+            .env("SHIPPER_AUTH_TEST_CALLS", &calls)
+            .output()?;
+        ensure!(
+            output.status.success() == expected.is_some(),
+            "auth branch outcome differed: {name}"
+        );
+        let stdout = String::from_utf8(output.stdout)?;
+        let stderr = String::from_utf8(output.stderr)?;
+        if expected.is_some() {
+            ensure!(fs::read_to_string(&calls)? == "publish --policy safe\n");
+            ensure!(stdout.contains(&format!("Publish token source: {source}")));
+            ensure!(stderr.is_empty());
+        } else {
+            ensure!(
+                !calls.exists(),
+                "missing-token refusal invoked publish: {name}"
+            );
+            ensure!(stderr.contains("No usable publish token"));
+            ensure!(!stdout.contains("Publish token source:"));
+        }
+        for sentinel in [MINTED, FALLBACK] {
+            ensure!(
+                !stdout.contains(sentinel) && !stderr.contains(sentinel),
+                "auth example exposed a synthetic credential"
+            );
+            if calls.exists() {
+                ensure!(!fs::read_to_string(&calls)?.contains(sentinel));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn generate(root: &Path, state_dir: &str) -> Result<(String, Vec<Value>)> {
