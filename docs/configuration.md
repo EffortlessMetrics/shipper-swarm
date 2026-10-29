@@ -152,11 +152,29 @@ Controls how many lines of stdout/stderr are captured for each publish attempt. 
 
 ```toml
 [lock]
-# Lock timeout duration (locks older than this are considered stale)
+# Minimum age for confirmed abandoned legacy lock recovery
 timeout = "1h"
 ```
 
-Shipper uses a lock file to prevent concurrent publish operations. If a lock is older than the timeout, it's considered stale and can be overridden with `--force`.
+Shipper holds an exclusive operating-system guard for cooperating publishers
+and cleanup commands. Its sidecar (`lock.guard`, or `lock_<workspace-hash>.guard`)
+is persistent; do not delete it to force acquisition. The JSON lock record
+remains readable holder metadata, and its age does not establish ownership.
+
+After acquiring the guard, Shipper can recover an abandoned same-host record
+from the current ownership protocol. Legacy records additionally need positive
+same-host, same-process-scope evidence that the holder is absent and an age
+strictly greater than `timeout`; a future timestamp never proves abandonment.
+Corrupt, foreign, and otherwise unknown records are preserved by default.
+
+`--force` may override unknown metadata only after winning the guard. It assumes
+any noncooperating legacy or foreign publisher is quiescent. It cannot steal an
+active OS guard or a positively observed live legacy holder, and does not
+bypass retained-state admission or authorize another upload. `shipper clean`
+holds the same guard throughout deletion and leaves the guard sidecar in place.
+These guarantees require cooperating processes using the same lock key on a
+filesystem with supported OS locking; they do not establish distributed or
+network-filesystem exclusion.
 
 ### Retry
 
@@ -319,7 +337,7 @@ jitter_factor = 0.5
 lines = 50
 
 [lock]
-# Lock timeout duration (locks older than this are considered stale)
+# Minimum age for confirmed abandoned legacy lock recovery
 timeout = "1h"
 
 [retry]

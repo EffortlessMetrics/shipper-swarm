@@ -21,7 +21,7 @@
 //! | `[verify]`      | [`VerifyConfig`]       | Pre-publish compilation check         |
 //! | `[readiness]`   | [`ReadinessConfig`]    | Post-publish visibility polling       |
 //! | `[output]`      | [`OutputConfig`]       | Evidence capture line count           |
-//! | `[lock]`        | [`LockConfig`]         | Distributed lock timeout              |
+//! | `[lock]`        | [`LockConfig`]         | Legacy lock recovery age              |
 //! | `[retry]`       | [`RetryConfig`]        | Retry strategy and backoff            |
 //! | `[flags]`       | [`FlagsConfig`]        | Git-dirty, ownership, etc.            |
 //! | `[parallel]`    | [`ParallelConfig`]     | Concurrent publishing                 |
@@ -871,7 +871,7 @@ jitter_factor = 0.5
 lines = 50
 
 [lock]
-# Lock timeout duration (locks older than this are considered stale)
+# Minimum age for confirmed abandoned legacy lock recovery
 timeout = "1h"
 
 [retry]
