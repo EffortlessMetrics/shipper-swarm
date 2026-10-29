@@ -156,6 +156,12 @@ readiness, durable transitions, evidence, and package outcomes. Sequential and
 parallel modules own scheduling order, dependency levels, concurrency, and
 reporter adaptation; they do not assemble independent package transitions.
 
+Both schedulers run the canonical package executor in workers and deliver one
+ordered progress queue on the host thread. Sequential mode joins its single
+package worker before admitting the next package. Worker retry waits use the same
+monotonic deadline as the remaining delay passed to the host reporter; slow
+callbacks do not hold the queue lock or control retry admission.
+
 Readiness polling is owned by the registry-client kernel. The engine chooses
 local-index fast paths and adapts poll evidence into durable events, but does
 not maintain a second HTTP polling loop. Registry configuration is validated

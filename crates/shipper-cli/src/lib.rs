@@ -6961,7 +6961,7 @@ mod tests {
     fn cli_reporter_retry_wait_without_progress_blocks_for_delay() {
         // With no progress handle installed, retry_wait falls back to the
         // legacy warn-line + sleep path. Assert it still blocks for the
-        // full delay (the engine relies on this).
+        // full remaining delay for compatibility with countdown callers.
         use std::time::Instant;
         let mut rep = CliReporter::new(true, false); // quiet to suppress stderr
         let delay = Duration::from_millis(60);

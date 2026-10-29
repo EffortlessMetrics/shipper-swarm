@@ -59,6 +59,39 @@ fn make_send_reporter() -> Arc<SendReporter> {
     Arc::new(SendReporter::default())
 }
 
+#[test]
+fn live_reporting_preserves_mixed_message_order() {
+    struct OrderedReporter(Vec<String>);
+    impl Reporter for OrderedReporter {
+        fn info(&mut self, message: &str) {
+            self.0.push(format!("info:{message}"));
+        }
+        fn warn(&mut self, message: &str) {
+            self.0.push(format!("warn:{message}"));
+        }
+        fn error(&mut self, message: &str) {
+            self.0.push(format!("error:{message}"));
+        }
+    }
+
+    let sender = make_send_reporter();
+    sender.info("attempt started");
+    sender.warn("attempt failed");
+    sender.error("failure detail");
+    sender.info("retry succeeded");
+    let mut host = OrderedReporter(Vec::new());
+    replay_buffered_messages(&mut host, &sender);
+    assert_eq!(
+        host.0,
+        [
+            "info:attempt started",
+            "warn:attempt failed",
+            "error:failure detail",
+            "info:retry succeeded",
+        ]
+    );
+}
+
 #[derive(Default)]
 struct CollectingReporter {
     infos: Vec<String>,
@@ -140,7 +173,9 @@ fn emit_retry_backoff_does_not_block_other_reporter_calls_during_sleep() {
 
     retry_thread.join().expect("join retry thread");
 
-    let infos = reporter.drain_infos();
+    let mut host = CollectingReporter::default();
+    replay_buffered_messages(&mut host, &reporter);
+    let infos = host.infos;
     assert!(
         infos.iter().any(|msg| msg == "other worker thread"),
         "concurrent info should still be recorded"
@@ -148,7 +183,7 @@ fn emit_retry_backoff_does_not_block_other_reporter_calls_during_sleep() {
 }
 
 #[test]
-fn drain_retry_waits_forwards_live_notice_before_worker_sleep_elapses() {
+fn replay_messages_forwards_live_notice_before_worker_sleep_elapses() {
     struct SignalingReporter {
         tx: Option<mpsc::Sender<Duration>>,
     }
@@ -195,7 +230,7 @@ fn drain_retry_waits_forwards_live_notice_before_worker_sleep_elapses() {
 
     let (tx, rx) = mpsc::channel();
     let mut host_reporter = SignalingReporter { tx: Some(tx) };
-    drain_retry_waits(&mut host_reporter, send_reporter.as_ref());
+    replay_buffered_messages(&mut host_reporter, send_reporter.as_ref());
 
     let forwarded_delay = rx
         .recv_timeout(Duration::from_millis(500))
@@ -6327,7 +6362,9 @@ fn reconcile_bdd_ambiguous_resolves_to_published() {
         has_reconciled_published,
         "expected PublishReconciled with Published outcome"
     );
-    let infos = reporter.drain_infos();
+    let mut host = CollectingReporter::default();
+    replay_buffered_messages(&mut host, &reporter);
+    let infos = host.infos;
     assert!(
         infos
             .iter()
@@ -6476,7 +6513,9 @@ fn reconcile_bdd_not_published_exhaustion_records_controlled_retryable_stop() {
         latest.operator_action,
         shipper_types::ReconciliationOperatorAction::RetryAllowed
     );
-    let infos = reporter.drain_infos();
+    let mut host = CollectingReporter::default();
+    replay_buffered_messages(&mut host, &reporter);
+    let infos = host.infos;
     assert!(
         infos
             .iter()
@@ -6685,7 +6724,9 @@ fn reconcile_bdd_resume_from_ambiguous_state_skips_republish() {
         has_reconciled_published,
         "expected PublishReconciled with Published outcome"
     );
-    let infos = reporter.drain_infos();
+    let mut host = CollectingReporter::default();
+    replay_buffered_messages(&mut host, &reporter);
+    let infos = host.infos;
     assert!(
         infos
             .iter()
@@ -6794,7 +6835,9 @@ fn reconcile_bdd_resume_from_ambiguous_state_still_unknown_writes_report() {
         report.records[0].operator_action,
         shipper_types::ReconciliationOperatorAction::OperatorActionRequired
     );
-    let errors = reporter.drain_errors();
+    let mut host = CollectingReporter::default();
+    replay_buffered_messages(&mut host, &reporter);
+    let errors = host.errors;
     assert!(
         errors
             .iter()
@@ -6938,7 +6981,9 @@ fn reconcile_bdd_ambiguous_resolves_to_still_unknown() {
         has_reconciled_still_unknown,
         "expected PublishReconciled with StillUnknown outcome"
     );
-    let errors = reporter.drain_errors();
+    let mut host = CollectingReporter::default();
+    replay_buffered_messages(&mut host, &reporter);
+    let errors = host.errors;
     assert!(
         errors
             .iter()

@@ -5,7 +5,6 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
 
 use anyhow::{Result, bail};
 
@@ -16,7 +15,7 @@ use crate::registry::RegistryClient;
 use crate::state::events;
 use shipper_types::{ExecutionState, PackageReceipt, PublishLevel, RuntimeOptions};
 
-use super::{Reporter, SendReporter, drain_retry_waits};
+use super::{Reporter, SendReporter, replay_buffered_messages};
 
 struct WorkerHandle {
     handle: thread::JoinHandle<PackagePublishResult>,
@@ -178,10 +177,10 @@ pub(crate) fn run_publish_level(
         }
 
         while handles.iter().any(|handle| !handle.is_finished()) {
-            drain_retry_waits(reporter, send_reporter.as_ref());
-            thread::sleep(Duration::from_millis(25));
+            send_reporter.wait_for_messages();
+            replay_buffered_messages(reporter, send_reporter.as_ref());
         }
-        drain_retry_waits(reporter, send_reporter.as_ref());
+        replay_buffered_messages(reporter, send_reporter.as_ref());
 
         let mut join_failures = 0;
         for handle in handles {
