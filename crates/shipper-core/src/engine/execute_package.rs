@@ -785,10 +785,19 @@ pub(crate) fn publish_package_with_timeout(
         log.clear();
     }
 
-    let (mut attempt, was_uploaded, ambiguous_prior, was_pending_initially) = {
+    let (mut attempt, was_uploaded, ambiguous_prior, check_existing_version) = {
         let was_uploaded = matches!(progress.state, PackageState::Uploaded);
-        let was_pending_initially =
-            !was_uploaded && matches!(&progress.state, PackageState::Pending);
+        // Registry visibility may have changed between invocations. A retained
+        // retryable failure needs the same pre-attempt check as pending work;
+        // keep Ambiguous and Uploaded on their dedicated reconciliation paths.
+        let check_existing_version = matches!(
+            &progress.state,
+            PackageState::Pending
+                | PackageState::Failed {
+                    class: ErrorClass::Retryable,
+                    ..
+                }
+        );
         let ambiguous_prior = match &progress.state {
             PackageState::Ambiguous { message } => Some(message.clone()),
             PackageState::Failed {
@@ -801,7 +810,7 @@ pub(crate) fn publish_package_with_timeout(
             progress.attempts,
             was_uploaded,
             ambiguous_prior,
-            was_pending_initially,
+            check_existing_version,
         )
     };
 
@@ -1116,7 +1125,7 @@ pub(crate) fn publish_package_with_timeout(
         }
     }
 
-    if was_pending_initially {
+    if check_existing_version {
         match reg.version_exists(&p.name, &p.version) {
             Ok(true) => {
                 reporter.info(&format!(
@@ -1144,7 +1153,7 @@ pub(crate) fn publish_package_with_timeout(
                 ) {
                     return PackagePublishResult {
                         result: Err(anyhow::anyhow!(
-                            "{}@{}: failed to mark pending package as already published: {err}",
+                            "{}@{}: failed to mark package as already published: {err}",
                             p.name,
                             p.version
                         )),

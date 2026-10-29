@@ -9,6 +9,7 @@ const SECRET: &str = "typed-timeout-secret-sentinel";
 const CHILD: &str = "engine::tests::timeout_reconciliation::timed_cargo_child";
 
 #[test]
+#[serial]
 #[ignore = "fake Cargo subprocess invoked by the timeout reconciliation tests"]
 fn timed_cargo_child() {
     let root = std::env::current_dir().expect("fixture root");
