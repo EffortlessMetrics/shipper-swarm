@@ -2,7 +2,7 @@
 source: crates/shipper-cli/tests/e2e_expanded.rs
 expression: normalize_stderr(&stdout)
 ---
-Print GitHub Actions workflow snippet
+Print fresh-publish GitHub Actions steps for jobs.publish.steps
 
 Usage: shipper-cli ci github-actions [OPTIONS]
 

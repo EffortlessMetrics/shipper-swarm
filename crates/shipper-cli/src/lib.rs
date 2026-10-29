@@ -46,6 +46,7 @@ use shipper_core::types::{
     ReleasePlan, ReleaseSpec, RuntimeOptions,
 };
 
+mod ci;
 mod containment;
 mod doctor;
 mod output;
@@ -633,22 +634,26 @@ EXAMPLES:
         long_about = "\
 Print a ready-to-paste CI configuration snippet for a supported platform.
 
-The snippet covers the resumability wiring: it restores `.shipper/` from
-cache and from the previous run's artifact, runs `shipper publish`, and
-saves `.shipper/` again with `if: always()` so an interrupted run can be
-resumed from the uploaded state. It also shows where the registry token
-goes. It is printed to stdout and reads nothing from your workspace, so
-it works from any directory.
+GitHub Actions output is a YAML step sequence for a fresh, approved publish
+and an unconditional upload of hidden Shipper evidence. Insert it under
+`jobs.publish.steps` in a complete workflow. Retained execution evidence
+requires a separately selected recovery operation; the generated steps
+refuse to treat existing state as permission to publish again.
 
-It is a starting point, not a full release job. It does not include
-`shipper plan` / `shipper preflight` proof steps or the Trusted
-Publishing token-mint step — for a complete workflow, including
+Use a literal checkout-relative `--state-dir`; spaces are supported. The
+Cargo workspace must be at the checkout root. The snippet does not copy
+generator-side manifest paths, registry selections or other runtime flags.
+Other providers retain their platform-specific starting configurations.
+
+The output is printed to stdout. Install Shipper and run plan and
+`preflight --preflight-only` before the GitHub publish steps. For a complete
+workflow and the separately owned Trusted Publishing example, including
 `rust-lang/crates-io-auth-action@v1`, see
 docs/how-to/run-in-github-actions.md.
 
 EXAMPLES:
-    # Write a GitHub Actions release job to a workflow file:
-    shipper ci github-actions > .github/workflows/release.yml
+    # Save steps outside .github/workflows, then insert under jobs.publish.steps:
+    shipper ci github-actions > shipper-release-steps.yml
 
     # Preview the GitLab CI equivalent:
     shipper ci gitlab
@@ -903,7 +908,7 @@ EXAMPLES:
 
 #[derive(Subcommand, Debug)]
 enum CiCommands {
-    /// Print GitHub Actions workflow snippet.
+    /// Print fresh-publish GitHub Actions steps for jobs.publish.steps.
     #[command(name = "github-actions")]
     GitHubActions,
     /// Print GitLab CI workflow snippet.
@@ -5885,39 +5890,7 @@ fn run_ci(ci_cmd: CiCommands, state_dir: &Path, workspace_root: &Path) -> Result
 
     match ci_cmd {
         CiCommands::GitHubActions => {
-            println!("# GitHub Actions workflow snippet for Shipper");
-            println!("# Add these steps to your workflow file");
-            println!();
-            println!("# Restore Shipper State (cache for faster restores)");
-            println!("- name: Restore Shipper State");
-            println!("  uses: actions/cache@v3");
-            println!("  with:");
-            println!("    path: {}/", abs_state.display());
-            println!("    key: shipper-${{{{ github.sha }}}}");
-            println!("    restore-keys: |");
-            println!("      shipper-");
-            println!();
-            println!("# Restore Shipper State (artifact for resumability)");
-            println!("- name: Restore Shipper State Artifact");
-            println!("  uses: actions/download-artifact@v4");
-            println!("  with:");
-            println!("    name: shipper-state");
-            println!("    path: {}/", abs_state.display());
-            println!("  continue-on-error: true");
-            println!();
-            println!("# Run shipper publish (will resume if state exists)");
-            println!("- name: Publish Crates");
-            println!("  run: shipper publish --quiet");
-            println!("  env:");
-            println!("    CARGO_REGISTRY_TOKEN: ${{{{ secrets.CARGO_REGISTRY_TOKEN }}}}");
-            println!();
-            println!("# Save Shipper State (even if publish fails)");
-            println!("- name: Save Shipper State");
-            println!("  if: always()");
-            println!("  uses: actions/upload-artifact@v3");
-            println!("  with:");
-            println!("    name: shipper-state");
-            println!("    path: {}/", abs_state.display());
+            print!("{}", ci::github_actions_steps(state_dir)?);
         }
         CiCommands::GitLab => {
             println!("# GitLab CI snippet for Shipper");

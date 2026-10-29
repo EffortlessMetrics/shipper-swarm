@@ -1030,7 +1030,8 @@ fn inspect_receipt_command_displays_new_fields() {
 }
 
 #[test]
-fn ci_github_actions_includes_cache() {
+#[serial_test::serial]
+fn ci_github_actions_retains_hidden_evidence_without_restoring_state() {
     let td = tempdir().expect("tempdir");
     create_workspace(td.path());
 
@@ -1047,10 +1048,16 @@ fn ci_github_actions_includes_cache() {
         .clone();
 
     let stdout = String::from_utf8(out).expect("utf8");
-    // Check that cache configuration is included
-    assert!(stdout.contains("actions/cache@v3"));
-    assert!(stdout.contains("shipper-${{"));
-    assert!(stdout.contains("restore-keys"));
+    let steps: serde_yaml::Value = serde_yaml::from_str(&stdout).expect("step YAML");
+    let steps = steps.as_sequence().expect("step sequence");
+    assert_eq!(steps.len(), 2);
+    assert_eq!(steps[0]["env"]["SHIPPER_STATE_DIR"], "./.shipper");
+    assert_eq!(steps[1]["uses"], "actions/upload-artifact@v7");
+    assert_eq!(steps[1]["if"], "always()");
+    assert_eq!(steps[1]["with"]["include-hidden-files"], true);
+    assert_eq!(steps[1]["with"]["path"], "./.shipper/");
+    assert!(!stdout.contains("actions/cache"));
+    assert!(!stdout.contains("actions/download-artifact"));
 }
 
 #[test]
