@@ -7431,7 +7431,9 @@ fn run_mode_parity_case(
             )
         }
     });
-    let error = result.as_ref().err().map(ToString::to_string);
+    // Persistence errors retain their source chain; inspect that chain rather
+    // than requiring the outer context to flatten its underlying I/O cause.
+    let error = result.as_ref().err().map(|error| format!("{error:#}"));
     let ok = result.is_ok();
     let receipts = result.as_ref().ok().cloned().unwrap_or_default();
 
