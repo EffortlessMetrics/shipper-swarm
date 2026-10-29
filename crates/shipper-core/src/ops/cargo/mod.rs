@@ -25,6 +25,16 @@ pub struct CargoOutput {
     pub timed_out: bool,
 }
 
+/// Typed completeness stays internal so public CargoOutput struct literals remain
+/// compatible. Engine decisions must not parse the human omission summary.
+pub(crate) struct CapturedCargoPublish {
+    pub(crate) output: CargoOutput,
+    pub(crate) capture: process::CaptureStatus,
+}
+
+pub(crate) const PUBLISH_CAPTURE_OMITTED: &str =
+    "[shipper: Cargo diagnostics omitted after capture loss]";
+
 fn tail_lines(s: &str, n: usize) -> String {
     sanitize_tail_lines(s, n)
 }
@@ -126,6 +136,9 @@ pub fn cargo_install_smoke(
     })
 }
 
+/// Publish with bounded diagnostic tails. If either stream exceeds a capture
+/// limit or cannot be read, both tails are omitted and stderr contains a fixed
+/// summary (unless output_lines is zero). Exit status and timeout stay intact.
 pub fn cargo_publish(
     workspace_root: &Path,
     package_name: &str,
@@ -135,6 +148,27 @@ pub fn cargo_publish(
     output_lines: usize,
     timeout: Option<Duration>,
 ) -> Result<CargoOutput> {
+    Ok(cargo_publish_with_capture(
+        workspace_root,
+        package_name,
+        registry_name,
+        allow_dirty,
+        no_verify,
+        output_lines,
+        timeout,
+    )?
+    .output)
+}
+
+pub(crate) fn cargo_publish_with_capture(
+    workspace_root: &Path,
+    package_name: &str,
+    registry_name: &str,
+    allow_dirty: bool,
+    no_verify: bool,
+    output_lines: usize,
+    timeout: Option<Duration>,
+) -> Result<CapturedCargoPublish> {
     let start = Instant::now();
     let mut args: Vec<&str> = Vec::new();
     args.push("publish");
@@ -154,25 +188,72 @@ pub fn cargo_publish(
         args.push("--no-verify");
     }
 
-    let output =
-        process::run_command_with_timeout(&cargo_program(), &args, workspace_root, timeout)
-            .context("failed to execute cargo publish; is Cargo installed?")?;
+    let captured = process::run_command_with_publish_capture(
+        &cargo_program(),
+        &args,
+        workspace_root,
+        timeout,
+        output_lines,
+    )
+    .context("failed to execute cargo publish; is Cargo installed?")?;
+
+    Ok(finish_publish_capture(
+        captured,
+        output_lines,
+        start.elapsed(),
+    ))
+}
+
+fn finish_publish_capture(
+    captured: process::CapturedCommandOutput,
+    output_lines: usize,
+    duration: Duration,
+) -> CapturedCargoPublish {
+    let mut capture = captured.capture;
+    let output = captured.output;
 
     let exit_code = output.exit_code;
     let stdout = output.stdout;
     let stderr = output.stderr;
     let timed_out = output.timed_out;
 
-    let duration = start.elapsed();
-
-    Ok(CargoOutput {
-        exit_code,
-        stdout_tail: tail_lines(&stdout, output_lines),
-        stderr_tail: tail_lines(&stderr, output_lines),
-        duration,
-        timed_out,
-    })
+    let mut stdout_tail = tail_lines(&stdout, output_lines);
+    let mut stderr_tail = tail_lines(&stderr, output_lines);
+    // Redaction may expand short values into longer placeholders. Its bounded
+    // input bounds temporary allocation; also cap the final persisted payload.
+    if stdout_tail.len() > process::PUBLISH_TAIL_BYTES {
+        capture
+            .stdout
+            .get_or_insert(process::CaptureLoss::TailBytes);
+    }
+    if stderr_tail.len() > process::PUBLISH_TAIL_BYTES {
+        capture
+            .stderr
+            .get_or_insert(process::CaptureLoss::TailBytes);
+    }
+    if !capture.is_complete() {
+        // Do not expose a surviving suffix/continuation from either stream.
+        stdout_tail.clear();
+        stderr_tail = if output_lines == 0 {
+            String::new()
+        } else {
+            PUBLISH_CAPTURE_OMITTED.into()
+        };
+    }
+    CapturedCargoPublish {
+        output: CargoOutput {
+            exit_code,
+            stdout_tail,
+            stderr_tail,
+            duration,
+            timed_out,
+        },
+        capture,
+    }
 }
+
+#[cfg(test)]
+mod bounded_capture_tests;
 
 pub fn cargo_publish_dry_run_workspace(
     workspace_root: &Path,

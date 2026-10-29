@@ -55,9 +55,32 @@ The canonical package executor treats `CargoOutput::timed_out` as
 establish whether the registry accepted the upload. This holds when retained
 tails contain Retryable/Permanent patterns and when the configured tail is
 empty. Both schedulers use this decision and the same three-way registry
-reconciliation. Ordinary non-timeout Cargo exits retain their output-based
+reconciliation. Ordinary non-timeout Cargo exits with complete tails retain their output-based
 classification. This rule does not change process capture, memory limits, or
 descendant cleanup guarantees.
+
+## Publish diagnostic capture is bounded and loss is explicit
+
+Cargo publication, including rehearsal, opts into bounded diagnostic retention.
+Each stream retains at most 256 KiB of payload, a 64 KiB partial line, and 4096
+line entries while reading fixed 8 KiB chunks. Normal eviction outside the
+requested last-N-lines window is intentional tailing. Capacity or read loss is
+sticky: both diagnostic streams are suppressed in favor of a fixed omission
+summary, so discarded authorization context cannot leave a credential suffix or
+continuation in evidence. UTF-8 decoding and redaction also obey the final payload
+limit. `output_lines=0` intentionally returns empty tails; it is not capacity loss.
+
+The canonical executor consumes typed completeness, not the summary text. An
+unsuccessful incomplete result enters Ambiguous reconciliation after the typed
+timeout check. Cargo success still establishes Uploaded and proceeds through
+readiness. Attempt counts and registry outcome authority do not change. Rehearsal
+reports incomplete failure as Ambiguous without adding a retry policy. Public
+CargoOutput fields remain compatible.
+
+Generic complete-output capture and structured metadata remain complete. Yank,
+install and dry-run capture are unchanged. This contract bounds retained publish
+diagnostics, not descendant lifetimes or inherited-pipe EOF; cleanup bounds remain
+separate acceptance in #412.
 
 ## Readiness evidence matches readiness events
 
