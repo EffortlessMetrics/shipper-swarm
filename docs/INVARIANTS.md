@@ -13,6 +13,49 @@ A serialized view of the current `ExecutionState`, rewritten after every package
 ### `receipt.json` — summary
 Written once at end-of-run. Summarizes packages, plan, registry, environment, and event log location. Intended for CI artifacts and audit consumers.
 
+## Event order and wall-clock time
+
+**Append order is authoritative.** Replay reads each JSONL file in line order.
+The writer, reader, package filter, and `shipper inspect-events` preserve that
+order. `inspect-events --follow` continues from the appended tail; it does not
+merge events by timestamp. Separate preflight audit logs remain separate logs.
+
+**Each package's causal sequence is recorded in append order.** An attempt
+precedes its outcome, and a retry decision precedes the next attempt. Workers
+for different packages may interleave. A worker can observe an event, wait for
+the shared event-log mutex, and append it after another worker's newer
+observation. `EventLog` preserves the supplied sequence; it does not repair an
+invalid causal sequence supplied by an embedding caller.
+
+**Timestamps are original wall-clock observations.** They are not sequence
+numbers. Delayed appends can invert timestamps across packages, and clock
+rollback can invert them within a package. Do not sort, clamp, or replace
+timestamps to reconstruct execution. JSON output preserves the recorded
+timestamp values and precision; human text may format them for display.
+
+For a nonempty event log, rebuilt `ExecutionState.created_at` is the first
+appended event's timestamp, and rebuilt `updated_at` is the last appended
+event's timestamp. They are **not** the minimum and maximum timestamps.
+`updated_at` can precede `created_at`. An empty rebuild with a fallback plan ID
+uses the rebuild time for both. A rebuilt package's `last_updated_at` comes from
+the last appended event that updates that package's projection. Live state
+creation and ordinary transitions sample the wall clock at projection update.
+Cleanup-hold persistence fallback can retain the observed attempt end time
+instead. Rebuilding does not promise identical live projection metadata
+timestamps.
+
+Attempt timestamps follow the existing completion semantics without clock
+normalization: a recorded failure can end before its attempt's start after clock
+rollback, and a later retry decision does not move that end time. Replaying a
+`StillUnknown` reconciliation can replace the earlier failure end with the
+reconciliation event time, while the live executor retains the failure end.
+Live and rebuilt attempt ends therefore need not be identical. Use package and
+attempt identity to interpret causality.
+Completed attempt details follow replay finalization; still-open attempts keep
+the existing deterministic fallback ordering at the end of replay. The entire
+`attempt_history` array is not a globally chronological sequence. These rules
+do not introduce a logical clock or change artifact schemas.
+
 ## The invariant
 
 > The set of `package_published` events in `events.jsonl` MUST equal the set of packages with `state.state == "published"` in `state.json`.

@@ -2482,31 +2482,85 @@ fn empty_strings_in_all_string_fields_roundtrip() {
 }
 
 #[test]
-fn timestamp_ordering_preserved_across_append_batches() {
-    let td = tempdir().expect("tempdir");
-    let path = td.path().join("events.jsonl");
-
-    for batch in 0..5u32 {
-        let mut log = EventLog::new();
-        for i in 0..3u32 {
-            log.record(make_event(
-                EventType::PackagePublished {
-                    duration_ms: u64::from(batch * 10 + i),
+#[serial_test::serial]
+fn append_order_preserves_original_timestamps_across_batches() {
+    for (case, seconds) in [
+        ("ordered input", [10, 20, 30, 40]),
+        ("inverted workers", [20, 10, 40, 30]),
+        ("delayed older batch", [30, 40, 10, 20]),
+        ("clock rollback", [40, 30, 20, 10]),
+    ] {
+        let td = tempdir().expect("tempdir");
+        let path = td.path().join("events.jsonl");
+        // Construct observations before recording either batch. A later
+        // append must not replace an older observation with append time.
+        let original: Vec<_> = seconds
+            .into_iter()
+            .enumerate()
+            .map(|(index, second)| PublishEvent {
+                timestamp: fixed_time()
+                    + chrono::Duration::seconds(second)
+                    + chrono::Duration::nanoseconds(123_456_789),
+                event_type: if index < 2 {
+                    EventType::PackageAttempted {
+                        attempt: 1,
+                        command: "cargo publish".to_string(),
+                        max_attempts: 1,
+                    }
+                } else {
+                    EventType::PackagePublished {
+                        duration_ms: index as u64,
+                    }
                 },
-                &format!("b{batch}-p{i}@1.0.0"),
-            ));
-        }
-        log.write_to_file(&path).expect("write");
-    }
+                package: format!("{}@1.0.0", if index % 2 == 0 { "a" } else { "b" }),
+            })
+            .collect();
 
-    let loaded = EventLog::read_from_file(&path).expect("read");
-    assert_eq!(loaded.len(), 15);
-    let events = loaded.all_events();
-    for i in 1..events.len() {
-        assert!(
-            events[i].timestamp >= events[i - 1].timestamp,
-            "event {i} timestamp should be >= event {} timestamp",
-            i - 1
+        let mut expected_bytes = Vec::new();
+        for batch in original.chunks(2) {
+            let mut log = EventLog::new();
+            for event in batch {
+                log.record(event.clone());
+                serde_json::to_writer(&mut expected_bytes, event).expect("serialize witness");
+                expected_bytes.push(b'\n');
+            }
+            assert_eq!(
+                serde_json::to_value(log.all_events()).expect("recorded events"),
+                serde_json::to_value(batch).expect("original batch"),
+                "{case}: record must retain supplied observations"
+            );
+            log.write_to_file(&path).expect("append batch");
+            assert_eq!(
+                fs::read(&path).expect("read appended bytes"),
+                expected_bytes,
+                "{case}: append must preserve the prefix and batch order"
+            );
+        }
+
+        let loaded = EventLog::read_from_file(&path).expect("read events");
+        assert_eq!(
+            serde_json::to_value(loaded.all_events()).expect("loaded events"),
+            serde_json::to_value(&original).expect("original events"),
+            "{case}: read must preserve order, timestamps and payloads"
+        );
+        for package in ["a@1.0.0", "b@1.0.0"] {
+            let expected: Vec<_> = original
+                .iter()
+                .filter(|event| event.package == package)
+                .collect();
+            assert_eq!(
+                serde_json::to_value(loaded.events_for_package(package)).expect("filtered"),
+                serde_json::to_value(expected).expect("original package events"),
+                "{case}: filtering must retain the package's causal sequence"
+            );
+        }
+
+        let roundtrip_path = td.path().join("roundtrip.jsonl");
+        loaded.write_to_file(&roundtrip_path).expect("roundtrip");
+        assert_eq!(
+            fs::read(roundtrip_path).expect("roundtrip bytes"),
+            expected_bytes,
+            "{case}: Shipper-emitted JSONL must roundtrip byte-for-byte"
         );
     }
 }

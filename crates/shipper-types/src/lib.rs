@@ -1249,6 +1249,10 @@ pub struct PackageProgress {
     pub version: String,
     pub attempts: u32,
     pub state: PackageState,
+    /// Ordinary live transitions sample the projection update time. Cleanup-hold
+    /// persistence fallback can retain the observed attempt end time instead.
+    /// Event replay uses the last appended event that updates this package;
+    /// this timestamp need not increase.
     pub last_updated_at: DateTime<Utc>,
 }
 
@@ -1263,7 +1267,14 @@ pub struct AttemptDetail {
     pub version: String,
     pub attempt: u32,
     pub max_attempts: u32,
+    /// Original wall-clock start observation, not a sequence number.
     pub started_at: DateTime<Utc>,
+    /// End observation selected by the live or replay completion path, which
+    /// can precede `started_at` after clock rollback. Replaying a `StillUnknown`
+    /// reconciliation can replace an earlier failure end with the reconciliation
+    /// event time, while the live detail retains the failure end. These values
+    /// are not universally identical. Replay uses the start time for an
+    /// unfinished attempt without an end observation.
     pub ended_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_class: Option<ErrorClass>,
@@ -1308,10 +1319,19 @@ pub struct ExecutionState {
     pub state_version: String,
     pub plan_id: String,
     pub registry: Registry,
+    /// Live projection creation time. Rebuilding a nonempty log uses the
+    /// first appended event's timestamp, not the minimum timestamp.
     pub created_at: DateTime<Utc>,
+    /// Ordinary live transitions sample the wall clock at projection update;
+    /// cleanup-hold persistence fallback can retain the observed attempt end.
+    /// Rebuilding a nonempty log uses the last appended event's timestamp,
+    /// not the maximum; this can precede `created_at`. An empty rebuild uses
+    /// the rebuild time for both fields.
     pub updated_at: DateTime<Utc>,
     /// Per-attempt timeline written during publish, before final receipt
     /// construction. Defaults empty so older state files remain readable.
+    /// Package and attempt identity establish causal relationships; this
+    /// array is not guaranteed to be sorted by its wall-clock fields.
     #[serde(default)]
     pub attempt_history: Vec<AttemptDetail>,
     pub packages: BTreeMap<String, PackageProgress>,
@@ -1607,6 +1627,9 @@ pub struct Receipt {
 ///
 /// Events are written to an append-only JSONL file during publishing.
 /// This provides a detailed timeline for debugging and auditing.
+/// Append order is authoritative for replay and preserves each package's
+/// causal event sequence. Events from different workers can interleave;
+/// their wall-clock timestamps do not establish a global sequence.
 ///
 /// # Example
 ///
@@ -1622,6 +1645,9 @@ pub struct Receipt {
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublishEvent {
+    /// Original wall-clock observation time, which can precede the append or
+    /// an earlier line's timestamp. Delayed workers and clock rollback do not
+    /// cause this value to be replaced, clamped, or used to reorder the log.
     pub timestamp: DateTime<Utc>,
     pub event_type: EventType,
     pub package: String, // "name@version"

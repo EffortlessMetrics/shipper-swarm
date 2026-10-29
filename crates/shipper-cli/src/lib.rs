@@ -601,6 +601,10 @@ Reads `<state-dir>/events.jsonl`, which is the truth source for publish and
 resume state transitions. Use `--follow` while another terminal is running
 publish or resume.
 
+Events are printed in append order within each log, preserving their original
+wall-clock timestamps. Timestamps can move backward; they do not define replay
+order.
+
 EXAMPLES:
     # Print the current event log:
     shipper inspect-events
@@ -8272,6 +8276,81 @@ mode = "fast"
         assert!(!second.contains(r#""type":"plan_created""#));
         assert_eq!(second.lines().count(), 1);
         assert!(next_offset > offset);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn inspect_events_follow_preserves_append_order_and_original_timestamps() {
+        let td = tempdir().expect("tempdir");
+        let events_path = td.path().join("events.jsonl");
+        let original = [
+            PublishEvent {
+                timestamp: "2025-01-01T00:00:30Z".parse().expect("timestamp"),
+                event_type: EventType::PackageStarted {
+                    name: "a".to_string(),
+                    version: "1.0.0".to_string(),
+                },
+                package: "a@1.0.0".to_string(),
+            },
+            PublishEvent {
+                timestamp: "2025-01-01T00:00:10Z".parse().expect("timestamp"),
+                event_type: EventType::PackageStarted {
+                    name: "b".to_string(),
+                    version: "1.0.0".to_string(),
+                },
+                package: "b@1.0.0".to_string(),
+            },
+            PublishEvent {
+                timestamp: "2025-01-01T00:00:20Z".parse().expect("timestamp"),
+                event_type: EventType::PackagePublished { duration_ms: 1 },
+                package: "a@1.0.0".to_string(),
+            },
+        ];
+        let mut log = shipper_core::state::events::EventLog::new();
+        log.record(original[0].clone());
+        log.write_to_file(&events_path).expect("first append");
+        let mut json = Vec::new();
+        let offset =
+            write_event_lines_since(&events_path, 0, "json", &mut json).expect("first poll");
+
+        log.clear();
+        // An older observation arrives after the first follow poll. The
+        // package a outcome also reflects clock rollback from its start.
+        for event in &original[1..] {
+            log.record(event.clone());
+        }
+        log.write_to_file(&events_path).expect("delayed append");
+        let next_offset =
+            write_event_lines_since(&events_path, offset, "json", &mut json).expect("second poll");
+        let mut expected_json = Vec::new();
+        for event in &original {
+            serde_json::to_writer(&mut expected_json, event).expect("serialize witness");
+            expected_json.push(b'\n');
+        }
+        assert_eq!(json, expected_json);
+        assert_eq!(next_offset, expected_json.len() as u64);
+        assert_eq!(
+            write_event_lines_since(&events_path, next_offset, "json", &mut json)
+                .expect("unchanged poll"),
+            next_offset
+        );
+        assert_eq!(
+            json, expected_json,
+            "follow must not replay the prior prefix"
+        );
+
+        let mut text = Vec::new();
+        write_event_lines_since(&events_path, 0, "text", &mut text).expect("text poll");
+        let text = String::from_utf8(text).expect("text UTF-8");
+        let lines: Vec<_> = text.lines().collect();
+        assert_eq!(lines.len(), 3);
+        for (line, prefix) in lines.iter().zip([
+            "2025-01-01T00:00:30Z a@1.0.0 package_started - ",
+            "2025-01-01T00:00:10Z b@1.0.0 package_started - ",
+            "2025-01-01T00:00:20Z a@1.0.0 package_published - ",
+        ]) {
+            assert!(line.starts_with(prefix), "{line}");
+        }
     }
 
     #[test]

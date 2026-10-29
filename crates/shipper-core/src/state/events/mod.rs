@@ -12,6 +12,18 @@
 //! [`shipper_types::PublishEvent`]. The output appends new events to existing
 //! logs.
 //!
+//! # Ordering and time
+//!
+//! Insertion order, and then JSONL line order, is the authoritative replay
+//! order. Callers record each package's causal sequence in that order; events
+//! from different workers can interleave. The log does not sort or repair a
+//! caller's sequence.
+//!
+//! Each event retains its original wall-clock observation timestamp. An event
+//! can be created before another worker's event but appended later, and the
+//! clock can move backward even within one package. Timestamps are neither
+//! sequence numbers nor a reason to reorder events.
+//!
 //! The canonical file name for the event log is [`EVENTS_FILE`], resolved from
 //! a state directory by [`events_path`].
 //!
@@ -122,9 +134,12 @@ pub fn preflight_only_events_paths(state_dir: &Path) -> Result<Vec<PathBuf>> {
 
 /// Append-only event log for publish operations.
 ///
-/// Events are stored in-memory in insertion order. An indeterminate append,
-/// flush, or file-sync failure stops further writes through this instance and
-/// retains its pending events, including across [`Self::clear`].
+/// Events are stored in-memory in insertion order, preserving their supplied
+/// timestamps even when those timestamps decrease.
+///
+/// An indeterminate append, flush, or file-sync failure stops further writes
+/// through this instance and retains its pending events, including across
+/// [`Self::clear`].
 #[derive(Debug, Default)]
 pub struct EventLog {
     events: Vec<PublishEvent>,
@@ -190,7 +205,8 @@ impl EventLog {
 
     /// Record a new event.
     ///
-    /// Added events are appended and remain in order.
+    /// Added events are appended and remain in order. The supplied observation
+    /// timestamp is preserved; it is not replaced by the time of this call.
     pub fn record(&mut self, event: PublishEvent) {
         self.events.push(event);
     }
@@ -198,6 +214,7 @@ impl EventLog {
     /// Write all recorded events to a file in JSONL format.
     ///
     /// The file is opened in append mode and existing contents are preserved.
+    /// Recorded events are written in insertion order without sorting by time.
     /// Success requires both flushing the buffered JSONL and synchronizing the
     /// underlying file. A returned error can leave complete or partial appended
     /// bytes. Once an append has been attempted, any error stops later writes
@@ -263,7 +280,8 @@ impl EventLog {
 
     /// Read all events from a JSONL file.
     ///
-    /// Returns an empty log when the file does not exist.
+    /// Returns an empty log when the file does not exist. Events retain file
+    /// order and their recorded timestamp values, including clock rollback.
     pub fn read_from_file(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::new());
@@ -292,7 +310,8 @@ impl EventLog {
 
     /// Get all events for a specific package.
     ///
-    /// Matching is exact against the `package` field.
+    /// Matching is exact against the `package` field and preserves the matching
+    /// events' relative append order.
     pub fn events_for_package(&self, package: &str) -> Vec<&PublishEvent> {
         self.events
             .iter()
@@ -300,7 +319,7 @@ impl EventLog {
             .collect()
     }
 
-    /// Get all recorded events.
+    /// Get all recorded events in append order, without timestamp sorting.
     pub fn all_events(&self) -> &[PublishEvent] {
         &self.events
     }

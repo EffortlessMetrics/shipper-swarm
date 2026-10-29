@@ -50,10 +50,20 @@ jq -c '.' .shipper/events.jsonl
 ```
 
 Each line is one JSON event with:
-- `timestamp` — RFC3339 UTC
+
+- `timestamp` — original RFC3339 UTC wall-clock observation time
 - `event_type.type` — variant name (`package_started`, `package_published`, `preflight_complete`, etc.)
 - `package` — "all" or "<name>@<version>"
 - Event-specific payload under `event_type.*`
+
+Events appear in append order, which is also replay order. Delayed workers and
+clock rollback can make a later line's timestamp earlier than a preceding
+line's timestamp, including within one package. Keep line order when tracing
+attempts, outcomes, and retries; sorting by `timestamp` changes the history.
+`shipper inspect-events --follow` prints newly appended events in the same
+order. Use `--format json` to retain the recorded timestamp precision. See the
+[ordering contract](../INVARIANTS.md#event-order-and-wall-clock-time) for the
+distinct live and rebuilt state timestamp semantics.
 
 ### Count events by type
 
