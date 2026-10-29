@@ -116,7 +116,7 @@ execution does not define another JSON result envelope.
 | `shipper resume` | Continue from the last persisted state | Yes |
 | `shipper rehearse` | Publish the plan to an alternate registry and verify it there | Yes (`rehearsal.json`, events) |
 | `shipper status` | Compare local versions to the registry; `--watch` and `--durable` are separate local-evidence modes | No |
-| `shipper doctor` | Environment / auth / connectivity diagnostics | No |
+| `shipper doctor` | Environment / auth / connectivity diagnostics | No retained state (disposable directory-access probe) |
 | `shipper inspect-events` | View the event log | No |
 | `shipper inspect-receipt` | View the end-of-run receipt | No |
 | `shipper clean` | Clean `.shipper/` state files | Yes (destructive) |
@@ -277,7 +277,11 @@ Depending on what that command can actually establish, the outcome may carry:
 - paths to evidence the command actually retained.
 
 `doctor` summarizes passed, failed, skipped, and unknown checks, then chooses a
-reason-bearing next action. `preflight` reports `PROVEN`, `NOT PROVEN`, or
+reason-bearing next action. Its state-directory check rejects files and blocking
+parent components, reports missing or unobservable paths as unproven, and tests
+effective access only in an existing directory. See
+[state-path diagnostics](state-files.md#doctor-state-path-diagnostics) for the
+probe and JSON observations. `preflight` reports `PROVEN`, `NOT PROVEN`, or
 `FAILED`; no label alone authorizes a live publish, so follow its typed next
 action and the release-authority process. `publish`, `resume`, and durable
 status render their human guidance from the same private outcome object used by
