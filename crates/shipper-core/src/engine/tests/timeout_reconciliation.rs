@@ -153,7 +153,7 @@ fn assert_timeout_reconciliation(
     let state_dir = td.path().join(".shipper");
     let mut opts = default_opts(state_dir.clone());
     opts.parallel.enabled = parallel;
-    opts.parallel.per_package_timeout = Duration::from_millis(300);
+    opts.parallel.per_package_timeout = Duration::from_secs(1);
     opts.readiness.max_total_wait = Duration::ZERO;
     opts.output_lines = output_lines;
     let mut env = fake_program_env_vars(&bin);

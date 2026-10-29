@@ -37,7 +37,7 @@ jitter_factor = 0.5
 lines = 50
 
 [lock]
-# Lock timeout duration (locks older than this are considered stale)
+# Minimum age for confirmed abandoned legacy lock recovery
 timeout = "1h"
 
 [retry]
