@@ -16,6 +16,7 @@ const STDOUT_SECRET: &str = "noisy-stdout-secret-sentinel";
 const STDERR_SECRET: &str = "noisy-stderr-secret-sentinel";
 
 #[test]
+#[serial_test::serial]
 #[ignore = "fake Cargo subprocess invoked by the noisy-output CLI tests"]
 fn noisy_cargo_child() {
     // The old runner can block this helper behind a full pipe. Its own watchdog
@@ -34,8 +35,14 @@ fn noisy_cargo_child() {
     writeln!(calls, "publish").expect("record publish");
     let mut stdout = std::io::stdout().lock();
     let mut stderr = std::io::stderr().lock();
-    let out = format!("{}\n", "O".repeat(4095));
-    let err = format!("{}\n", "E".repeat(4095));
+    let oversized = std::env::var_os("SHIPPER_NOISY_OVERSIZED").is_some();
+    let separator = if oversized { "" } else { "\n" };
+    let out = format!("{}{separator}", "O".repeat(4095));
+    let err = format!("{}{separator}", "E".repeat(4095));
+    if oversized {
+        write!(stdout, "Authorization: Bearer ").unwrap();
+        write!(stderr, "Token=").unwrap();
+    }
     for _ in 0..256 {
         stdout.write_all(out.as_bytes()).unwrap();
         stderr.write_all(err.as_bytes()).unwrap();
@@ -147,7 +154,7 @@ fn create_fixture(root: &Path) -> PathBuf {
     }
 }
 
-fn publish_with_noisy_cargo(parallel: bool) {
+fn publish_with_noisy_cargo(parallel: bool, oversized: bool) {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     let proxy = create_fixture(root);
@@ -191,6 +198,11 @@ fn publish_with_noisy_cargo(parallel: bool) {
             std::env::current_exe().unwrap(),
         )
         .env("SHIPPER_NOISY_FIXTURE_ROOT", root);
+    if oversized {
+        command.env("SHIPPER_NOISY_OVERSIZED", "1");
+    } else {
+        command.env_remove("SHIPPER_NOISY_OVERSIZED");
+    }
     if parallel {
         command.args(["--parallel", "--max-concurrent", "2"]);
     }
@@ -222,11 +234,19 @@ fn publish_with_noisy_cargo(parallel: bool) {
     assert_eq!(attempts.len(), 1);
     let attempt = &attempts[0];
     assert_eq!(attempt["exit_code"], 0);
-    assert_eq!(
-        attempt["stdout_tail"],
-        "Authorization: [REDACTED]\nstdout complete"
-    );
-    assert_eq!(attempt["stderr_tail"], "Token=[REDACTED]\nstderr complete");
+    if oversized {
+        assert_eq!(attempt["stdout_tail"], "");
+        assert_eq!(
+            attempt["stderr_tail"],
+            "[shipper: Cargo diagnostics omitted after capture loss]"
+        );
+    } else {
+        assert_eq!(
+            attempt["stdout_tail"],
+            "Authorization: [REDACTED]\nstdout complete"
+        );
+        assert_eq!(attempt["stderr_tail"], "Token=[REDACTED]\nstderr complete");
+    }
 
     let events_text = fs::read_to_string(state_dir.join("events.jsonl")).unwrap();
     let events: Vec<Value> = events_text
@@ -283,11 +303,23 @@ fn publish_with_noisy_cargo(parallel: bool) {
 #[test]
 #[serial_test::serial]
 fn sequential_publish_captures_noisy_cargo_without_false_timeout() {
-    publish_with_noisy_cargo(false);
+    publish_with_noisy_cargo(false, false);
 }
 
 #[test]
 #[serial_test::serial]
 fn parallel_publish_captures_noisy_cargo_without_false_timeout() {
-    publish_with_noisy_cargo(true);
+    publish_with_noisy_cargo(true, false);
+}
+
+#[test]
+#[serial_test::serial]
+fn sequential_publish_omits_oversized_lines_without_changing_success() {
+    publish_with_noisy_cargo(false, true);
+}
+
+#[test]
+#[serial_test::serial]
+fn parallel_publish_omits_oversized_lines_without_changing_success() {
+    publish_with_noisy_cargo(true, true);
 }

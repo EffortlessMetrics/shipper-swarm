@@ -44,7 +44,7 @@ In `EffortlessMetrics/shipper-swarm`, trusted same-repo PRs route through
 self-hosted runners in this order:
 
 ```text
-CPX42 -> CX43 -> CX53
+CX43 -> CPX42 -> CX53
 ```
 
 The router and normalized-result bootstrap jobs run on GitHub-hosted

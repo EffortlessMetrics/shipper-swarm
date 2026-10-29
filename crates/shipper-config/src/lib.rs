@@ -53,7 +53,10 @@ use shipper_types::storage::{CloudStorageConfig, StorageType};
 /// Runtime-options conversion helpers (previously `shipper-config-runtime`).
 pub mod runtime;
 
+mod retry_support;
 mod runtime_options;
+
+pub use retry_support::validate_per_error_config;
 
 /// Nested policy configuration
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -106,7 +109,8 @@ pub struct RetryConfig {
     #[serde(default = "default_jitter")]
     pub jitter: f64,
 
-    /// Per-error-type retry configuration
+    /// Reserved per-error configuration. Nonempty class policies are unsupported
+    /// and rejected by validation; omit this field or leave it empty.
     #[serde(default)]
     pub per_error: PerErrorConfig,
 }
@@ -696,6 +700,8 @@ impl ShipperConfig {
         shipper_types::schema::parse_schema_version(&self.schema_version)
             .context("invalid schema_version format")?;
 
+        validate_per_error_config(&self.retry.per_error)?;
+
         // Validate output_lines
         if self.output.lines == 0 {
             bail!("output.lines must be greater than 0");
@@ -892,21 +898,7 @@ strategy = "exponential"
 # Jitter factor for randomized delays (0.0 = no jitter, 1.0 = full jitter)
 jitter = 0.5
 
-# Per-error-type retry configuration (optional)
-# Uncomment and customize to override retry behavior for specific error types
-# [retry.per_error.retryable]
-# strategy = "immediate"
-# max_attempts = 10
-# base_delay = "0s"
-# max_delay = "1s"
-# jitter = 0.0
-
-# [retry.per_error.ambiguous]
-# strategy = "exponential"
-# max_attempts = 5
-# base_delay = "1s"
-# max_delay = "60s"
-# jitter = 0.3
+# Per-error retry policies are unsupported. Configure the global policy above.
 
 [flags]
 # Allow publishing from a dirty git working tree (not recommended)

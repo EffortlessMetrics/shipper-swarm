@@ -43,6 +43,10 @@ pub struct RetryStrategyConfig {
     #[serde(default)]
     pub strategy: RetryStrategyType,
     /// Maximum number of retry attempts.
+    ///
+    /// For compatibility, an omitted serialized value remains 0 while
+    /// [`Self::default`] uses 6. Shipper rejects configured per-error policies
+    /// before execution, so their omitted value does not become a retry budget.
     #[serde(default)]
     pub max_attempts: u32,
     /// Base delay for backoff calculations.
@@ -89,8 +93,13 @@ impl Default for RetryStrategyConfig {
     }
 }
 
-/// Per-error-type retry configuration.
+/// Reserved per-error-type retry configuration.
+///
+/// Shipper's config validation and public engine entry points reject any
+/// configured class. The shape remains available for diagnostics and migration;
+/// an omitted or empty configuration retains the global retry policy.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PerErrorConfig {
     /// Retry configuration for retryable errors (e.g., network issues, rate limiting).
     #[serde(default, rename = "retryable")]
@@ -99,7 +108,7 @@ pub struct PerErrorConfig {
     #[serde(default, rename = "ambiguous")]
     pub ambiguous: Option<RetryStrategyConfig>,
     /// Retry configuration for permanent errors (e.g., authentication failure).
-    /// Permanent errors are typically not retried, but this can be customized.
+    /// This does not enable automatic retries of permanent errors in Shipper.
     #[serde(default, rename = "permanent")]
     pub permanent: Option<RetryStrategyConfig>,
 }

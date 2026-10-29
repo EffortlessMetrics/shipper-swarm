@@ -398,6 +398,7 @@ pub fn run_preflight_in_place_with_options(
     reporter: &mut dyn Reporter,
     run_opts: PreflightRunOptions,
 ) -> Result<PreflightReport> {
+    crate::config::validate_per_error_config(&opts.retry_per_error)?;
     preflight::run(ws, opts, reporter, run_opts)
 }
 
@@ -473,6 +474,7 @@ fn run_publish_with_state_requirement(
     reporter: &mut dyn Reporter,
     require_existing_state: bool,
 ) -> Result<PublishRunOutcome> {
+    crate::config::validate_per_error_config(&opts.retry_per_error)?;
     let state_dir = resolve_state_dir(&ws.workspace_root, &opts.state_dir);
     let require_existing_state =
         publish::admission::precheck(ws, opts, &state_dir, require_existing_state)?;
@@ -718,6 +720,7 @@ pub fn run_rehearsal(
     opts: &RuntimeOptions,
     reporter: &mut dyn Reporter,
 ) -> Result<RehearsalOutcome> {
+    crate::config::validate_per_error_config(&opts.retry_per_error)?;
     let rehearsal_name = opts
         .rehearsal_registry
         .as_ref()
@@ -813,7 +816,7 @@ pub fn run_rehearsal(
         reporter.info(&format!("rehearsing {pkg_label} â†’ {rehearsal_name}"));
         let start = Instant::now();
 
-        let out = cargo::cargo_publish(
+        let captured = cargo::cargo_publish_with_capture(
             workspace_root,
             &p.name,
             &rehearsal_reg.name,
@@ -822,9 +825,23 @@ pub fn run_rehearsal(
             opts.output_lines,
             None,
         )?;
+        let capture_complete = captured.capture.is_complete();
+        let out = captured.output;
+        if !capture_complete {
+            reporter.warn(
+                "rehearsal Cargo diagnostic capture was incomplete; diagnostic tails omitted",
+            );
+        }
 
         if out.exit_code != 0 {
-            let (class, msg) = classify_cargo_failure(&out.stderr_tail, &out.stdout_tail);
+            let (class, msg) = if !capture_complete {
+                (
+                    ErrorClass::Ambiguous,
+                    "cargo publish diagnostic capture was incomplete".to_string(),
+                )
+            } else {
+                classify_cargo_failure(&out.stderr_tail, &out.stdout_tail)
+            };
             reporter.error(&format!(
                 "rehearsal failed for {pkg_label}: {msg}\nstderr tail:\n{}",
                 out.stderr_tail
@@ -1078,7 +1095,9 @@ pub(crate) fn init_state(ws: &PlannedWorkspace, state_dir: &Path) -> Result<Exec
 
 #[cfg(test)]
 mod tests {
+    mod capture_reconciliation;
     mod lock_ownership;
+    mod per_error_refusal;
     mod retained_admission;
     mod retained_retryable;
     mod timeout_reconciliation;
