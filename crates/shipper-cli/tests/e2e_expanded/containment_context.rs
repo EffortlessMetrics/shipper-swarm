@@ -240,6 +240,7 @@ fn rewrite_registry(path: &Path, registry: &str, receipt: bool) {
 }
 
 #[test]
+#[serial_test::serial]
 fn containment_uses_cli_legacy_and_override_registry() {
     for mode in MODES {
         for selection in [
@@ -267,6 +268,7 @@ fn containment_uses_cli_legacy_and_override_registry() {
 }
 
 #[test]
+#[serial_test::serial]
 fn containment_resolves_workspace_and_all_state_path_forms() {
     for mode in MODES {
         for state_kind in ["default", "relative", "absolute"] {
@@ -277,6 +279,7 @@ fn containment_resolves_workspace_and_all_state_path_forms() {
 }
 
 #[test]
+#[serial_test::serial]
 fn containment_rejects_plan_registry_conflicts_without_effects() {
     for mode in [Mode::YankPlan, Mode::Remediate] {
         for override_name in [None, Some("other")] {
@@ -291,6 +294,7 @@ fn containment_rejects_plan_registry_conflicts_without_effects() {
 }
 
 #[test]
+#[serial_test::serial]
 fn containment_rejects_multi_registry_selectors_without_effects() {
     for mode in MODES {
         for selection in [
@@ -330,6 +334,7 @@ fn receipt_with_plan_id(path: &Path, plan_id: &str) {
 }
 
 #[test]
+#[serial_test::serial]
 fn receipt_planning_defaults_use_workspace_state_paths() {
     for name in ["plan-yank", "fix-forward"] {
         for state_kind in ["default", "relative", "absolute"] {
@@ -369,6 +374,7 @@ fn receipt_planning_defaults_use_workspace_state_paths() {
 }
 
 #[test]
+#[serial_test::serial]
 fn receipt_planning_preserves_explicit_caller_relative_and_absolute_paths() {
     for name in ["plan-yank", "fix-forward"] {
         for absolute in [false, true] {

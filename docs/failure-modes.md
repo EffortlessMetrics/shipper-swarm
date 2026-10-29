@@ -196,6 +196,16 @@ typed next action recommends `resume`. Shipper then confirms the current
 retryable work. A different checkout can produce the same plan ID, so verify
 the restored source independently.
 
+Before another Cargo attempt, Shipper checks registry visibility for pending
+packages and retained `failed` packages classified as `retryable`. A version
+already visible is recorded as `skipped` with reason `already published`, while
+its cumulative attempt count and prior event history are retained. This applies
+to sequential and parallel execution. A failed precheck is reported as a warning
+and keeps the existing retry policy for this non-ambiguous work; it is not
+recorded as proof of absence. Ambiguous and uploaded packages continue through
+their dedicated reconciliation paths. This check does not reset retry ceilings
+or change permanent-error classification.
+
 ---
 
 ## Failure mode: Ambiguous upload result
