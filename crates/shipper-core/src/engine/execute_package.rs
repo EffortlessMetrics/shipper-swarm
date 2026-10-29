@@ -170,9 +170,9 @@ pub(crate) fn run_sequential_scheduler(
             if let Err(sync_error) =
                 synchronize_sequential_state(st, event_log, &st_arc, &event_log_arc)
             {
-                Err(anyhow::anyhow!(
-                    "publish failed: {error}; additionally failed to synchronize sequential state: {sync_error}"
-                ))
+                Err(error.context(format!(
+                    "additionally failed to synchronize sequential state: {sync_error}"
+                )))
             } else {
                 Err(error)
             }
@@ -729,6 +729,9 @@ pub(crate) fn publish_package_with_timeout(
         let Ok(state) = st.lock() else {
             return poisoned_lock("execution state");
         };
+        if let Err(error) = crate::engine::publish::admission::ensure_no_cleanup_hold(&state) {
+            return PackagePublishResult { result: Err(error) };
+        }
         match state.packages.get(&key) {
             Some(progress) => progress.clone(),
             None => {
@@ -738,6 +741,9 @@ pub(crate) fn publish_package_with_timeout(
             }
         }
     };
+    if let Err(error) = crate::ops::process::interruption::check() {
+        return PackagePublishResult { result: Err(error) };
+    }
 
     if matches!(
         progress.state,
@@ -1242,6 +1248,9 @@ pub(crate) fn publish_package_with_timeout(
     let mut is_new_crate_cached: Option<bool> = p.regime.map(PublishRegime::is_new_crate);
 
     while attempt < opts.max_attempts {
+        if let Err(error) = crate::ops::process::interruption::check() {
+            return PackagePublishResult { result: Err(error) };
+        }
         attempt += 1;
 
         let command = format!(
@@ -1294,6 +1303,33 @@ pub(crate) fn publish_package_with_timeout(
                     return PackagePublishResult { result: Err(e) };
                 }
             };
+            if let Some(failure) = captured.cleanup_failure {
+                let message = crate::engine::cleanup::message(failure);
+                reporter.error(&format!("{}@{}: {message}", p.name, p.version));
+                let detail = AttemptDetail {
+                    package: p.name.clone(),
+                    version: p.version.clone(),
+                    attempt,
+                    max_attempts: opts.max_attempts,
+                    started_at: attempt_started_at,
+                    ended_at: Utc::now(),
+                    error_class: Some(ErrorClass::Ambiguous),
+                    next_attempt_at: None,
+                    redacted_message: Some(message.clone()),
+                };
+                return PackagePublishResult {
+                    result: Err(crate::engine::cleanup::stop_publish(
+                        st,
+                        state_dir,
+                        event_log,
+                        events_path,
+                        &key,
+                        message,
+                        detail,
+                        &captured.output,
+                    )),
+                };
+            }
             let capture_complete = captured.capture.is_complete();
             let out = captured.output;
             if !capture_complete {
@@ -1339,6 +1375,53 @@ pub(crate) fn publish_package_with_timeout(
                 log.clear();
             }
 
+            if captured.interrupted || crate::ops::process::interruption::requested() {
+                let message = "cargo publish interrupted; process cleanup confirmed; registry reconciliation required".to_string();
+                let ended_at = Utc::now();
+                let failure = PublishEvent {
+                    timestamp: ended_at,
+                    event_type: EventType::PackageFailed {
+                        class: ErrorClass::Ambiguous,
+                        message: message.clone(),
+                    },
+                    package: pkg_label.clone(),
+                };
+                let result = commit_pending_with_attempt_detail_transition(
+                    st,
+                    state_dir,
+                    event_log,
+                    events_path,
+                    &key,
+                    PackageState::Failed {
+                        class: ErrorClass::Ambiguous,
+                        message: message.clone(),
+                    },
+                    AttemptDetail {
+                        package: p.name.clone(),
+                        version: p.version.clone(),
+                        attempt,
+                        max_attempts: opts.max_attempts,
+                        started_at: attempt_started_at,
+                        ended_at,
+                        error_class: Some(ErrorClass::Ambiguous),
+                        next_attempt_at: None,
+                        redacted_message: Some(message),
+                    },
+                    // The first failure records the attempt outcome; the
+                    // terminal failure seals it, as in ordinary exhaustion.
+                    // A later run must not finalize these old attempts in its
+                    // new parallel reconciliation order.
+                    vec![failure.clone(), failure],
+                );
+                // `captured` retains the interruption lease until this event-
+                // first transition finishes, including its failure path.
+                return PackagePublishResult {
+                    result: Err(match result {
+                        Ok(()) => crate::ops::process::interruption::Interrupted.into(),
+                        Err(error) => error.context(crate::ops::process::interruption::Interrupted),
+                    }),
+                };
+            }
             if out.exit_code == 0 && !out.timed_out {
                 let completion_timestamp = Utc::now();
                 let attempt_detail = AttemptDetail {
@@ -1373,7 +1456,15 @@ pub(crate) fn publish_package_with_timeout(
                 ) {
                     return PackagePublishResult { result: Err(e) };
                 }
+                drop(captured._interruption_lease);
+                if let Err(error) = crate::ops::process::interruption::check() {
+                    return PackagePublishResult { result: Err(error) };
+                }
             } else {
+                // The cleaned ordinary outcome has passed the immediate
+                // interruption decision. Registry waits below retain normal
+                // process termination rather than deferring it indefinitely.
+                drop(captured._interruption_lease);
                 let failure_output = format!("{}\n{}", out.stderr_tail, out.stdout_tail);
                 // Killing Cargo cannot establish whether the upload reached the
                 // registry. The typed timeout owns this decision even when the

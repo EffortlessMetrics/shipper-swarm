@@ -1,15 +1,20 @@
 //! Read retained publication authority before any new execution effects.
 
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail, ensure};
 
 use crate::cli_bridge::{RunLiveness, RunObservation};
-use crate::engine::{PublishAdmissionError, reject_exhausted_resume_retry_ceiling};
+use crate::engine::{
+    PublishAdmissionError, PublishCleanupIncompleteError, reject_exhausted_resume_retry_ceiling,
+};
 use crate::lock::{LockContents, LockReservation};
 use crate::plan::PlannedWorkspace;
 use crate::state::{consistency, events, execution_state as state, run_observation};
-use crate::types::{EventType, ExecutionState, PackageState, ReconciliationReport, RuntimeOptions};
+use crate::types::{
+    EventType, ExecutionState, PackageState, PublishEvent, ReconciliationReport, RuntimeOptions,
+};
 
 /// This is an early diagnostic only. Its result makes the state requirement
 /// sticky: a caller that saw retained state may not initialize a new run if
@@ -62,7 +67,7 @@ fn load_retained_state(
     require_existing: bool,
     prior: Option<&LockContents>,
 ) -> Result<Option<ExecutionState>> {
-    let Some(existing) = state::load_state(state_dir)? else {
+    let Some(existing) = load_cleanup_checked_state(state_dir)? else {
         if require_existing {
             bail!(
                 "no existing state found in {}; retained state is required, so preserve and inspect the evidence before retrying",
@@ -203,4 +208,118 @@ pub(in crate::engine) fn validate_fresh_parallel_state(
         "direct parallel publication without durable state requires an unattempted initial projection for the current plan and registry"
     );
     Ok(())
+}
+
+/// Process cleanup is a run-wide local safety condition, not registry truth.
+/// Keep this inside the retained-admission owner so all public entry points
+/// inspect the same state and authoritative event evidence before mutation.
+pub(in crate::engine) fn validate_cleanup_safety(state_dir: &Path) -> Result<()> {
+    load_cleanup_checked_state(state_dir).map(|_| ())
+}
+
+/// Rehearsal uses the same ownership key, but has no normal publish projection
+/// to admit. Recheck the local cleanup condition after reservation and before
+/// replacing predecessor metadata or emitting any rehearsal event.
+pub(in crate::engine) fn reserve_rehearsal(
+    ws: &PlannedWorkspace,
+    opts: &RuntimeOptions,
+    state_dir: &Path,
+) -> Result<LockReservation> {
+    (|| -> Result<_> {
+        let reservation = LockReservation::acquire(
+            state_dir,
+            Some(&ws.workspace_root),
+            opts.lock_timeout,
+            opts.force,
+        )
+        .context("failed to reserve rehearsal ownership")?;
+        validate_cleanup_safety(state_dir)?;
+        Ok(reservation)
+    })()
+    .context(PublishAdmissionError)
+}
+
+pub(in crate::engine) fn ensure_no_cleanup_hold(state: &ExecutionState) -> Result<()> {
+    if let Some((package, _)) = state
+        .packages
+        .iter()
+        .find(|(_, progress)| matches!(progress.state, PackageState::CleanupIncomplete { .. }))
+    {
+        return Err(PublishCleanupIncompleteError {
+            message: format!("{package}: retained process cleanup is incomplete; publication is blocked; preserve the evidence and inspect the owned processes before any new publication"),
+        }.into());
+    }
+    Ok(())
+}
+
+fn load_cleanup_checked_state(state_dir: &Path) -> Result<Option<ExecutionState>> {
+    // The underlying event reader includes malformed line content in its
+    // context. Do not echo arbitrary retained payloads through this admission
+    // boundary, including when the projection is missing or unreadable.
+    let retained = state::state_path(state_dir)
+        .try_exists()
+        .map_err(anyhow::Error::from)
+        .and_then(|_| state::load_state(state_dir))
+        .map_err(|error| {
+            // Keep the actionable error category without forwarding serde's
+            // arbitrary retained values (for example an unknown enum variant).
+            if error.is::<serde_json::Error>() {
+                anyhow::anyhow!(
+                    "failed to parse state JSON; cannot inspect retained publication state; preserve the evidence before retrying"
+                )
+            } else {
+                anyhow::anyhow!(
+                    "cannot inspect retained publication state; preserve the evidence before retrying"
+                )
+            }
+        });
+    if let Ok(Some(state)) = &retained {
+        ensure_no_cleanup_hold(state)?;
+    }
+    let events_path = events::events_path(state_dir);
+    let log = events_path
+        .try_exists()
+        .map_err(anyhow::Error::from)
+        .and_then(|_| events::EventLog::read_from_file(&events_path));
+    let held_package = match &log {
+        Ok(log) => log
+            .all_events()
+            .iter()
+            .find(|event| matches!(event.event_type, EventType::PackageCleanupIncomplete { .. }))
+            .map(|event| event.package.clone()),
+        Err(_) => recognizable_cleanup_hold(&events_path),
+    };
+    if let Some(package) = held_package {
+        return Err(PublishCleanupIncompleteError {
+            message: format!("{package}: retained process-cleanup event blocks publication, including with missing or stale state; preserve the evidence and inspect the owned processes before any new publication"),
+        }.into());
+    }
+    log.map_err(|_| {
+        anyhow::anyhow!(
+            "cannot inspect retained publication events; preserve the evidence before retrying"
+        )
+    })?;
+    // A readable hold event takes precedence over a malformed projection;
+    // otherwise any unreadable artifact still refuses admission.
+    retained
+}
+
+/// A positive, fully typed hold record still refuses cleanup when a different
+/// line is corrupt. This scan never authorizes publication or repairs history:
+/// without a recognized hold the original whole-log read error still wins.
+fn recognizable_cleanup_hold(events_path: &Path) -> Option<String> {
+    let mut reader = BufReader::new(std::fs::File::open(events_path).ok()?);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) | Err(_) => return None,
+            Ok(_) => {}
+        }
+        if let Ok(event) = serde_json::from_slice::<PublishEvent>(&line)
+            && matches!(event.event_type, EventType::PackageCleanupIncomplete { .. })
+        {
+            return Some(event.package);
+        }
+    }
 }

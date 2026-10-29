@@ -34,6 +34,25 @@ fn finish_publish_errors(mut errors: Vec<anyhow::Error>) -> Result<()> {
         .join("; ");
     if let Some(index) = errors.iter().position(|error| {
         error
+            .downcast_ref::<crate::engine::PublishCleanupIncompleteError>()
+            .is_some()
+    }) {
+        let cleanup = errors.swap_remove(index);
+        return Err(cleanup.context(format!(
+            "parallel publish stopped after incomplete process cleanup: {summary}"
+        )));
+    }
+    if let Some(index) = errors.iter().position(|error| {
+        error
+            .downcast_ref::<crate::ops::process::interruption::Interrupted>()
+            .is_some()
+    }) {
+        return Err(errors.swap_remove(index).context(format!(
+            "parallel publication interrupted after joining active workers: {summary}"
+        )));
+    }
+    if let Some(index) = errors.iter().position(|error| {
+        error
             .downcast_ref::<crate::engine::PublishStillUnknownError>()
             .is_some()
     }) {
@@ -193,8 +212,25 @@ pub(crate) fn run_publish_level(
             }
         }
 
-        if join_failures > 0 {
+        let cleanup_incomplete = errors.iter().any(|error| {
+            error
+                .downcast_ref::<crate::engine::PublishCleanupIncompleteError>()
+                .is_some()
+        });
+        if join_failures > 0 && cleanup_incomplete {
+            errors.push(anyhow::anyhow!(
+                "parallel publish worker join failed for {join_failures} package(s)"
+            ));
+        } else if join_failures > 0 {
             bail!("parallel publish worker join failed for {join_failures} package(s)");
+        }
+        if cleanup_incomplete || crate::ops::process::interruption::requested() {
+            // All already-admitted peers have been joined. Never launch a
+            // later chunk after an owned process may still be running.
+            if !cleanup_incomplete {
+                errors.push(crate::ops::process::interruption::Interrupted.into());
+            }
+            return finish_publish_errors(errors).map(|()| all_receipts);
         }
     }
 
@@ -207,6 +243,28 @@ mod tests {
     use anyhow::{Result, anyhow, bail, ensure};
 
     use super::finish_publish_errors;
+
+    #[test]
+    fn cleanup_hold_identity_outranks_unknown_and_join_failure() {
+        let error = finish_publish_errors(vec![
+            anyhow!("parallel publish worker join failed"),
+            crate::engine::PublishStillUnknownError {
+                message: "registry unknown".into(),
+                reconciliation_written: true,
+            }
+            .into(),
+            crate::engine::PublishCleanupIncompleteError {
+                message: "owned cleanup incomplete".into(),
+            }
+            .into(),
+        ])
+        .unwrap_err();
+        assert!(matches!(
+            crate::engine::classify_publish_stop(&error),
+            Some(crate::engine::PublishStopClassification::CleanupIncomplete)
+        ));
+        assert!(format!("{error:#}").contains("worker join failed"));
+    }
 
     #[test]
     fn still_unknown_identity_survives_parallel_error_aggregation() -> Result<()> {

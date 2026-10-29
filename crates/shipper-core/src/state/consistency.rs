@@ -859,6 +859,7 @@ fn state_name(state: &PackageState) -> &'static str {
         PackageState::Skipped { .. } => "skipped",
         PackageState::Failed { .. } => "failed",
         PackageState::Ambiguous { .. } => "ambiguous",
+        PackageState::CleanupIncomplete { .. } => "cleanup_incomplete",
     }
 }
 

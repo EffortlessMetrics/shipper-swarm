@@ -1019,9 +1019,21 @@ pub enum PackageState {
     Pending,
     Uploaded,
     Published,
-    Skipped { reason: String },
-    Failed { class: ErrorClass, message: String },
-    Ambiguous { message: String },
+    Skipped {
+        reason: String,
+    },
+    Failed {
+        class: ErrorClass,
+        message: String,
+    },
+    Ambiguous {
+        message: String,
+    },
+    /// The preceding Cargo invocation could not be confirmed stopped. Registry
+    /// visibility cannot clear this local safety hold or authorize another upload.
+    CleanupIncomplete {
+        message: String,
+    },
 }
 
 /// Classification of errors encountered during publishing.
@@ -1714,6 +1726,12 @@ pub enum EventType {
         class: ErrorClass,
         message: String,
     },
+    /// A local process-cleanup hold, independent of registry truth. This may
+    /// follow publication or rehearsal and blocks further publication in the
+    /// same state directory until the retained safety evidence is resolved.
+    PackageCleanupIncomplete {
+        message: String,
+    },
     PackageSkipped {
         reason: String,
     },
@@ -2162,6 +2180,35 @@ pub struct PreflightPackage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cleanup_incomplete_vocabulary_roundtrips_without_ordinary_state_changes() {
+        let state = PackageState::CleanupIncomplete {
+            message: "cleanup not confirmed".into(),
+        };
+        let raw = serde_json::to_value(&state).unwrap();
+        assert_eq!(
+            raw,
+            serde_json::json!({ "state": "cleanup_incomplete", "message": "cleanup not confirmed" })
+        );
+        assert_eq!(serde_json::from_value::<PackageState>(raw).unwrap(), state);
+        let event = EventType::PackageCleanupIncomplete {
+            message: "cleanup not confirmed".into(),
+        };
+        let raw = serde_json::to_value(event).unwrap();
+        assert_eq!(
+            raw,
+            serde_json::json!({ "type": "package_cleanup_incomplete", "message": "cleanup not confirmed" })
+        );
+        assert!(matches!(
+            serde_json::from_value::<EventType>(raw).unwrap(),
+            EventType::PackageCleanupIncomplete { .. }
+        ));
+        assert_eq!(
+            serde_json::to_value(PackageState::Pending).unwrap(),
+            serde_json::json!({ "state": "pending" })
+        );
+    }
 
     #[test]
     fn crates_io_registry_defaults_are_expected() {
@@ -5135,7 +5182,7 @@ mod tests {
                 // Terminal states
                 PackageState::Published => vec![],
                 PackageState::Skipped { .. } => vec![],
-                PackageState::Ambiguous { .. } => vec![],
+                PackageState::Ambiguous { .. } | PackageState::CleanupIncomplete { .. } => vec![],
             }
         }
 
@@ -5754,9 +5801,9 @@ mod tests {
                 PackageState::Pending => 0,
                 PackageState::Uploaded => 1,
                 PackageState::Published => 2,
-                PackageState::Skipped { .. } => 2,   // terminal
-                PackageState::Failed { .. } => 1,    // same level as Uploaded
-                PackageState::Ambiguous { .. } => 2, // terminal
+                PackageState::Skipped { .. } => 2, // terminal
+                PackageState::Failed { .. } => 1,  // same level as Uploaded
+                PackageState::Ambiguous { .. } | PackageState::CleanupIncomplete { .. } => 2, // terminal
             }
         }
 

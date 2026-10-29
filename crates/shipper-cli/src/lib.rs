@@ -1063,6 +1063,107 @@ struct PublishEarlyError {
     evidence: Vec<String>,
 }
 
+const CLEANUP_INCOMPLETE_REASON: &str = "cleanup of a prior Cargo publish process could not be confirmed; another upload is not authorized";
+
+fn cleanup_incomplete_action() -> OperatorAction {
+    OperatorAction::posture(
+        ActionKind::StopAndInvestigate,
+        "preserve retained evidence and investigate the prior Cargo process; no new upload is authorized from this state directory",
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CleanupCommand {
+    Publish,
+    Resume,
+}
+
+#[derive(Debug)]
+struct CleanupIncompleteError {
+    format: String,
+    command: CleanupCommand,
+    rendered_error: String,
+    evidence: Vec<String>,
+}
+
+impl std::fmt::Display for CleanupIncompleteError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(CLEANUP_INCOMPLETE_REASON)
+    }
+}
+
+impl std::error::Error for CleanupIncompleteError {}
+
+#[derive(Serialize)]
+struct CleanupIncompleteReport<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    status: &'static str,
+    category: &'static str,
+    summary: &'static str,
+    detail: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    safe_to_rerun: Option<PublishEarlySafeRerun>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    safe_to_resume: Option<ResumeSafeToResume>,
+    next_action: OperatorAction,
+    evidence: &'a [String],
+}
+
+impl CleanupIncompleteError {
+    fn report(&self) -> CleanupIncompleteReport<'_> {
+        let (schema_version, command, safe_to_rerun, safe_to_resume) = match self.command {
+            CleanupCommand::Publish => (
+                "shipper.publish.error.v1",
+                "publish",
+                Some(PublishEarlySafeRerun {
+                    value: Some(false),
+                    reason: CLEANUP_INCOMPLETE_REASON,
+                }),
+                None,
+            ),
+            CleanupCommand::Resume => (
+                "shipper.resume.error.v1",
+                "resume",
+                None,
+                Some(ResumeSafeToResume {
+                    value: false,
+                    reason: CLEANUP_INCOMPLETE_REASON.to_string(),
+                }),
+            ),
+        };
+        CleanupIncompleteReport {
+            schema_version,
+            command,
+            status: "failed",
+            category: "cleanup_incomplete",
+            summary: CLEANUP_INCOMPLETE_REASON,
+            detail: &self.rendered_error,
+            safe_to_rerun,
+            safe_to_resume,
+            next_action: cleanup_incomplete_action(),
+            evidence: &self.evidence,
+        }
+    }
+}
+
+fn mark_cleanup_incomplete_error(
+    error: anyhow::Error,
+    format: &str,
+    command: CleanupCommand,
+    evidence_state_dir: &Path,
+) -> anyhow::Error {
+    CleanupIncompleteError {
+        format: format.to_string(),
+        command,
+        rendered_error: shipper_output_sanitizer::redact_sensitive(&format_error(&error))
+            .trim_end()
+            .to_string(),
+        evidence: still_unknown_evidence(evidence_state_dir, true),
+    }
+    .into()
+}
+
 #[derive(Debug)]
 struct ResumeRetryBudgetError {
     format: String,
@@ -1265,6 +1366,19 @@ fn mark_publish_engine_error(
     configured_state_dir: &Path,
     evidence_state_dir: &Path,
 ) -> anyhow::Error {
+    // A cleanup hold can be wrapped in the admission marker. Its more precise
+    // stop posture must survive that context and every generic error hint.
+    if matches!(
+        engine::classify_publish_stop(&error),
+        Some(engine::PublishStopClassification::CleanupIncomplete)
+    ) {
+        return mark_cleanup_incomplete_error(
+            error,
+            format,
+            CleanupCommand::Publish,
+            evidence_state_dir,
+        );
+    }
     if engine::is_publish_admission_error(&error) {
         let rendered_error = shipper_output_sanitizer::redact_sensitive(&format_error(&error))
             .trim_end()
@@ -1295,6 +1409,21 @@ fn mark_publish_engine_error(
         );
     };
     match stop {
+        engine::PublishStopClassification::Interrupted => {
+            PublishEarlyError {
+                format: format.to_string(),
+                category: "interrupted",
+                summary: "publication stopped after a termination request",
+                rendered_error: shipper_output_sanitizer::redact_sensitive(&format_error(&error)),
+                safe_to_rerun: PublishEarlySafeRerun {
+                    value: Some(false),
+                    reason: "the current process is stopping; retained evidence must be preserved for a fresh invocation",
+                },
+                next_action: OperatorAction::posture(ActionKind::InspectEvents,
+                    "inspect retained evidence, then use a fresh resume invocation with the same plan, registry, workspace, and state directory; ambiguous attempts reconcile before any new upload"),
+                evidence: still_unknown_evidence(evidence_state_dir, false),
+            }.into()
+        }
         engine::PublishStopClassification::StillUnknown {
             reconciliation_written,
         } => {
@@ -1325,6 +1454,12 @@ fn mark_publish_engine_error(
         engine::PublishStopClassification::RecoverableNotPublished {
             evidence_consistent,
         } => mark_recoverable_publish_stop(error, format, evidence_state_dir, evidence_consistent),
+        engine::PublishStopClassification::CleanupIncomplete => mark_cleanup_incomplete_error(
+            error,
+            format,
+            CleanupCommand::Publish,
+            evidence_state_dir,
+        ),
     }
 }
 
@@ -1334,6 +1469,23 @@ fn mark_resume_engine_error(
     configured_state_dir: &Path,
     evidence_state_dir: &Path,
 ) -> anyhow::Error {
+    if matches!(
+        engine::classify_publish_stop(&error),
+        Some(engine::PublishStopClassification::CleanupIncomplete)
+    ) {
+        return mark_cleanup_incomplete_error(
+            error,
+            format,
+            CleanupCommand::Resume,
+            evidence_state_dir,
+        );
+    }
+    if matches!(
+        engine::classify_publish_stop(&error),
+        Some(engine::PublishStopClassification::Interrupted)
+    ) {
+        return error.context("resume was interrupted; preserve the retained evidence for a fresh invocation; ambiguous attempts reconcile before any new upload");
+    }
     let Some(budget) = engine::classify_resume_retry_budget(&error) else {
         if engine::is_publish_admission_error(&error) {
             return error.context(
@@ -1412,6 +1564,29 @@ fn mark_publish_early_error_with_next_action(
 
 /// Render a top-level error to stderr via [`format_error`].
 pub fn report_error(error: &anyhow::Error) {
+    if let Some(cleanup_error) = error.downcast_ref::<CleanupIncompleteError>() {
+        let report = cleanup_error.report();
+        if cleanup_error.format == "json" {
+            match serde_json::to_string_pretty(&report) {
+                Ok(json) => eprintln!("{json}"),
+                Err(_) => eprintln!("{}", cleanup_error.rendered_error),
+            }
+            return;
+        }
+        eprintln!("{}", cleanup_error.rendered_error);
+        eprintln!();
+        eprintln!("Result: failed — {}", report.summary);
+        let action = match cleanup_error.command {
+            CleanupCommand::Publish => "rerun",
+            CleanupCommand::Resume => "resume",
+        };
+        eprintln!("Safe to {action}: no — {CLEANUP_INCOMPLETE_REASON}");
+        eprintln!("Next: {}", report.next_action.reason);
+        if !report.evidence.is_empty() {
+            eprintln!("Evidence: {}", report.evidence.join(", "));
+        }
+        return;
+    }
     if let Some(resume_error) = error.downcast_ref::<ResumeRetryBudgetError>() {
         if resume_error.format == "json" {
             let report = ResumeRetryBudgetReport {
@@ -1512,8 +1687,20 @@ fn is_registry_destination_validation_error(error: &anyhow::Error) -> bool {
 
 /// CLI entry point. Exposed for the `shipper` crate's binary target
 /// and for the `shipper-cli` crate's own `shipper-cli` binary — both
-/// are three-line `fn main() { shipper_cli::run() }` wrappers over
+/// are three-line `fn main() { shipper_cli::run_process() }` wrappers over
 /// this function.
+/// Executable-only entry point with process-lifetime termination handling.
+/// Embedders should call [`run`] and retain ownership of their signal policy.
+pub fn run_process() -> Result<std::process::ExitCode> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    process_signals::install()?;
+    run()
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod process_signals;
+
+/// Parse and execute CLI arguments without installing process signal handlers.
 pub fn run() -> Result<std::process::ExitCode> {
     // Build via cli_command() then from_arg_matches (swarm#108: scope first-run
     // help flags) so the manual Command can carry long_help-only arg scoping
@@ -1990,16 +2177,27 @@ pub fn run() -> Result<std::process::ExitCode> {
                     current_opts.state_dir = opts.state_dir.join(&reg.name);
                 }
 
-                // A resume with no state at all is not a resume *failure* —
-                // nothing was ever started. Say that, instead of wrapping it
-                // in the generic hint about plan-ID mismatch, corrupt state,
-                // and stale locks, none of which can apply here.
-                let resumable_state = shipper_core::runtime::execution::resolve_state_dir(
+                let evidence_state_dir = shipper_core::runtime::execution::resolve_state_dir(
                     &current_planned.workspace_root,
                     &current_opts.state_dir,
-                )
-                .join(shipper_core::state::execution_state::STATE_FILE);
+                );
+                let resumable_state =
+                    evidence_state_dir.join(shipper_core::state::execution_state::STATE_FILE);
                 if !resumable_state.exists() {
+                    // A hold may be retained only in events if the projection
+                    // save failed. Missing state must never turn that hold into
+                    // advice to start another publish. Existing state goes
+                    // through the engine's shared admission boundary below.
+                    engine::validate_publish_cleanup_safety(&evidence_state_dir).map_err(
+                        |error| {
+                            mark_resume_engine_error(
+                                error,
+                                &cli.format,
+                                &current_opts.state_dir,
+                                &evidence_state_dir,
+                            )
+                        },
+                    )?;
                     bail!(
                         "nothing to resume: no publish state at {}\n  \
                          * run `shipper plan` to preview the release\n  \
@@ -2030,10 +2228,6 @@ pub fn run() -> Result<std::process::ExitCode> {
                 // countdown via ProgressReporter::retry_countdown.
                 reporter.install_progress(progress, package_positions);
 
-                let evidence_state_dir = shipper_core::runtime::execution::resolve_state_dir(
-                    &current_planned.workspace_root,
-                    &current_opts.state_dir,
-                );
                 let engine::PublishRunOutcome { receipt, state } =
                     engine::run_resume_with_state(&current_planned, &current_opts, &mut reporter)
                         .map_err(|error| {
@@ -4053,6 +4247,8 @@ struct PublishJsonReport<'a> {
     pending: usize,
     failed: usize,
     ambiguous: usize,
+    #[serde(skip_serializing_if = "count_is_zero")]
+    cleanup_incomplete: usize,
     uploaded: usize,
     skipped: usize,
     packages: Vec<CommandJsonPackageReport>,
@@ -4074,6 +4270,8 @@ struct ResumeJsonReport<'a> {
     pending: usize,
     failed: usize,
     ambiguous: usize,
+    #[serde(skip_serializing_if = "count_is_zero")]
+    cleanup_incomplete: usize,
     uploaded: usize,
     skipped: usize,
     next_package: Option<String>,
@@ -4088,6 +4286,7 @@ struct CommandJsonPackageCounts {
     pending: usize,
     failed: usize,
     ambiguous: usize,
+    cleanup_incomplete: usize,
     uploaded: usize,
     skipped: usize,
     next_package: Option<String>,
@@ -4255,6 +4454,7 @@ fn build_publish_json_report<'a>(
         pending: counts.pending,
         failed: counts.failed,
         ambiguous: counts.ambiguous,
+        cleanup_incomplete: counts.cleanup_incomplete,
         uploaded: counts.uploaded,
         skipped: counts.skipped,
         packages,
@@ -4288,6 +4488,7 @@ fn build_resume_json_report<'a>(
         pending: counts.pending,
         failed: counts.failed,
         ambiguous: counts.ambiguous,
+        cleanup_incomplete: counts.cleanup_incomplete,
         uploaded: counts.uploaded,
         skipped: counts.skipped,
         next_package: counts.next_package,
@@ -4298,7 +4499,11 @@ fn build_resume_json_report<'a>(
 }
 
 fn legacy_safe_to_resume(counts: &CommandJsonPackageCounts) -> bool {
-    counts.failed == 0 && counts.ambiguous == 0
+    counts.failed == 0 && counts.ambiguous == 0 && counts.cleanup_incomplete == 0
+}
+
+fn count_is_zero(count: &usize) -> bool {
+    *count == 0
 }
 
 fn full_plan_package_progress<'a>(
@@ -4354,6 +4559,7 @@ fn command_package_counts(
         pending: 0,
         failed: 0,
         ambiguous: 0,
+        cleanup_incomplete: 0,
         uploaded: 0,
         skipped: 0,
         next_package: None,
@@ -4413,9 +4619,16 @@ fn command_package_counts(
                     .next_package
                     .get_or_insert_with(|| package.name.clone());
             }
+            PackageState::CleanupIncomplete { .. } => {
+                counts.cleanup_incomplete += 1;
+            }
         }
     }
 
+    if counts.cleanup_incomplete > 0 {
+        counts.next_package = None;
+        counts.first_omitted_resumable = None;
+    }
     counts
 }
 
@@ -4437,13 +4650,20 @@ fn build_publish_operator_outcome(
     counts: &CommandJsonPackageCounts,
     state_dir: &Path,
 ) -> PublishOperatorOutcome {
-    let safe_to_rerun =
-        counts.pending == 0 && counts.failed == 0 && counts.ambiguous == 0 && counts.uploaded == 0;
+    let safe_to_rerun = counts.pending == 0
+        && counts.failed == 0
+        && counts.ambiguous == 0
+        && counts.uploaded == 0
+        && counts.cleanup_incomplete == 0;
     let evidence = publish_outcome_evidence(state_dir);
 
-    let (failure_class, next_action, reason) = if counts.ambiguous > 0
-        || counts.ambiguous_failures > 0
-    {
+    let (failure_class, next_action, reason) = if counts.cleanup_incomplete > 0 {
+        (
+            Some("cleanup_incomplete"),
+            cleanup_incomplete_action(),
+            CLEANUP_INCOMPLETE_REASON,
+        )
+    } else if counts.ambiguous > 0 || counts.ambiguous_failures > 0 {
         (
             Some("ambiguous"),
             OperatorAction::posture(
@@ -4515,9 +4735,14 @@ fn build_resume_operator_outcome(
 ) -> ResumeOperatorOutcome {
     let evidence = publish_outcome_evidence(state_dir);
 
-    let (failure_class, safe_to_resume, next_action, reason) = if counts.ambiguous > 0
-        || counts.ambiguous_failures > 0
-    {
+    let (failure_class, safe_to_resume, next_action, reason) = if counts.cleanup_incomplete > 0 {
+        (
+            Some("cleanup_incomplete"),
+            false,
+            cleanup_incomplete_action(),
+            CLEANUP_INCOMPLETE_REASON,
+        )
+    } else if counts.ambiguous > 0 || counts.ambiguous_failures > 0 {
         (
             Some("ambiguous"),
             false,
@@ -4729,6 +4954,7 @@ fn package_state_name(state: &PackageState) -> &'static str {
         PackageState::Skipped { .. } => "skipped",
         PackageState::Failed { .. } => "failed",
         PackageState::Ambiguous { .. } => "ambiguous",
+        PackageState::CleanupIncomplete { .. } => "cleanup_incomplete",
     }
 }
 
@@ -5093,6 +5319,10 @@ fn run_inspect_receipt(
             shipper_core::types::PackageState::Ambiguous { message } => {
                 &format!("\x1b[33mAmbiguous: {}\x1b[0m", message)
             }
+            shipper_core::types::PackageState::CleanupIncomplete { message } => &format!(
+                "\x1b[31mCleanup incomplete: {}\x1b[0m",
+                shipper_output_sanitizer::redact_sensitive(message)
+            ),
         };
         println!(
             "  {}@{}: {} (attempts={}, {}ms)",
@@ -5326,6 +5556,8 @@ struct StatusWatchReport {
     current_package: Option<String>,
     last_event: Option<StatusWatchEventReport>,
     next_action: Option<StatusWatchNextAction>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outcome: Option<ResumeOperatorOutcome>,
     packages: Vec<StatusWatchPackageReport>,
 }
 
@@ -5338,6 +5570,8 @@ struct StatusWatchCounts {
     skipped: usize,
     failed: usize,
     ambiguous: usize,
+    #[serde(skip_serializing_if = "count_is_zero")]
+    cleanup_incomplete: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -5376,11 +5610,36 @@ fn build_status_watch_report(
     let events = read_status_watch_events(&events_path)
         .with_context(|| format!("failed to read event log from {}", events_path.display()))?;
 
-    let packages = build_status_watch_packages(ws, state.as_ref());
+    let mut packages = build_status_watch_packages(ws, state.as_ref());
+    for event in &events {
+        if matches!(event.event_type, EventType::PackageCleanupIncomplete { .. })
+            && let Some(package) = packages
+                .iter_mut()
+                .find(|package| pkg_key(&package.name, &package.version) == event.package)
+        {
+            package.state = "cleanup_incomplete".to_string();
+            package.last_updated_at = Some(format_utc(event.timestamp));
+        }
+    }
     let counts = status_watch_counts(&packages);
     let current_package = current_status_package(&events, state.as_ref(), &packages);
     let last_event = events.last().map(status_watch_event_report);
-    let next_action = latest_status_watch_next_action(&events);
+    let cleanup_incomplete = has_cleanup_hold(&events, state.as_ref());
+    let next_action = if cleanup_incomplete {
+        None
+    } else {
+        latest_status_watch_next_action(&events)
+    };
+    let outcome = cleanup_incomplete.then(|| ResumeOperatorOutcome {
+        status: "cleanup_incomplete",
+        failure_class: Some("cleanup_incomplete"),
+        safe_to_resume: ResumeSafeToResume {
+            value: false,
+            reason: CLEANUP_INCOMPLETE_REASON.to_string(),
+        },
+        next_action: cleanup_incomplete_action(),
+        evidence: still_unknown_evidence(state_dir, true),
+    });
 
     Ok(StatusWatchReport {
         schema_version: "shipper.status.watch.v1",
@@ -5394,6 +5653,7 @@ fn build_status_watch_report(
         current_package,
         last_event,
         next_action,
+        outcome,
         packages,
     })
 }
@@ -5471,6 +5731,7 @@ fn status_watch_counts(packages: &[StatusWatchPackageReport]) -> StatusWatchCoun
             "skipped" => counts.skipped += 1,
             "failed" => counts.failed += 1,
             "ambiguous" => counts.ambiguous += 1,
+            "cleanup_incomplete" => counts.cleanup_incomplete += 1,
             _ => {}
         }
     }
@@ -5482,6 +5743,9 @@ fn current_status_package(
     state: Option<&ExecutionState>,
     packages: &[StatusWatchPackageReport],
 ) -> Option<String> {
+    if has_cleanup_hold(events, state) {
+        return None;
+    }
     if let Some(state) = state {
         for package in &state.packages {
             let progress = package.1;
@@ -5490,6 +5754,7 @@ fn current_status_package(
                 PackageState::Published
                     | PackageState::Skipped { .. }
                     | PackageState::Failed { .. }
+                    | PackageState::CleanupIncomplete { .. }
             ) {
                 return Some(format!("{}@{}", progress.name, progress.version));
             }
@@ -5504,12 +5769,18 @@ fn current_status_package(
     packages
         .iter()
         .find(|package| {
-            package.state != "published" && package.state != "skipped" && package.state != "failed"
+            package.state != "published"
+                && package.state != "skipped"
+                && package.state != "failed"
+                && package.state != "cleanup_incomplete"
         })
         .map(|package| format!("{}@{}", package.name, package.version))
 }
 
 fn latest_active_progress_event(events: &[PublishEvent]) -> Option<&PublishEvent> {
+    if has_cleanup_hold(events, None) {
+        return None;
+    }
     for event in events.iter().rev() {
         if !event.package.is_empty()
             && event.package != "workspace"
@@ -5534,6 +5805,9 @@ fn status_watch_event_report(event: &PublishEvent) -> StatusWatchEventReport {
 }
 
 fn latest_status_watch_next_action(events: &[PublishEvent]) -> Option<StatusWatchNextAction> {
+    if has_cleanup_hold(events, None) {
+        return None;
+    }
     for event in events.iter().rev() {
         if let Some(action) = status_watch_next_action(event) {
             return Some(action);
@@ -5543,6 +5817,18 @@ fn latest_status_watch_next_action(events: &[PublishEvent]) -> Option<StatusWatc
         }
     }
     None
+}
+
+fn has_cleanup_hold(events: &[PublishEvent], state: Option<&ExecutionState>) -> bool {
+    events
+        .iter()
+        .any(|event| matches!(event.event_type, EventType::PackageCleanupIncomplete { .. }))
+        || state.is_some_and(|state| {
+            state
+                .packages
+                .values()
+                .any(|package| matches!(package.state, PackageState::CleanupIncomplete { .. }))
+        })
 }
 
 fn status_watch_next_action(event: &PublishEvent) -> Option<StatusWatchNextAction> {
@@ -5629,6 +5915,7 @@ fn event_type_clears_next_action(event_type: &EventType) -> bool {
             | EventType::PackageStarted { .. }
             | EventType::PackagePublished { .. }
             | EventType::PackageFailed { .. }
+            | EventType::PackageCleanupIncomplete { .. }
             | EventType::PackageSkipped { .. }
             | EventType::PublishReconciled { .. }
             | EventType::ReadinessComplete { .. }
@@ -5679,6 +5966,13 @@ fn write_status_watch_report<W: Write>(
         report.counts.ambiguous,
         report.counts.total
     )?;
+    if report.counts.cleanup_incomplete > 0 {
+        writeln!(
+            out,
+            "cleanup_incomplete: {}",
+            report.counts.cleanup_incomplete
+        )?;
+    }
 
     if let Some(current) = &report.current_package {
         writeln!(out, "current: {}", current)?;
@@ -5696,7 +5990,14 @@ fn write_status_watch_report<W: Write>(
         writeln!(out, "last_event: none")?;
     }
 
-    if let Some(next_action) = &report.next_action {
+    if let Some(outcome) = &report.outcome {
+        writeln!(
+            out,
+            "Safe to resume: no — {}",
+            outcome.safe_to_resume.reason
+        )?;
+        writeln!(out, "Next: {}", outcome.next_action.reason)?;
+    } else if let Some(next_action) = &report.next_action {
         writeln!(
             out,
             "next: {} {} at {} - {}",
@@ -5726,6 +6027,7 @@ fn package_state_label(state: &PackageState) -> &'static str {
         PackageState::Skipped { .. } => "skipped",
         PackageState::Failed { .. } => "failed",
         PackageState::Ambiguous { .. } => "ambiguous",
+        PackageState::CleanupIncomplete { .. } => "cleanup_incomplete",
     }
 }
 
@@ -5743,6 +6045,7 @@ fn event_type_name(event_type: &EventType) -> &'static str {
         EventType::PackageUploaded => "package_uploaded",
         EventType::PackagePublished { .. } => "package_published",
         EventType::PackageFailed { .. } => "package_failed",
+        EventType::PackageCleanupIncomplete { .. } => "package_cleanup_incomplete",
         EventType::PackageSkipped { .. } => "package_skipped",
         EventType::PublishWaiting { .. } => "publish_waiting",
         EventType::RateLimitObserved { .. } => "rate_limit_observed",
@@ -5791,6 +6094,10 @@ fn summarize_event(event: &PublishEvent) -> String {
         }
         EventType::PackageUploaded => "upload accepted by cargo".to_string(),
         EventType::PackageFailed { class, message } => format!("failed ({:?}): {}", class, message),
+        EventType::PackageCleanupIncomplete { message } => format!(
+            "cleanup incomplete: {}",
+            shipper_output_sanitizer::redact_sensitive(message)
+        ),
         EventType::PackageSkipped { reason } => format!("skipped: {}", reason),
         EventType::PublishWaiting {
             reason, delay_ms, ..
@@ -6063,9 +6370,17 @@ fn run_clean(
         }
     }
 
+    // Refuse the whole selection before deleting any evidence. Keep every
+    // acquired owner alive through the entire deletion pass, so a cooperating
+    // publisher cannot add a hold after validation or enter an earlier directory
+    // while a later directory is still being cleaned.
+    let prepared = dirs_to_clean
+        .into_iter()
+        .map(|dir| PreparedCleanDirectory::acquire(dir, workspace_root, force))
+        .collect::<Result<Vec<_>>>()?;
     let mut actions = Vec::new();
-    for dir in dirs_to_clean {
-        actions.extend(clean_single_dir(&dir, workspace_root, keep_receipt, force)?);
+    for directory in &prepared {
+        actions.extend(directory.clean(keep_receipt)?);
     }
 
     if json {
@@ -6097,87 +6412,141 @@ fn print_clean_report(state_dir: &Path, existed: bool, actions: Vec<CleanAction>
     Ok(())
 }
 
+struct PreparedCleanDirectory {
+    path: PathBuf,
+    _owner: shipper_core::lock::LockFile,
+}
+
+impl PreparedCleanDirectory {
+    fn acquire(dir: PathBuf, workspace_root: &Path, force: bool) -> Result<Self> {
+        let lock_path = shipper_core::lock::lock_path(&dir, Some(workspace_root));
+
+        // Ownership spans every deletion, even if the advisory JSON is missing.
+        // Never unlink the persistent OS guard or steal it with --force.
+        let owner = if force {
+            if lock_path.exists() {
+                eprintln!(
+                    "[warn] --force assumes any legacy or foreign publisher is quiescent; acquiring ownership before cleaning {}",
+                    dir.display()
+                );
+            }
+            shipper_core::lock::LockFile::acquire_with_timeout_and_force(
+                &dir,
+                Some(workspace_root),
+                Duration::ZERO,
+                true,
+            )
+        } else {
+            shipper_core::lock::LockFile::acquire(&dir, Some(workspace_root))
+        }
+        .with_context(|| format!("cannot clean: active lock exists or ownership is unavailable in {}", dir.display()))?;
+
+        // The absence of a live publisher owner does not prove that a prior
+        // process's descendants were contained. Clean is not a hold-clearing
+        // command, even with --force. Preserve ordinary corrupt-artifact cleanup
+        // when the validator reports a read error rather than a typed hold.
+        if let Err(error) = engine::validate_publish_cleanup_safety(&dir)
+            && matches!(
+                engine::classify_publish_stop(&error),
+                Some(engine::PublishStopClassification::CleanupIncomplete)
+            )
+        {
+            return Err(error.context(
+                "cannot clean: retained process cleanup is incomplete; preserve the evidence and investigate the prior Cargo process",
+            ));
+        }
+
+        Ok(Self {
+            path: dir,
+            _owner: owner,
+        })
+    }
+
+    fn clean(&self, keep_receipt: bool) -> Result<Vec<CleanAction>> {
+        let dir = &self.path;
+        #[cfg(test)]
+        CLEAN_DELETE_OBSERVER.with(|observer| {
+            if let Some(observer) = observer.borrow().as_ref() {
+                observer(dir);
+            }
+        });
+        let mut actions = Vec::new();
+        let state_path = dir.join(shipper_core::state::execution_state::STATE_FILE);
+        let receipt_path = dir.join(shipper_core::state::execution_state::RECEIPT_FILE);
+        let reconciliation_path =
+            dir.join(shipper_core::state::execution_state::RECONCILIATION_FILE);
+
+        // Remove state file
+        if state_path.exists() {
+            std::fs::remove_file(&state_path)
+                .with_context(|| format!("failed to remove state file {}", state_path.display()))?;
+            actions.push(CleanAction::Removed(state_path.display().to_string()));
+        }
+
+        // Remove event logs (authoritative + preflight-only sidecars)
+        for events_path in discover_event_logs(dir)? {
+            if events_path.exists() {
+                std::fs::remove_file(&events_path).with_context(|| {
+                    format!("failed to remove events file {}", events_path.display())
+                })?;
+                actions.push(CleanAction::Removed(events_path.display().to_string()));
+            }
+        }
+
+        // Optionally remove receipt file
+        if !keep_receipt && receipt_path.exists() {
+            std::fs::remove_file(&receipt_path).with_context(|| {
+                format!("failed to remove receipt file {}", receipt_path.display())
+            })?;
+            actions.push(CleanAction::Removed(receipt_path.display().to_string()));
+        } else if keep_receipt && receipt_path.exists() {
+            actions.push(CleanAction::Kept(receipt_path.display().to_string()));
+        }
+
+        if !keep_receipt && reconciliation_path.exists() {
+            std::fs::remove_file(&reconciliation_path).with_context(|| {
+                format!(
+                    "failed to remove reconciliation file {}",
+                    reconciliation_path.display()
+                )
+            })?;
+            actions.push(CleanAction::Removed(
+                reconciliation_path.display().to_string(),
+            ));
+        } else if keep_receipt && reconciliation_path.exists() {
+            actions.push(CleanAction::Kept(reconciliation_path.display().to_string()));
+        }
+
+        // Remove cache directory if exists
+        let cache_dir = dir.join("cache");
+        if cache_dir.exists() {
+            std::fs::remove_dir_all(&cache_dir).with_context(|| {
+                format!("failed to remove cache directory {}", cache_dir.display())
+            })?;
+            actions.push(CleanAction::Removed(cache_dir.display().to_string()));
+        }
+
+        Ok(actions)
+    }
+}
+
+#[cfg(test)]
+type CleanDeleteObserver = Box<dyn Fn(&Path)>;
+
+#[cfg(test)]
+thread_local! {
+    static CLEAN_DELETE_OBSERVER: std::cell::RefCell<Option<CleanDeleteObserver>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
 fn clean_single_dir(
     dir: &Path,
     workspace_root: &Path,
     keep_receipt: bool,
     force: bool,
 ) -> Result<Vec<CleanAction>> {
-    let mut actions = Vec::new();
-    let state_path = dir.join(shipper_core::state::execution_state::STATE_FILE);
-    let receipt_path = dir.join(shipper_core::state::execution_state::RECEIPT_FILE);
-    let reconciliation_path = dir.join(shipper_core::state::execution_state::RECONCILIATION_FILE);
-    let lock_path = shipper_core::lock::lock_path(dir, Some(workspace_root));
-
-    // Ownership spans every deletion, even if the advisory JSON is missing.
-    // Never unlink the persistent OS guard or steal it with --force.
-    let _lock = if force {
-        if lock_path.exists() {
-            eprintln!(
-                "[warn] --force assumes any legacy or foreign publisher is quiescent; acquiring ownership before cleaning {}",
-                dir.display()
-            );
-        }
-        shipper_core::lock::LockFile::acquire_with_timeout_and_force(
-            dir,
-            Some(workspace_root),
-            Duration::ZERO,
-            true,
-        )
-    } else {
-        shipper_core::lock::LockFile::acquire(dir, Some(workspace_root))
-    }
-    .with_context(|| format!("cannot clean: active lock exists or ownership is unavailable in {}", dir.display()))?;
-
-    // Remove state file
-    if state_path.exists() {
-        std::fs::remove_file(&state_path)
-            .with_context(|| format!("failed to remove state file {}", state_path.display()))?;
-        actions.push(CleanAction::Removed(state_path.display().to_string()));
-    }
-
-    // Remove event logs (authoritative + preflight-only sidecars)
-    for events_path in discover_event_logs(dir)? {
-        if events_path.exists() {
-            std::fs::remove_file(&events_path).with_context(|| {
-                format!("failed to remove events file {}", events_path.display())
-            })?;
-            actions.push(CleanAction::Removed(events_path.display().to_string()));
-        }
-    }
-
-    // Optionally remove receipt file
-    if !keep_receipt && receipt_path.exists() {
-        std::fs::remove_file(&receipt_path)
-            .with_context(|| format!("failed to remove receipt file {}", receipt_path.display()))?;
-        actions.push(CleanAction::Removed(receipt_path.display().to_string()));
-    } else if keep_receipt && receipt_path.exists() {
-        actions.push(CleanAction::Kept(receipt_path.display().to_string()));
-    }
-
-    if !keep_receipt && reconciliation_path.exists() {
-        std::fs::remove_file(&reconciliation_path).with_context(|| {
-            format!(
-                "failed to remove reconciliation file {}",
-                reconciliation_path.display()
-            )
-        })?;
-        actions.push(CleanAction::Removed(
-            reconciliation_path.display().to_string(),
-        ));
-    } else if keep_receipt && reconciliation_path.exists() {
-        actions.push(CleanAction::Kept(reconciliation_path.display().to_string()));
-    }
-
-    // Remove cache directory if exists
-    let cache_dir = dir.join("cache");
-    if cache_dir.exists() {
-        std::fs::remove_dir_all(&cache_dir)
-            .with_context(|| format!("failed to remove cache directory {}", cache_dir.display()))?;
-        actions.push(CleanAction::Removed(cache_dir.display().to_string()));
-    }
-
-    Ok(actions)
+    PreparedCleanDirectory::acquire(dir.to_path_buf(), workspace_root, force)?.clean(keep_receipt)
 }
 
 fn run_config_with_loopback(cmd: ConfigCommands, allow_loopback: bool) -> Result<()> {
@@ -6246,6 +6615,7 @@ fn run_completion(shell: &Shell) -> Result<()> {
 #[cfg(test)]
 mod tests {
     mod clean_lock_ownership;
+    mod cleanup_incomplete;
 
     use std::fs;
 
@@ -6386,6 +6756,7 @@ mod tests {
             pending,
             failed,
             ambiguous,
+            cleanup_incomplete: 0,
             uploaded,
             skipped: 0,
             next_package: None,

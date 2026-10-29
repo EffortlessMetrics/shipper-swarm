@@ -6,5 +6,4 @@ Error: resume was refused before changing retained evidence or dispatching a pub
 
 Caused by:
     0: publish admission was refused
-    1: failed to parse state JSON <STATE_DIR>/state.json
-    2: missing field `state_version` at line 1 column 2
+    1: failed to parse state JSON; cannot inspect retained publication state; preserve the evidence before retrying

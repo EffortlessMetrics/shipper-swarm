@@ -6,6 +6,9 @@ fn captured(
     capture: process::CaptureStatus,
 ) -> process::CapturedCommandOutput {
     process::CapturedCommandOutput {
+        cleanup_failure: None,
+        interrupted: false,
+        interruption_lease: None,
         output: process::CommandOutput {
             exit_code: 42,
             stdout: stdout.into(),

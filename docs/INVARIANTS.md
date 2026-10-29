@@ -57,6 +57,8 @@ projection. Plaintext JSON replacements (`state.json`, `receipt.json`,
 `reconciliation.json`, and remediation plans) require the temporary file's
 write and `sync_all` to succeed before renaming it over the destination.
 Required file-sync errors retain the affected path and underlying I/O error.
+Cleanup persistence refusals retain both the typed cleanup stop and that I/O
+cause; a successful projection fallback does not turn the sync failure into success.
 The first returned error keeps its original source chain. After an attempted
 append, a write/flush/sync error makes that `EventLog` instance refuse all later
 writes, including writes to another path. It preserves pending events even when
@@ -235,6 +237,28 @@ authorization. A worker's local result cannot substitute for that check. The
 low-level report writer requires caller-provided exclusion for its whole call;
 this is an engine concurrency guarantee, not a new generic storage transaction,
 cross-process locking primitive, or fsync/power-loss guarantee.
+
+### Local process cleanup holds
+
+`package_cleanup_incomplete` records a local safety condition that takes
+precedence over registry observations. Its `cleanup_incomplete` projection
+cannot authorize another upload. Attempt admission checks every package hold
+under the same mutex used to publish an observed hold; already-admitted peers
+may finish, but later attempts and retries are refused. Rehearsal participates
+in the same invocation ownership key and checks retained evidence again after
+reservation.
+
+An observed hold is installed in memory before event/state persistence. If its
+event cannot be appended, the existing state writer may retain a projection-only
+hold as explicit evidence of that failed boundary. This is not an invented
+authoritative event or a normally consistent projection. Publish/resume refuse
+either retained form. An offline or exclusively invoked rebuild must refuse to
+erase an already-retained projection-only hold; the low-level rebuild API does
+not synchronize concurrent embedding writes. Within any replay, a hold event is
+absorbing despite later ordinary package events. Both-write failure, rehearsal
+hold-event append failure and crashes before hold persistence have no new
+cross-invocation durability guarantee. See [failure modes](failure-modes.md#retained-process-cleanup-hold)
+for the Unix containment and compatibility limits.
 
 ## Artifact compatibility across the 0.4 to 0.5 line
 

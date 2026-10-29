@@ -8,6 +8,11 @@ around this constraint — every step is persisted, classified, and recoverable.
 
 ## Error classification
 
+An invocation whose process cleanup cannot be confirmed stopped has a separate
+`CleanupIncomplete` safety hold. This takes precedence over Cargo's exit code,
+timeout, diagnostic classification and registry reconciliation. The local hold
+must not authorize another upload even when the registry reports absence.
+
 When the Cargo process exceeds Shipper's execution timeout, the shared package
 executor classifies it as **Ambiguous** using the typed timeout result. This
 decision is independent of output text and the configured tail length. An
@@ -34,15 +39,131 @@ Both tails are then omitted; stderr contains
 `[shipper: Cargo diagnostics omitted after capture loss]`. This conservative
 policy prevents a secret suffix or continuation from surviving after its
 redaction context was discarded. `--output-lines 0` still returns empty tails.
-The process exit code and timeout flag are preserved. Successful Cargo proceeds
-through upload/readiness as usual; unsuccessful incomplete capture must
+The process exit code and timeout flag are preserved. After complete process
+cleanup, successful Cargo proceeds through upload/readiness as usual;
+unsuccessful incomplete capture must
 reconcile before another upload. The omission message is explanatory; the engine
 uses typed completeness to make that decision.
 
 These limits apply to publication capture, including the public Cargo publish
 wrapper. Metadata and generic complete-output runners are unchanged, as are
-yank, install and dry-run capture. The readers still wait for inherited pipes to
-close, so this does not establish a finite descendant-cleanup deadline.
+yank, install and dry-run retention.
+
+### Unix subprocess cleanup
+
+On Linux and macOS, publication (with or without an execution timeout) and generic
+commands with an execution timeout use nonblocking stdout/stderr reads. The
+command starts in its own process group. Once the direct child exits or the
+execution deadline expires, Shipper sends a termination signal to that group and
+allows up to one additional second to drain the pipes, reap the direct child,
+and observe that the group is gone. OS scheduling and the spawn operation are
+not hard real-time guarantees.
+
+A failed group signal is provisional. If the direct child is then reaped, the
+group is proved absent, and both pipes reach EOF, cleanup is complete. If those
+facts remain unproved at the deadline, the invocation retains the cleanup hold.
+
+On Linux, orphaned zombie descendants can keep the group probe positive even
+after all active work has stopped. This can occur in containers whose PID 1 does
+not reap orphaned children. Shipper conservatively retains the hold; it does not
+treat a zombie-only group as absent. Use a container init that reaps children to
+avoid accumulating this condition.
+
+An early direct-child exit keeps its exit code and `timed_out=false`, including
+when its descendants inherited output handles. Only exceeding the execution
+deadline sets `timed_out=true`. Known incomplete cleanup is a separate typed
+result; APIs that expose only the legacy output fields return an error instead
+of silently dropping that result. Closing an unread pipe also makes diagnostic
+capture incomplete, preserving the fixed omission policy above.
+
+The termination signal uses the group identity while its original leader is
+still unreaped. Later checks are read-only, so PID reuse cannot redirect a kill
+to another invocation. Unrelated processes outside the group are unaffected.
+This contains cooperative descendants. A descendant that deliberately changes
+its group or session is outside that boundary: an escaped descendant retaining
+a pipe is detected as incomplete cleanup, while one that also closes both pipes
+cannot be discovered through this mechanism.
+
+Windows and other platforms retain the existing direct-child/reader behavior;
+the bounded Unix cleanup claim does not apply to them. Their owned-process and
+cancellable-I/O implementation and native proof remain tracked by issue #412.
+
+### Termination during publication
+
+On Linux and macOS, the shipped `shipper` and `shipper-cli` executables install
+process-lifetime handling for SIGINT, SIGTERM and SIGHUP. While a supervised Cargo
+group is active, a signal requests its existing bounded cleanup and stops later
+commands. For live publish/resume, confirmed cleanup retains the attempt as an
+ambiguous failure. The command returns an interruption error without an
+in-run retry. A fresh `resume` reconciles that attempt against the registry before
+any replacement upload. A signal does not assert that the upload was rejected.
+If cleanup cannot be confirmed, the absorbing cleanup hold below takes precedence.
+Rehearsal instead retains its existing `rehearsal_package_failed` event with an
+ambiguous class; it does not create a resumable live-publish attempt projection.
+
+Deferred termination remains owned through the interrupted or uncertain result's
+persistence attempt, including parallel peers. Outside those intervals, signals
+retain ordinary termination behavior; planning, untimed metadata/dry-run work,
+registry waits and backoff do not acquire a new cancellation-latency guarantee.
+The shutdown request is sticky within the process and is never reset between
+packages or retries. SIGKILL, process crashes, arbitrary external reapers and
+processes escaping the owned group remain outside this cooperative signal path.
+
+Plain `shipper_cli::run()` and core embedding entry points install no handlers.
+The executable-only `run_process()` wrapper owns this policy; embedders retain
+responsibility for their host's process and signal lifecycle. Native signal proof
+is Linux-only; macOS runtime qualification remains outstanding.
+
+### Retained process cleanup hold
+
+Known incomplete cleanup records `package_cleanup_incomplete` in `events.jsonl`
+and projects the affected package as `cleanup_incomplete` in `state.json`. Its
+attempt is retained with an unknown upload outcome and no scheduled retry. This
+is a local process condition: registry visibility or absence cannot clear it,
+and it does not change ordinary `Permanent` failure recovery.
+
+The hold applies to the entire state directory, including a package omitted by
+the current plan or `--resume-from`. Publish, resume, direct parallel dispatch
+and repeated rehearsal check both retained artifacts before starting new work.
+`--force`, `--force-resume` and a higher attempt ceiling do not override it.
+Rehearsal records the same hold event without inventing a normal publish state.
+The CLI reports `safe_to_resume=false` with investigation guidance; it offers no
+automatic hold-clearing command. `shipper clean` preserves a readable hold even
+when the other artifact is corrupt or another event line is malformed. A
+complete, typed hold record before or after the malformed line is sufficient
+to refuse cleanup; Shipper neither repairs the history nor prints the malformed
+payload. If the hold record itself is unreadable or no longer recognizable,
+publish/resume still refuse corrupt evidence, while explicit clean keeps its
+existing corrupt-artifact recovery behavior.
+
+Within parallel execution, attempt admission and hold publication share the
+state lock. A peer whose attempt was already committed may finish, while every
+later attempt or retry is refused. All admitted peers are joined before the
+scheduler returns. A worker error or synchronization error cannot turn a known
+typed cleanup stop into ordinary retry advice.
+
+The observed hold enters memory before its event/state transition. If appending
+the event fails, Shipper attempts to retain the hold through the existing state
+writer. An offline or exclusively invoked rebuild cannot erase an already
+retained projection-only hold when its authoritative event is missing; it
+refuses and preserves the artifacts. The low-level public rebuild writer does
+not acquire ownership and must not run concurrently with publication, cleanup
+or other embedding writes. A hold
+event also blocks when state is missing, stale or corrupt, and ordinary later
+events cannot clear a hold during rebuild. If both persistence writes fail, the
+current invocation still stops, but no durable refusal is promised for a later
+invocation; the error explicitly says that no safe rerun is established.
+Rehearsal has only the hold-event persistence path; an append failure has the
+same limit on refusal in a later invocation.
+
+This does not add a crash-proof process fence or a general process supervisor.
+A crash before recording the hold, deliberate escape with closed pipes, manual
+evidence removal, unsynchronized embedding writes and older binaries are
+outside this guarantee. Preserve the
+artifacts and use a binary that understands the hold vocabulary when inspecting
+such a run. In particular, some older publish entry points ignore historical
+events or trust caller-supplied state, so downgrading is not a supported way to
+recover a cleanup hold.
 
 ### Retryable patterns
 

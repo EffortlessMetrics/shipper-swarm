@@ -8,7 +8,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use cargo_metadata::{Metadata, MetadataCommand, Package};
 use serde::{Deserialize, Serialize};
 pub use shipper_output_sanitizer::redact_sensitive;
@@ -30,6 +30,9 @@ pub struct CargoOutput {
 pub(crate) struct CapturedCargoPublish {
     pub(crate) output: CargoOutput,
     pub(crate) capture: process::CaptureStatus,
+    pub(crate) cleanup_failure: Option<process::CleanupFailure>,
+    pub(crate) interrupted: bool,
+    pub(crate) _interruption_lease: Option<process::interruption::InterruptionLease>,
 }
 
 pub(crate) const PUBLISH_CAPTURE_OMITTED: &str =
@@ -151,7 +154,7 @@ pub fn cargo_publish(
     output_lines: usize,
     timeout: Option<Duration>,
 ) -> Result<CargoOutput> {
-    Ok(cargo_publish_with_capture(
+    let captured = cargo_publish_with_capture(
         workspace_root,
         package_name,
         registry_name,
@@ -159,8 +162,17 @@ pub fn cargo_publish(
         no_verify,
         output_lines,
         timeout,
-    )?
-    .output)
+    )?;
+    if let Some(failure) = captured.cleanup_failure {
+        bail!(
+            "cargo publish cleanup incomplete: {}; upload outcome remains unknown; stop before retrying",
+            failure.description()
+        );
+    }
+    if captured.interrupted || process::interruption::requested() {
+        return Err(process::interruption::Interrupted.into());
+    }
+    Ok(captured.output)
 }
 
 pub(crate) fn cargo_publish_with_capture(
@@ -244,6 +256,9 @@ fn finish_publish_capture(
         };
     }
     CapturedCargoPublish {
+        cleanup_failure: captured.cleanup_failure,
+        interrupted: captured.interrupted,
+        _interruption_lease: captured.interruption_lease,
         output: CargoOutput {
             exit_code,
             stdout_tail,

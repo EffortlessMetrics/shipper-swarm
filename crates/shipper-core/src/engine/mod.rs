@@ -34,6 +34,10 @@ use crate::types::{
 #[cfg(test)]
 use crate::types::{Finishability, PreflightPackage};
 
+#[doc(hidden)]
+pub use crate::ops::process::interruption::PublishInterruption;
+
+mod cleanup;
 pub(crate) mod execute_package;
 mod preflight;
 mod publish;
@@ -71,6 +75,21 @@ pub(crate) struct PublishRecoverableStopError {
     message: String,
     package: String,
     evidence_consistent: bool,
+}
+
+/// A local cleanup hold must survive adapter error classification and cannot
+/// be converted into registry reconciliation or a retry-ceiling suggestion.
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub(crate) struct PublishCleanupIncompleteError {
+    message: String,
+}
+
+/// Inspect retained cleanup safety before adapter convenience checks. The
+/// engine repeats this check through its owned shared admission boundary.
+#[doc(hidden)]
+pub fn validate_publish_cleanup_safety(state_dir: &Path) -> Result<()> {
+    publish::admission::validate_cleanup_safety(state_dir).context(PublishAdmissionError)
 }
 
 /// Typed context for an invocation refused before publish execution is admitted.
@@ -143,12 +162,26 @@ pub fn classify_resume_retry_budget(
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PublishStopClassification {
+    CleanupIncomplete,
+    Interrupted,
     StillUnknown { reconciliation_written: bool },
     RecoverableNotPublished { evidence_consistent: bool },
 }
 
 #[doc(hidden)]
 pub fn classify_publish_stop(error: &anyhow::Error) -> Option<PublishStopClassification> {
+    if error
+        .downcast_ref::<PublishCleanupIncompleteError>()
+        .is_some()
+    {
+        return Some(PublishStopClassification::CleanupIncomplete);
+    }
+    if error
+        .downcast_ref::<crate::ops::process::interruption::Interrupted>()
+        .is_some()
+    {
+        return Some(PublishStopClassification::Interrupted);
+    }
     if let Some(still_unknown) = error.downcast_ref::<PublishStillUnknownError>() {
         return Some(PublishStopClassification::StillUnknown {
             reconciliation_written: still_unknown.reconciliation_written,
@@ -477,6 +510,7 @@ fn run_publish_with_state_requirement(
     reporter: &mut dyn Reporter,
     require_existing_state: bool,
 ) -> Result<PublishRunOutcome> {
+    crate::ops::process::interruption::check()?;
     crate::config::validate_per_error_config(&opts.retry_per_error)?;
     let state_dir = resolve_state_dir(&ws.workspace_root, &opts.state_dir);
     let require_existing_state =
@@ -515,6 +549,7 @@ fn run_publish_with_state_requirement(
         };
 
         publish::finalize::record_consistency_drift(&events_path, &st, &mut event_log, reporter);
+        crate::ops::process::interruption::check()?;
         let receipt = publish::finalize::finish_parallel_run(
             ws,
             opts,
@@ -554,6 +589,7 @@ fn run_publish_with_state_requirement(
         }
     };
     publish::finalize::record_consistency_drift(&events_path, &st, &mut event_log, reporter);
+    crate::ops::process::interruption::check()?;
     let receipt = publish::finalize::finish_sequential_run(
         ws,
         opts,
@@ -723,6 +759,7 @@ pub fn run_rehearsal(
     opts: &RuntimeOptions,
     reporter: &mut dyn Reporter,
 ) -> Result<RehearsalOutcome> {
+    crate::ops::process::interruption::check()?;
     crate::config::validate_per_error_config(&opts.retry_per_error)?;
     let rehearsal_name = opts
         .rehearsal_registry
@@ -775,6 +812,11 @@ pub fn run_rehearsal(
 
     let workspace_root = &ws.workspace_root;
     let state_dir = resolve_state_dir(workspace_root, &opts.state_dir);
+    validate_publish_cleanup_safety(&state_dir)?;
+    let reservation = publish::admission::reserve_rehearsal(ws, opts, &state_dir)?;
+    let _lock = reservation
+        .claim(Some(&ws.plan.plan_id))
+        .context(PublishAdmissionError)?;
     std::fs::create_dir_all(&state_dir)
         .with_context(|| format!("failed to create state dir {}", state_dir.display()))?;
     let events_path = events::events_path(&state_dir);
@@ -815,6 +857,7 @@ pub fn run_rehearsal(
     let mut first_failure: Option<String> = None;
 
     for p in &ws.plan.packages {
+        crate::ops::process::interruption::check()?;
         let pkg_label = format!("{}@{}", p.name, p.version);
         reporter.info(&format!("rehearsing {pkg_label} â†’ {rehearsal_name}"));
         let start = Instant::now();
@@ -828,6 +871,32 @@ pub fn run_rehearsal(
             opts.output_lines,
             None,
         )?;
+        if let Some(failure) = captured.cleanup_failure {
+            let message = cleanup::message(failure);
+            reporter.error(&message);
+            return Err(cleanup::stop_rehearsal(
+                &mut event_log,
+                &events_path,
+                &pkg_label,
+                message,
+            ));
+        }
+        if captured.interrupted || crate::ops::process::interruption::requested() {
+            event_log.record(PublishEvent {
+                timestamp: Utc::now(),
+                event_type: EventType::RehearsalPackageFailed {
+                    name: p.name.clone(),
+                    version: p.version.clone(),
+                    class: ErrorClass::Ambiguous,
+                    message: "publication interrupted; process cleanup confirmed; registry outcome is unknown".into(),
+                },
+                package: pkg_label.clone(),
+            });
+            event_log
+                .write_to_file(&events_path)
+                .context(crate::ops::process::interruption::Interrupted)?;
+            return Err(crate::ops::process::interruption::Interrupted.into());
+        }
         let capture_complete = captured.capture.is_complete();
         let out = captured.output;
         if !capture_complete {
@@ -864,6 +933,9 @@ pub fn run_rehearsal(
             first_failure = Some(format!("{pkg_label}: {msg}"));
             break;
         }
+
+        drop(captured._interruption_lease);
+        crate::ops::process::interruption::check()?;
 
         // Post-publish visibility check on the rehearsal registry. Reuse
         // `version_exists` â€” same mechanism live publish trusts.
@@ -1099,6 +1171,7 @@ pub(crate) fn init_state(ws: &PlannedWorkspace, state_dir: &Path) -> Result<Exec
 #[cfg(test)]
 mod tests {
     mod capture_reconciliation;
+    mod cleanup_hold;
     mod file_sync;
     mod live_retry;
     mod lock_ownership;

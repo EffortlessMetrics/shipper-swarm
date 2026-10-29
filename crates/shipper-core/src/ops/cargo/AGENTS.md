@@ -28,7 +28,15 @@ module.
 ## Invariants & gotchas
 
 - **`SHIPPER_CARGO_BIN` override.** `cargo_program()` returns `$SHIPPER_CARGO_BIN` if set (used by tests to point at fake cargo binaries), else `"cargo"`. An empty string env var is NOT treated as unset — it is passed through verbatim.
-- **Timeout is a polling loop.** `cargo_publish` with `Some(timeout)` polls `try_wait` every 100ms and kills the direct child on deadline. `CargoOutput` retains `timed_out: true` and `exit_code: -1`. The stderr annotation survives only when complete retained tails include it; zero requested lines or capture loss can omit it. The typed flag is authoritative.
+- **Timeout and cleanup are separate.** On Linux/macOS, publication uses nonblocking
+  reads, an invocation-owned process group, a 10ms quiet poll, and one second for
+  group shutdown/reap/drain after exit or the execution deadline. An execution
+  timeout retains `timed_out: true` and `exit_code: -1`; early exit preserves its
+  result. The stderr annotation survives only when complete retained tails
+  include it. The internal wrapper carries typed `cleanup_failure`; public
+  `cargo_publish` returns an error if cleanup is incomplete because the legacy
+  `CargoOutput` shape cannot express a safe retry hold. Other platforms retain
+  the earlier direct-child polling/reader behavior.
 - **Output is always tailed + redacted.** Every `CargoOutput.stdout_tail` / `stderr_tail` is passed through `shipper_output_sanitizer::tail_lines`, which internally applies `redact_sensitive`. Callers can assume bearer tokens / `CARGO_REGISTRY_TOKEN=` values / `CARGO_REGISTRIES_<NAME>_TOKEN=` values are `[REDACTED]` before they ever reach `receipt.json` or the event log.
 - **Redaction is idempotent** (see `redact_is_idempotent_*` tests).
 - **Publish capture is bounded.** `cargo_publish` preserves its public result
@@ -39,7 +47,9 @@ module.
   a raw suffix. Complete requested tails preserve normal tail/redaction behavior.
   Redaction expansion is checked against the final payload limit too. Generic
   metadata, yank, install and dry-run capture retain their current semantics.
-  This does not bound inherited-pipe EOF or descendant cleanup.
+  Linux/macOS supervision separately bounds inherited-pipe drain and owned group
+  cleanup. Deliberate group/session escape is outside that containment boundary;
+  Windows bounded cleanup remains a separate obligation.
 - **Registry identity.** Publish wrappers pass `--registry` only for non-empty non-`crates-io` names. Containment via `cargo_yank` always passes the exact non-empty registry name, including `crates-io`, so Cargo's `registry.default` cannot retarget the action; empty names are refused before spawning.
 - **`WorkspaceMetadata::is_publishable`** treats version `0.0.0` as non-publishable and `publish = []` as non-publishable, matching Cargo's own semantics.
 - **`topological_order`** is a DFS-based visitor (distinct from the Kahn/BTreeSet sort in `crate::plan`). It's still useful for diagnostics; production planning goes through `crate::plan::build_release_plan`.

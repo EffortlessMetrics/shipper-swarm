@@ -679,3 +679,141 @@ fn file_sync_failed_attempt_batch_is_not_reappended_by_next_worker() {
         assert!(!state::receipt_path(&state_dir).exists());
     });
 }
+
+fn assert_cleanup_file_sync_failure(rehearsal: bool, owner_already_failed: bool) {
+    use crate::ops::process::CleanupFailure;
+    use crate::types::AttemptDetail;
+
+    let dir = tempdir().unwrap();
+    let ws = planned_workspace(dir.path(), "http://127.0.0.1:9".into());
+    let state_dir = dir.path().join(".shipper");
+    let events_path = events::events_path(&state_dir);
+    let retained = init_state(&ws, &state_dir).unwrap();
+    let shared_state = Arc::new(Mutex::new(retained));
+    let shared_log = Arc::new(Mutex::new(events::EventLog::new()));
+    let sync_calls = Arc::new(AtomicUsize::new(0));
+    let observed_calls = Arc::clone(&sync_calls);
+    let fault = crate::state::file_sync_test_support::observe(&state_dir, move |path| {
+        if path.file_name().and_then(|name| name.to_str()) == Some("events.jsonl") {
+            // Distinguish an appended event from a rejected open or write.
+            assert!(!events::EventLog::read_from_file(path).unwrap().is_empty());
+            observed_calls.fetch_add(1, Ordering::SeqCst);
+            return Err(std::io::Error::other(INJECTED));
+        }
+        Ok(())
+    });
+
+    if owner_already_failed {
+        let mut log = shared_log.lock().unwrap();
+        log.record(PublishEvent {
+            timestamp: Utc::now(),
+            package: "demo@0.1.0".into(),
+            event_type: EventType::PackageStarted {
+                name: "demo".into(),
+                version: "0.1.0".into(),
+            },
+        });
+        log.write_to_file(&events_path).unwrap_err();
+    }
+
+    let message = cleanup::message(CleanupFailure::InheritedPipe);
+    let error = if rehearsal {
+        cleanup::stop_rehearsal(
+            &mut shared_log.lock().unwrap(),
+            &events_path,
+            "demo@0.1.0",
+            message,
+        )
+    } else {
+        let now = Utc::now();
+        cleanup::stop_publish(
+            &shared_state,
+            &state_dir,
+            &shared_log,
+            &events_path,
+            "demo@0.1.0",
+            message,
+            AttemptDetail {
+                package: "demo".into(),
+                version: "0.1.0".into(),
+                attempt: 1,
+                max_attempts: 3,
+                started_at: now,
+                ended_at: now,
+                error_class: Some(ErrorClass::Ambiguous),
+                next_attempt_at: None,
+                redacted_message: Some("incomplete cleanup".into()),
+            },
+            &cargo::CargoOutput {
+                exit_code: 42,
+                stdout_tail: String::new(),
+                stderr_tail: String::new(),
+                timed_out: false,
+                duration: Duration::ZERO,
+            },
+        )
+    };
+    drop(fault);
+
+    assert!(matches!(
+        classify_publish_stop(&error),
+        Some(PublishStopClassification::CleanupIncomplete)
+    ));
+    let diagnostic = format!("{error:#}");
+    assert!(diagnostic.contains(INJECTED), "{diagnostic}");
+    assert!(diagnostic.contains(&events_path.display().to_string()));
+    assert!(
+        error.downcast_ref::<std::io::Error>().is_some(),
+        "cleanup classification must retain the underlying I/O cause: {diagnostic}"
+    );
+    assert_eq!(sync_calls.load(Ordering::SeqCst), 1);
+    let retained_bytes = fs::read(&events_path).unwrap();
+    let recorded = events::EventLog::read_from_file(&events_path).unwrap();
+    assert_eq!(
+        recorded
+            .all_events()
+            .iter()
+            .filter(|event| matches!(event.event_type, EventType::PackageCleanupIncomplete { .. }))
+            .count(),
+        usize::from(!owner_already_failed)
+    );
+    let mut log = shared_log.lock().unwrap();
+    let pending = log.len();
+    log.clear();
+    assert_eq!(log.len(), pending, "the failed batch stays inspectable");
+    log.write_to_file(&events_path).unwrap_err();
+    assert_eq!(fs::read(&events_path).unwrap(), retained_bytes);
+    drop(log);
+
+    if !rehearsal {
+        let state = state::load_state(&state_dir).unwrap().unwrap();
+        assert!(matches!(
+            state.packages["demo@0.1.0"].state,
+            PackageState::CleanupIncomplete { .. }
+        ));
+        assert_eq!(state.attempt_history.len(), 1);
+        assert!(matches!(
+            shared_state.lock().unwrap().packages["demo@0.1.0"].state,
+            PackageState::CleanupIncomplete { .. }
+        ));
+    }
+    assert!(matches!(
+        classify_publish_stop(&validate_publish_cleanup_safety(&state_dir).unwrap_err()),
+        Some(PublishStopClassification::CleanupIncomplete)
+    ));
+    assert!(!state::receipt_path(&state_dir).exists());
+}
+
+#[test]
+#[serial]
+fn file_sync_cleanup_hold_retains_io_cause_and_projection_fallback() {
+    for owner_already_failed in [false, true] {
+        assert_cleanup_file_sync_failure(false, owner_already_failed);
+    }
+}
+
+#[test]
+#[serial]
+fn file_sync_rehearsal_cleanup_retains_io_cause_and_event() {
+    assert_cleanup_file_sync_failure(true, false);
+}

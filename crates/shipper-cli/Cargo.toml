@@ -47,6 +47,9 @@ shipper-duration.workspace = true
 shipper-retry.workspace = true
 shipper-output-sanitizer.workspace = true
 
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+signal-hook = { version = "0.3.18", default-features = false }
+
 [lints]
 workspace = true
 

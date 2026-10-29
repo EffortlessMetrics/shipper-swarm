@@ -269,7 +269,9 @@ pub fn run_publish_parallel(
     reg: &RegistryClient,
     reporter: &mut dyn crate::engine::Reporter,
 ) -> Result<Vec<PackageReceipt>> {
+    crate::ops::process::interruption::check()?;
     crate::config::validate_per_error_config(&opts.retry_per_error)?;
+    crate::engine::publish::admission::ensure_no_cleanup_hold(st)?;
     // Direct calls always schedule complete dependency levels, independently
     // of the flag used by the full orchestrator to select its scheduler.
     let mut admission_opts = opts.clone();
@@ -400,8 +402,7 @@ pub(crate) fn run_publish_parallel_inner(
         );
         if let Err(err) = level_receipts {
             replay_buffered_messages(reporter, send_reporter.as_ref());
-            synchronize_parallel_state(st, &st_arc)?;
-            return Err(err);
+            return Err(synchronize_parallel_failure(st, &st_arc, err));
         }
         let level_receipts = level_receipts?;
         all_receipts.extend(level_receipts);
@@ -431,6 +432,19 @@ fn synchronize_parallel_state(
         .clone();
     *state = updated_state;
     Ok(())
+}
+
+fn synchronize_parallel_failure(
+    state: &mut ExecutionState,
+    state_arc: &Arc<Mutex<ExecutionState>>,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    match synchronize_parallel_state(state, state_arc) {
+        Ok(()) => error,
+        Err(sync_error) => error.context(format!(
+            "additionally failed to synchronize parallel state: {sync_error}"
+        )),
+    }
 }
 
 fn record_terminal_resume_skips(

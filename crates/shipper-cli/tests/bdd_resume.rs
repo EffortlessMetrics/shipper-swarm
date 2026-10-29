@@ -837,6 +837,7 @@ mod resume_plan_id_mismatch {
     /// When I run "shipper resume",
     /// Then the exit code is non-zero and the error mentions plan_id.
     #[test]
+    #[serial]
     fn given_mismatched_plan_id_when_resume_then_rejects_with_error() -> Result<()> {
         let td = tempdir().context("create mismatch workspace")?;
         create_single_crate_workspace(td.path());
@@ -866,9 +867,20 @@ mod resume_plan_id_mismatch {
         .replace("https://crates.io", &registry.base_url)
         .replace("https://index.crates.io", &registry.base_url);
         write_state_json(&state_dir, &mock_state);
+        // Isolate plan-identity refusal with valid retained event evidence.
+        // An unreadable event log is an independent admission refusal, and a
+        // recognized cleanup hold must take precedence over plan identity.
+        let retained_event = shipper_core::types::PublishEvent {
+            timestamp: chrono::Utc::now(),
+            event_type: shipper_core::types::EventType::PlanCreated {
+                plan_id: "intentionally-wrong-plan-id-12345".into(),
+                package_count: 1,
+            },
+            package: "all".into(),
+        };
         fs::write(
             state_dir.join("events.jsonl"),
-            b"{\"fixture\":\"pre-existing-event-evidence\"}\n",
+            format!("{}\n", serde_json::to_string(&retained_event)?),
         )
         .context("write pre-existing event evidence")?;
         let state_before = collect_files(&state_dir)?;
