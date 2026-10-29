@@ -47,6 +47,33 @@ enum IndexFile {
     Cached(String),
 }
 
+#[derive(Debug)]
+struct OwnersHttpStatusError {
+    status: StatusCode,
+    crate_name: String,
+}
+
+impl std::fmt::Display for OwnersHttpStatusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.status {
+            StatusCode::NOT_FOUND => {
+                write!(
+                    f,
+                    "crate not found when querying owners: {}",
+                    self.crate_name
+                )
+            }
+            StatusCode::FORBIDDEN => write!(
+                f,
+                "forbidden when querying owners; token may be invalid or missing required scope"
+            ),
+            status => write!(f, "unexpected status while querying owners: {status}"),
+        }
+    }
+}
+
+impl std::error::Error for OwnersHttpStatusError {}
+
 #[derive(Debug, Clone)]
 pub struct RegistryClient {
     registry: Registry,
@@ -165,11 +192,11 @@ impl RegistryClient {
                 let parsed: OwnersResponse = resp.json().context("failed to parse owners JSON")?;
                 Ok(parsed)
             }
-            StatusCode::NOT_FOUND => bail!("crate not found when querying owners: {crate_name}"),
-            StatusCode::FORBIDDEN => bail!(
-                "forbidden when querying owners; token may be invalid or missing required scope"
-            ),
-            s => bail!("unexpected status while querying owners: {s}"),
+            status => Err(OwnersHttpStatusError {
+                status,
+                crate_name: crate_name.to_owned(),
+            }
+            .into()),
         }
     }
 
@@ -317,28 +344,27 @@ impl RegistryClient {
 
     /// Attempt ownership verification for a crate.
     ///
-    /// Returns true if ownership is verified, false if verification fails or endpoint is unavailable.
-    /// This function implements graceful degradation - if the ownership check fails due to API
-    /// limitations, it returns false rather than an error.
+    /// Returns true when the owners response is valid, or false for an observed
+    /// HTTP 401, 403, or 404 response. Transport failures, malformed owners JSON,
+    /// and other HTTP statuses remain errors.
     pub fn verify_ownership(&self, crate_name: &str, token: &str) -> Result<bool> {
         match self.list_owners(crate_name, token) {
             Ok(_) => Ok(true),
-            Err(e) => {
-                // Graceful degradation: if the endpoint is unavailable or returns forbidden,
-                // return false rather than failing the entire preflight
-                let msg = format!("{e:#}");
-                if msg.contains("forbidden")
-                    || msg.contains("403")
-                    || msg.contains("unauthorized")
-                    || msg.contains("401")
-                    || msg.contains("not found")
-                    || msg.contains("404")
-                {
-                    Ok(false)
-                } else {
-                    Err(e)
-                }
+            Err(error)
+                if error
+                    .downcast_ref::<OwnersHttpStatusError>()
+                    .is_some_and(|error| {
+                        matches!(
+                            error.status,
+                            StatusCode::UNAUTHORIZED
+                                | StatusCode::FORBIDDEN
+                                | StatusCode::NOT_FOUND
+                        )
+                    }) =>
+            {
+                Ok(false)
             }
+            Err(error) => Err(error),
         }
     }
 
@@ -3173,17 +3199,88 @@ mod tests {
     }
 
     #[test]
-    fn verify_ownership_propagates_network_error() {
-        // Non-existent address that doesn't match graceful-degradation patterns
-        let server = tiny_http::Server::http("127.0.0.1:0").expect("server");
+    fn verify_ownership_propagates_transport_error_with_misleading_url() {
+        let crate_name = "transport-401-403-404-forbidden-unauthorized";
+        let server = Server::http("127.0.0.1:0").expect("server");
         let addr = format!("http://{}", server.server_addr());
-        drop(server);
+        let handle = thread::spawn(move || {
+            let req = server
+                .recv_timeout(Duration::from_secs(5))
+                .expect("receive request")
+                .expect("request before deadline");
+            assert_eq!(req.url(), format!("/api/v1/crates/{crate_name}/owners"));
+            // Taking the raw writer avoids tiny_http's automatic 500 response.
+            // Connection: close makes this owned peer close without an HTTP response.
+            drop(req.into_writer());
+        });
 
-        let cli = test_registry_client(test_registry(addr)).expect("client");
-        // Connection refused produces an error that doesn't contain "forbidden"/"not found"
-        // so it should propagate rather than degrade gracefully
-        let result = cli.verify_ownership("demo", "token");
-        assert!(result.is_err());
+        let mut cli = test_registry_client(test_registry(addr)).expect("client");
+        cli.http = Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .default_headers(reqwest::header::HeaderMap::from_iter([(
+                reqwest::header::CONNECTION,
+                reqwest::header::HeaderValue::from_static("close"),
+            )]))
+            .build()
+            .expect("bounded loopback client");
+        let result = cli.verify_ownership(crate_name, "token");
+        handle.join().expect("server join");
+
+        let err = result.expect_err("transport failure must not become an ownership result");
+        let source = err
+            .downcast_ref::<reqwest::Error>()
+            .expect("original transport error remains available");
+        assert!(source.status().is_none());
+        assert!(!source.is_timeout(), "the owned peer must close promptly");
+        assert_eq!(
+            source.url().expect("request URL").path(),
+            format!("/api/v1/crates/{crate_name}/owners")
+        );
+    }
+
+    #[test]
+    fn verify_ownership_propagates_decode_error_with_misleading_body() {
+        for message in [
+            "401",
+            "403",
+            "404",
+            "forbidden",
+            "unauthorized",
+            "not found",
+        ] {
+            let server = Server::http("127.0.0.1:0").expect("server");
+            let addr = format!("http://{}", server.server_addr());
+            let handle = thread::spawn(move || {
+                let req = server
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("receive request")
+                    .expect("request before deadline");
+                assert_eq!(req.url(), "/api/v1/crates/demo/owners");
+                req.respond(
+                    Response::from_string(format!(r#"{{"users":"{message}"}}"#))
+                        .with_status_code(StatusCode(200)),
+                )
+                .expect("respond");
+            });
+
+            let mut cli = test_registry_client(test_registry(addr)).expect("client");
+            cli.http = Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .expect("bounded loopback client");
+            let result = cli.verify_ownership("demo", "token");
+            handle.join().expect("server join");
+
+            let err =
+                result.expect_err("malformed owners JSON must not become an ownership result");
+            let source = err
+                .downcast_ref::<reqwest::Error>()
+                .expect("original decode error remains available");
+            assert!(source.is_decode(), "{err:#}");
+            assert!(source.status().is_none());
+        }
     }
 
     // ── Malformed index JSON edge cases ──────────────────────────────
@@ -5207,14 +5304,9 @@ mod tests {
         handle.join().expect("join");
     }
 
-    /// `verify_ownership` graceful-degradation when the underlying error
-    /// message contains the literal word "unauthorized" (lowercase). Built
-    /// directly via the 401 status path of `list_owners`, whose error
-    /// message contains "401" — which already matches one of the
-    /// substrings. This test pins the substring-matching behavior so that
-    /// future refactors keep the contract intact.
+    /// A real HTTP 401 response remains a graceful not-verified result.
     #[test]
-    fn verify_ownership_graceful_on_401_via_substring_match() {
+    fn verify_ownership_graceful_on_401_status() {
         let (api_base, handle) = with_server(|req| {
             req.respond(Response::empty(StatusCode(401)))
                 .expect("respond");
@@ -5476,8 +5568,8 @@ mod tests {
         handle.join().expect("join");
     }
 
-    /// `list_owners` against an unexpected 3xx — exercises the
-    /// catch-all `s => bail!` arm of the owners endpoint.
+    /// `list_owners` against an unexpected 3xx exercises the owners endpoint's
+    /// catch-all HTTP status error.
     #[test]
     fn list_owners_errors_for_unexpected_304_not_modified() {
         let (api_base, handle) = with_server(|req| {
