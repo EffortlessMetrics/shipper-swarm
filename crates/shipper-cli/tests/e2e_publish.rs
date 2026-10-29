@@ -12,6 +12,8 @@ mod receipt_git_context;
 mod registry_failure;
 #[path = "e2e_publish/resume_scope.rs"]
 mod resume_scope;
+#[path = "e2e_publish/retained_admission.rs"]
+mod retained_admission;
 
 use std::fs;
 use std::io::{Read, Write};

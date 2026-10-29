@@ -46,6 +46,7 @@ pub(in crate::engine) fn prepare_publish_run(
     ws: &PlannedWorkspace,
     opts: &RuntimeOptions,
     reporter: &mut dyn Reporter,
+    require_existing_state: bool,
 ) -> Result<PublishBootstrap> {
     let workspace_root = &ws.workspace_root;
     let state_dir = resolve_state_dir(workspace_root, &opts.state_dir);
@@ -55,7 +56,10 @@ pub(in crate::engine) fn prepare_publish_run(
     // is configured; opt-in until rehearsal phase-2 is stable.
     rehearsal::enforce_gate(ws, opts, &state_dir, reporter)?;
 
-    let lock = acquire_publish_lock(&state_dir, workspace_root, opts, &ws.plan.plan_id)
+    let (reservation, retained) =
+        super::admission::reserve_and_admit(ws, opts, &state_dir, require_existing_state)?;
+    let lock = reservation
+        .claim(Some(&ws.plan.plan_id))
         .context(crate::engine::PublishAdmissionError)?;
 
     // Attribute evidence to the same workspace used by the cleanliness gate,
@@ -70,7 +74,7 @@ pub(in crate::engine) fn prepare_publish_run(
 
     let events_path = events::events_path(&state_dir);
     let mut event_log = events::EventLog::new();
-    let mut state = load_or_initialize_state(ws, opts, &state_dir, reporter)?;
+    let mut state = load_or_initialize_state(ws, opts, &state_dir, retained, reporter)?;
     let registry = init_registry_client(ws.plan.registry.clone(), &state_dir, opts)?;
 
     reporter.info(&format!("state dir: {}", state_dir.as_path().display()));
@@ -101,30 +105,14 @@ pub(in crate::engine) fn prepare_publish_run(
     })
 }
 
-fn acquire_publish_lock(
-    state_dir: &Path,
-    workspace_root: &Path,
-    opts: &RuntimeOptions,
-    plan_id: &str,
-) -> Result<lock::LockFile> {
-    let lock = lock::LockFile::acquire_with_timeout_and_force(
-        state_dir,
-        Some(workspace_root),
-        opts.lock_timeout,
-        opts.force,
-    )
-    .context("failed to acquire publish lock")?;
-    lock.set_plan_id(plan_id)?;
-    Ok(lock)
-}
-
 fn load_or_initialize_state(
     ws: &PlannedWorkspace,
     opts: &RuntimeOptions,
     state_dir: &Path,
+    retained: Option<ExecutionState>,
     reporter: &mut dyn Reporter,
 ) -> Result<ExecutionState> {
-    match state::load_state(state_dir)? {
+    match retained {
         Some(existing) => {
             if validate_existing_plan_id(&existing, ws, opts)? {
                 reporter.warn("forcing resume with mismatched plan_id (unsafe)");
@@ -151,7 +139,7 @@ pub(in crate::engine) fn validate_existing_plan_id(
     Ok(mismatched)
 }
 
-fn record_execution_start(
+pub(in crate::engine) fn record_execution_start(
     ws: &PlannedWorkspace,
     _opts: &RuntimeOptions,
     events_path: &Path,

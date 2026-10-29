@@ -206,6 +206,47 @@ recorded as proof of absence. Ambiguous and uploaded packages continue through
 their dedicated reconciliation paths. This check does not reset retry ceilings
 or change permanent-error classification.
 
+### Controlled-stop admission
+
+`publish` and `resume` apply the same retained-evidence check before continuing
+a controlled `NotPublished` stop. The current terminal stop marker, state
+projection and reconciliation identity must agree, no completed receipt may be
+present, and the predecessor must be absent or conclusively not live. Live or
+unknown predecessor evidence refuses continuation even with `--force`. The
+selected packages must have room under the cumulative `--max-attempts` ceiling;
+raising that ceiling deliberately does not reset prior attempts or history.
+Current-attempt events also identify when a controlled-stop check is required:
+a `NotPublished` reconciliation followed by a retryable failure cannot evade
+validation merely because both the terminal marker and derived report identity
+are damaged. This event signal requires the complete evidence check; it never
+authorizes continuation by itself. Superseding attempts and outcomes retain
+the existing ordinary-failure, ambiguous-upload and uploaded-package recovery.
+
+An early check provides diagnostics, then Shipper reserves local OS ownership
+and rereads the durable evidence before claiming holder metadata, recording a
+new execution start, notifying webhooks or contacting the registry. Refused
+admission preserves the existing state, events, receipt, reconciliation and
+holder-record bytes. `resume` always requires retained state. A `publish` caller
+that already observed state also refuses if it disappears before ownership;
+remaining execution evidence cannot silently initialize a replacement run.
+Fresh publication, preflight/rehearsal-only history and completed idempotent
+reruns remain supported. This relies on the cooperating local ownership scope
+described below, not protection against external editors or legacy publishers.
+
+The direct `shipper_core::engine::parallel::run_publish_parallel` library entry
+point owns its invocation lock and applies the same admission with dependency
+level scope. It reloads durable state instead of trusting a stale caller copy.
+When no durable execution exists, the caller may supply an unattempted initial
+projection for the current plan and registry. A separately held lock, even from
+the same process, is refused because that signature does not transfer ownership.
+Each admitted direct call begins a new execution segment and records coherent
+controlled-stop evidence on a recoverable failure, allowing a raised-ceiling
+continuation and later idempotent calls. It returns package receipts on success
+without claiming `ExecutionFinished` or writing a full receipt. Call it without
+a separate lock, or use `run_publish` / `run_resume` for finalization and the
+completion notification. The orchestrator's private parallel adapter is used
+only after the orchestrator has acquired ownership and admitted evidence.
+
 ---
 
 ## Failure mode: Ambiguous upload result
