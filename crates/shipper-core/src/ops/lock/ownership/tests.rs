@@ -21,6 +21,7 @@ fn duplicate_ownership(record: &serde_json::Value) -> Vec<u8> {
 }
 
 #[test]
+#[serial_test::serial]
 fn released_handle_cannot_mutate_or_release_its_successor() {
     let directory = tempdir().unwrap();
     let path = lock_path(directory.path(), None);
@@ -56,6 +57,7 @@ fn released_handle_cannot_mutate_or_release_its_successor() {
 
 #[cfg(unix)]
 #[test]
+#[serial_test::serial]
 fn inherited_descriptor_does_not_extend_released_or_dropped_owner() {
     for explicit_release in [false, true] {
         let directory = tempdir().unwrap();
@@ -95,6 +97,7 @@ fn inherited_descriptor_does_not_extend_released_or_dropped_owner() {
 
 #[cfg(unix)]
 #[test]
+#[serial_test::serial]
 fn inherited_descriptor_does_not_extend_dropped_unclaimed_reservation() {
     let directory = tempdir().unwrap();
     let reservation =
@@ -118,6 +121,7 @@ fn inherited_descriptor_does_not_extend_dropped_unclaimed_reservation() {
 }
 
 #[test]
+#[serial_test::serial]
 fn owner_refuses_replaced_metadata_and_preserves_it_on_release() {
     let directory = tempdir().unwrap();
     let first = LockFile::acquire(directory.path(), None).unwrap();
@@ -135,6 +139,7 @@ fn owner_refuses_replaced_metadata_and_preserves_it_on_release() {
 }
 
 #[test]
+#[serial_test::serial]
 fn unclaimed_reservation_preserves_predecessor_bytes_and_excludes_other_owners() {
     let directory = tempdir().unwrap();
     let path = lock_path(directory.path(), None);
@@ -168,6 +173,7 @@ fn unclaimed_reservation_preserves_predecessor_bytes_and_excludes_other_owners()
 }
 
 #[test]
+#[serial_test::serial]
 fn missing_metadata_reservation_still_excludes_claimers_and_force() {
     let directory = tempdir().unwrap();
     let path = lock_path(directory.path(), None);
@@ -189,6 +195,7 @@ fn missing_metadata_reservation_still_excludes_claimers_and_force() {
 }
 
 #[test]
+#[serial_test::serial]
 fn live_os_ownership_ignores_old_and_future_metadata_even_with_force() {
     let directory = tempdir().unwrap();
     let path = lock_path(directory.path(), None);
@@ -217,6 +224,7 @@ fn live_os_ownership_ignores_old_and_future_metadata_even_with_force() {
 }
 
 #[test]
+#[serial_test::serial]
 fn known_protocol_orphan_is_recoverable_without_relying_on_age_or_pid() {
     let directory = tempdir().unwrap();
     let path = lock_path(directory.path(), None);
@@ -249,6 +257,7 @@ fn known_protocol_orphan_is_recoverable_without_relying_on_age_or_pid() {
 }
 
 #[test]
+#[serial_test::serial]
 fn unknown_metadata_requires_explicit_force_and_is_preserved_on_refusal() {
     let directory = tempdir().unwrap();
     let path = lock_path(directory.path(), None);
@@ -291,6 +300,7 @@ fn unknown_metadata_requires_explicit_force_and_is_preserved_on_refusal() {
 
 #[cfg(target_os = "linux")]
 #[test]
+#[serial_test::serial]
 fn positively_live_legacy_holder_is_not_overridden_even_by_force() {
     let directory = tempdir().unwrap();
     let path = lock_path(directory.path(), None);
@@ -320,6 +330,7 @@ fn positively_live_legacy_holder_is_not_overridden_even_by_force() {
 
 #[cfg(target_os = "linux")]
 #[test]
+#[serial_test::serial]
 fn malformed_ownership_extension_cannot_hide_a_positively_live_legacy_holder() {
     let directory = tempdir().unwrap();
     let path = lock_path(directory.path(), None);
@@ -352,6 +363,7 @@ fn malformed_ownership_extension_cannot_hide_a_positively_live_legacy_holder() {
 
 #[cfg(target_os = "linux")]
 #[test]
+#[serial_test::serial]
 fn malformed_ownership_extension_with_absent_or_unknown_holder_requires_force() {
     let directory = tempdir().unwrap();
     let path = lock_path(directory.path(), None);
@@ -399,6 +411,7 @@ fn malformed_ownership_extension_with_absent_or_unknown_holder_requires_force() 
 }
 
 #[test]
+#[serial_test::serial]
 fn duplicate_ownership_keeps_unknown_base_evidence_readable_on_every_platform() {
     let directory = tempdir().unwrap();
     let path = lock_path(directory.path(), None);
@@ -421,6 +434,7 @@ fn duplicate_ownership_keeps_unknown_base_evidence_readable_on_every_platform() 
 
 #[cfg(target_os = "linux")]
 #[test]
+#[serial_test::serial]
 fn legacy_recovery_requires_local_scope_and_positive_absence() {
     let directory = tempdir().unwrap();
     let path = lock_path(directory.path(), None);
@@ -442,6 +456,7 @@ fn legacy_recovery_requires_local_scope_and_positive_absence() {
 }
 
 #[test]
+#[serial_test::serial]
 fn legacy_timeout_boundary_uses_nonnegative_age_strictly_greater_than_timeout() {
     let now = Utc.with_ymd_and_hms(2026, 10, 28, 12, 0, 0).unwrap();
     let timeout = Duration::from_mins(1);
@@ -489,6 +504,7 @@ fn legacy_timeout_boundary_uses_nonnegative_age_strictly_greater_than_timeout() 
 }
 
 #[test]
+#[serial_test::serial]
 fn guard_io_failure_never_authorizes_metadata_replacement() {
     let directory = tempdir().unwrap();
     let path = lock_path(directory.path(), None);
@@ -505,6 +521,7 @@ fn guard_io_failure_never_authorizes_metadata_replacement() {
 }
 
 #[test]
+#[serial_test::serial]
 fn simultaneous_plan_updates_and_release_leave_no_stale_capability() {
     let directory = tempdir().unwrap();
     let first = Arc::new(LockFile::acquire(directory.path(), None).unwrap());
@@ -574,6 +591,7 @@ fn spawn_contender(directory: &Path, id: usize) -> Child {
 }
 
 #[test]
+#[serial_test::serial]
 #[ignore = "helper process for deterministic cross-process ownership tests"]
 fn lock_process_child() {
     let Some(directory) = std::env::var_os("SHIPPER_LOCK_CHILD_DIRECTORY") else {
@@ -592,6 +610,7 @@ fn lock_process_child() {
 }
 
 #[test]
+#[serial_test::serial]
 fn process_rendezvous_has_exactly_one_owner_held_until_all_contenders_finish() {
     let directory = tempdir().unwrap();
     let count = 6;
@@ -624,6 +643,7 @@ fn process_rendezvous_has_exactly_one_owner_held_until_all_contenders_finish() {
 }
 
 #[test]
+#[serial_test::serial]
 fn process_abandonment_releases_os_ownership_but_preserves_recoverable_metadata() {
     let directory = tempdir().unwrap();
     let mut children = Children(vec![spawn_contender(directory.path(), 0)]);

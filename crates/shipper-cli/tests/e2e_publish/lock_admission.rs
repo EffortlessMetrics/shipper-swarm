@@ -1,6 +1,7 @@
 use super::*;
 
 #[test]
+#[serial_test::serial]
 fn publish_guard_contention_is_state_conflict_and_preserves_evidence_even_with_force() -> Result<()>
 {
     let workspace = tempdir()?;

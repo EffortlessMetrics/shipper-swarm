@@ -373,6 +373,7 @@ mod tests {
             }
 
             #[test]
+            #[serial_test::serial]
             fn unknown_legacy_is_preserved_at_arbitrary_age(
                 age_hours in 2u32..1000u32,
                 timeout_secs in 1u64..3600u64,
@@ -486,6 +487,7 @@ mod tests {
             }
 
             #[test]
+            #[serial_test::serial]
             fn explicit_force_replaces_unknown_legacy_plan(
                 age_hours in 2u32..500u32,
                 plan_id in "[a-zA-Z0-9_-]{1,64}",
@@ -615,6 +617,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn acquire_with_timeout_preserves_unknown_old_metadata() {
         let td = tempdir().expect("tempdir");
 
@@ -775,6 +778,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn set_plan_id_fails_when_lock_released() {
         let td = tempdir().expect("tempdir");
         let lock = LockFile::acquire(td.path(), None).expect("acquire");
@@ -800,6 +804,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn acquire_with_timeout_preserves_corrupt_lock() {
         let td = tempdir().expect("tempdir");
         let lp = lock_path(td.path(), None);
@@ -843,6 +848,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn explicit_force_recovery_with_workspace_root() {
         let td = tempdir().expect("tempdir");
         let root = td.path().join("ws");
@@ -1009,6 +1015,7 @@ mod snapshot_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn error_set_plan_id_after_release() {
         let td = tempdir().expect("tempdir");
         let lock = LockFile::acquire(td.path(), None).expect("acquire");
@@ -1091,6 +1098,7 @@ mod edge_case_tests {
     // ── 1. Stale lock detection and recovery ────────────────────────────
 
     #[test]
+    #[serial_test::serial]
     fn unknown_legacy_near_timeout_is_preserved() {
         // Unknown legacy ownership is preserved independently of this timestamp.
         let td = tempdir().expect("tempdir");
@@ -1117,6 +1125,7 @@ mod edge_case_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn old_unknown_lock_is_preserved_after_timeout() {
         let td = tempdir().expect("tempdir");
         let lp = lock_path(td.path(), None);
@@ -1135,6 +1144,7 @@ mod edge_case_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn explicit_force_recovery_preserves_state_dir() {
         let td = tempdir().expect("tempdir");
         let nested = td.path().join("deep").join("state");
@@ -1158,6 +1168,7 @@ mod edge_case_tests {
     // ── 2. Concurrent lock acquisition from multiple threads ────────────
 
     #[test]
+    #[serial_test::serial]
     fn concurrent_acquire_only_one_succeeds() {
         let td = tempdir().expect("tempdir");
         let state_dir = td.path().to_path_buf();
@@ -1182,6 +1193,7 @@ mod edge_case_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn concurrent_explicit_force_still_has_exactly_one_owner() {
         let td = tempdir().expect("tempdir");
         let state_dir = td.path().to_path_buf();
@@ -1221,6 +1233,7 @@ mod edge_case_tests {
     // ── 3. Force-break of existing lock ─────────────────────────────────
 
     #[test]
+    #[serial_test::serial]
     fn deleting_metadata_does_not_release_os_ownership() {
         let td = tempdir().expect("tempdir");
         let lock = LockFile::acquire(td.path(), None).expect("initial owner");
@@ -1238,6 +1251,7 @@ mod edge_case_tests {
         drop(next);
     }
     #[test]
+    #[serial_test::serial]
     fn explicit_force_replaces_unknown_legacy_record() {
         // Explicit force can override unknown legacy metadata only after acquiring the OS guard.
         let td = tempdir().expect("tempdir");
@@ -1259,6 +1273,7 @@ mod edge_case_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn workspace_keys_have_independent_owned_guards() {
         let td = tempdir().expect("tempdir");
         let root_a = td.path().join("ws-a");
@@ -1336,6 +1351,7 @@ mod edge_case_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn corrupt_lock_requires_explicit_force() {
         let td = tempdir().expect("tempdir");
         let lp = lock_path(td.path(), None);
@@ -1409,6 +1425,7 @@ mod edge_case_tests {
     // ── 6. Lock with zero timeout ───────────────────────────────────────
 
     #[test]
+    #[serial_test::serial]
     fn zero_timeout_preserves_unknown_old_lock() {
         let td = tempdir().expect("tempdir");
         let lp = lock_path(td.path(), None);
@@ -1434,6 +1451,7 @@ mod edge_case_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn zero_timeout_preserves_corrupt_lock() {
         let td = tempdir().expect("tempdir");
         let lp = lock_path(td.path(), None);
@@ -1529,6 +1547,7 @@ mod edge_case_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn set_plan_id_on_externally_deleted_lock_fails() {
         let td = tempdir().expect("tempdir");
         let lock = LockFile::acquire(td.path(), None).unwrap();
@@ -1693,6 +1712,7 @@ mod proptest_edge_cases {
         }
 
         #[test]
+        #[serial_test::serial]
         fn explicit_force_recovers_unknown_metadata(
             dir_suffix in "[a-zA-Z0-9]{1,16}",
             garbage in "[^\x00]{1,256}",
@@ -1858,6 +1878,7 @@ mod hardened_tests {
     // ── Stale lock: force acquisition ───────────────────────────────────
 
     #[test]
+    #[serial_test::serial]
     fn explicit_force_replaces_all_metadata() {
         let td = tempdir().unwrap();
         let lp = lock_path(td.path(), None);
@@ -1998,6 +2019,7 @@ mod lock_edge_case_tests {
     // ── Stale lock with wrong (non-existent) PID ────────────────────
 
     #[test]
+    #[serial_test::serial]
     fn old_foreign_pid_is_not_proof_of_abandonment() {
         let td = tempdir().expect("tempdir");
         let lp = lock_path(td.path(), None);
@@ -2019,6 +2041,7 @@ mod lock_edge_case_tests {
     // ── Lock file with truncated JSON (corrupt) ─────────────────────
 
     #[test]
+    #[serial_test::serial]
     fn truncated_json_lock_is_preserved() {
         let td = tempdir().expect("tempdir");
         let lp = lock_path(td.path(), None);
@@ -2032,6 +2055,7 @@ mod lock_edge_case_tests {
     // ── Lock file with empty content ────────────────────────────────
 
     #[test]
+    #[serial_test::serial]
     fn empty_lock_file_is_preserved() {
         let td = tempdir().expect("tempdir");
         let lp = lock_path(td.path(), None);

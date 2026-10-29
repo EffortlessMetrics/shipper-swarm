@@ -1179,6 +1179,7 @@ pub(crate) fn init_state(ws: &PlannedWorkspace, state_dir: &Path) -> Result<Exec
 #[cfg(test)]
 mod tests {
     mod lock_ownership;
+    mod retained_retryable;
 
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -3290,10 +3291,12 @@ mod tests {
                 vec![
                     (404, "{}".to_string()),
                     (404, "{}".to_string()),
+                    // Resume checks retained retryable work before another upload.
+                    (404, "{}".to_string()),
                     (200, "{}".to_string()),
                 ],
             )]),
-            3,
+            4,
         );
         let ws = planned_workspace(td.path(), server.base_url.clone());
         let state_dir = td.path().join(".shipper");

@@ -32,6 +32,7 @@ fn assert_preserved(retained: &[(PathBuf, Vec<u8>)]) {
 }
 
 #[test]
+#[serial_test::serial]
 fn clean_refuses_held_ownership_even_with_force_or_missing_metadata() {
     for missing_metadata in [false, true] {
         for force in [false, true] {
@@ -62,6 +63,7 @@ fn clean_refuses_held_ownership_even_with_force_or_missing_metadata() {
 }
 
 #[test]
+#[serial_test::serial]
 fn clean_without_force_preserves_corrupt_metadata_and_all_artifacts() {
     let directory = tempdir().unwrap();
     let state_dir = directory.path().join(".shipper");
@@ -87,6 +89,7 @@ fn clean_without_force_preserves_corrupt_metadata_and_all_artifacts() {
 
 #[cfg(target_os = "linux")]
 #[test]
+#[serial_test::serial]
 fn clean_force_preserves_positively_live_legacy_holder_and_artifacts() {
     let directory = tempdir().unwrap();
     let state_dir = directory.path().join(".shipper");

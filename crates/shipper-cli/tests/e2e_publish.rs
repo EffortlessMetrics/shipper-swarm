@@ -2631,7 +2631,9 @@ fn conclusive_not_published_stop_status_and_resume_preserve_completed_packages()
 
     // Core and utils already exist. App is absent before and after its ambiguous
     // Cargo failure, so registry truth conclusively permits a controlled stop.
-    let first_registry = spawn_bounded_registry(vec![200, 200, 404, 404, 200], 5);
+    // The resumed precheck must also confirm absence before the successful
+    // retry's post-publish visibility check returns 200.
+    let first_registry = spawn_bounded_registry(vec![200, 200, 404, 404, 404, 200], 6);
     let first_registry_base = first_registry.base_url.clone();
     let first = loopback_shipper_cmd()
         .timeout(Duration::from_secs(20))
@@ -2681,6 +2683,7 @@ fn conclusive_not_published_stop_status_and_resume_preserve_completed_packages()
         serde_json::from_str(&fs::read_to_string(state_dir.join("state.json"))?)?;
     ensure!(initial_state["packages"]["app@0.1.0"]["state"]["state"] == "failed");
     ensure!(initial_state["packages"]["app@0.1.0"]["state"]["class"] == "retryable");
+    ensure!(initial_state["packages"]["app@0.1.0"]["attempts"] == 1);
     let event_values = fs::read_to_string(state_dir.join("events.jsonl"))?
         .lines()
         .map(serde_json::from_str::<serde_json::Value>)
@@ -2827,9 +2830,10 @@ fn conclusive_not_published_stop_status_and_resume_preserve_completed_packages()
         assert_sentinel_absent_from_output_and_state(output, &state_dir, SECRET);
     }
 
-    // The new run segment is granted a second total attempt. The registry sees
-    // exactly one successful post-publish visibility check, and only app is
-    // dispatched to Cargo; core/utils remain retained from the first segment.
+    // The new run segment is granted a second total attempt. Its precheck
+    // confirms app is still absent, then the post-publish check sees success.
+    // Only app reaches Cargo; core/utils remain retained from the first segment.
+    let retained_events = fs::read_to_string(state_dir.join("events.jsonl"))?;
     let resumed = loopback_shipper_cmd()
         .timeout(Duration::from_secs(20))
         .current_dir(td.path())
@@ -2883,6 +2887,17 @@ fn conclusive_not_published_stop_status_and_resume_preserve_completed_packages()
             .iter()
             .all(|call| !call.contains("-p core") && !call.contains("-p utils")),
         "all Cargo calls={all_calls:?}"
+    );
+    let final_state: serde_json::Value =
+        serde_json::from_slice(&fs::read(state_dir.join("state.json"))?)?;
+    ensure!(final_state["packages"]["app@0.1.0"]["attempts"] == 2);
+    for key in ["core@0.1.0", "utils@0.1.0"] {
+        ensure!(final_state["packages"][key]["attempts"] == 0);
+        ensure!(final_state["packages"][key]["state"]["state"] == "skipped");
+    }
+    ensure!(
+        fs::read_to_string(state_dir.join("events.jsonl"))?.starts_with(&retained_events),
+        "resume must preserve the predecessor event history"
     );
 
     let receipt: serde_json::Value =
