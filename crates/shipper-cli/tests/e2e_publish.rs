@@ -6,6 +6,8 @@
 
 #[path = "e2e_publish/lock_admission.rs"]
 mod lock_admission;
+#[path = "e2e_publish/per_error_refusal.rs"]
+mod per_error_refusal;
 #[path = "e2e_publish/receipt_git_context.rs"]
 mod receipt_git_context;
 #[path = "e2e_publish/registry_failure.rs"]

@@ -595,7 +595,8 @@ pub struct RuntimeOptions {
     pub retry_strategy: crate::retry::RetryStrategyType,
     /// Jitter factor for retry delays
     pub retry_jitter: f64,
-    /// Per-error-type retry configuration
+    /// Reserved per-error configuration; public engine entry points reject
+    /// configured classes. Leave empty to use the global retry policy.
     pub retry_per_error: crate::retry::PerErrorConfig,
     /// Timeout for the workspace-level dry-run verification step.
     pub verify_timeout: Duration,
