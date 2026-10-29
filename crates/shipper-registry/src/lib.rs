@@ -31,7 +31,7 @@ pub mod http;
 pub mod policy;
 
 // Primary public API: the canonical, Registry-aware client.
-pub use context::{Owner, OwnersResponse, RegistryClient};
+pub use context::{Owner, OwnersResponse, ReadinessObservationError, RegistryClient};
 pub use policy::{
     RegistryAuthority, RegistryPolicy, RehearsalRegistrySeparation, ValidatedRegistry,
     authorities_share_trusted_domain,

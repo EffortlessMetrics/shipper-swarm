@@ -303,3 +303,97 @@ fn containment_rejects_multi_registry_selectors_without_effects() {
         }
     }
 }
+
+fn receipt_planning_command(fixture: &Fixture, name: &str) -> Command {
+    let mut command = shipper_cmd();
+    command
+        .timeout(Duration::from_secs(15))
+        .current_dir(&fixture.caller)
+        .arg("--manifest-path")
+        .arg(fixture.workspace.join("Cargo.toml"))
+        .args(["--format", "json"])
+        .env("CARGO_NET_OFFLINE", "true")
+        .env("SHIPPER_CARGO_BIN", &fixture.cargo)
+        .env("SHIPPER_FAKE_CARGO_LOG", &fixture.args_log);
+    if let Some(path) = &fixture.state_arg {
+        command.arg("--state-dir").arg(path);
+    }
+    command.arg(name);
+    command
+}
+
+fn receipt_with_plan_id(path: &Path, plan_id: &str) {
+    write_remediation_receipt(path);
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    value["plan_id"] = plan_id.into();
+    fs::write(path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+}
+
+#[test]
+fn receipt_planning_defaults_use_workspace_state_paths() {
+    for name in ["plan-yank", "fix-forward"] {
+        for state_kind in ["default", "relative", "absolute"] {
+            let fixture = Fixture::new(Mode::Single, "crates-io", state_kind);
+            let decoys = [
+                fixture.caller.join(".shipper/receipt.json"),
+                fixture.caller.join("state with spaces/receipt.json"),
+            ];
+            for path in &decoys {
+                receipt_with_plan_id(path, "wrong-caller-receipt");
+            }
+            let before = fixture.evidence();
+            let decoy_bytes = decoys.map(|path| fs::read(path).unwrap());
+            let output = receipt_planning_command(&fixture, name)
+                .output()
+                .expect("run receipt planning");
+            assert!(
+                output.status.success(),
+                "{name}/{state_kind}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let plan: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(plan["command"], name);
+            assert_eq!(
+                plan["plan_id"], "plan-remediate-json",
+                "{name}/{state_kind}"
+            );
+            assert_eq!(fixture.evidence(), before);
+            assert_eq!(
+                [".shipper/receipt.json", "state with spaces/receipt.json"]
+                    .map(|path| fs::read(fixture.caller.join(path)).unwrap()),
+                decoy_bytes
+            );
+            assert!(!fixture.args_log.exists(), "planning cannot invoke a yank");
+        }
+    }
+}
+
+#[test]
+fn receipt_planning_preserves_explicit_caller_relative_and_absolute_paths() {
+    for name in ["plan-yank", "fix-forward"] {
+        for absolute in [false, true] {
+            let fixture = Fixture::new(Mode::Single, "crates-io", "relative");
+            let relative = PathBuf::from("explicit receipt.json");
+            let path = fixture.caller.join(&relative);
+            receipt_with_plan_id(&path, "explicit-selected-receipt");
+            let before = fixture.evidence();
+            let explicit_bytes = fs::read(&path).unwrap();
+            let output = receipt_planning_command(&fixture, name)
+                .arg("--from-receipt")
+                .arg(if absolute { &path } else { &relative })
+                .output()
+                .expect("run explicit receipt planning");
+            assert!(
+                output.status.success(),
+                "{name}/absolute={absolute}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let plan: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(plan["command"], name);
+            assert_eq!(plan["plan_id"], "explicit-selected-receipt");
+            assert_eq!(fixture.evidence(), before);
+            assert_eq!(fs::read(path).unwrap(), explicit_bytes);
+            assert!(!fixture.args_log.exists(), "planning cannot invoke a yank");
+        }
+    }
+}

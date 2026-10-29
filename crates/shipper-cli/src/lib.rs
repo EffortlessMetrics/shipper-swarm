@@ -2384,8 +2384,11 @@ pub fn run() -> Result<std::process::ExitCode> {
             use shipper_core::engine::plan_yank::{self, PlanYankFilter};
 
             let receipt_path = from_receipt.unwrap_or_else(|| {
-                opts.state_dir
-                    .join(shipper_core::state::execution_state::RECEIPT_FILE)
+                shipper_core::runtime::execution::resolve_state_dir(
+                    &planned.workspace_root,
+                    &opts.state_dir,
+                )
+                .join(shipper_core::state::execution_state::RECEIPT_FILE)
             });
 
             let receipt = plan_yank::load_receipt_from_path(&receipt_path).with_context(|| {
@@ -2438,8 +2441,11 @@ pub fn run() -> Result<std::process::ExitCode> {
             use shipper_core::engine::fix_forward::{self, SuccessorStrategy};
 
             let receipt_path = from_receipt.unwrap_or_else(|| {
-                opts.state_dir
-                    .join(shipper_core::state::execution_state::RECEIPT_FILE)
+                shipper_core::runtime::execution::resolve_state_dir(
+                    &planned.workspace_root,
+                    &opts.state_dir,
+                )
+                .join(shipper_core::state::execution_state::RECEIPT_FILE)
             });
 
             let plan =

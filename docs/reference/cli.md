@@ -75,6 +75,10 @@ effective state directory. Explicit plan-file arguments remain paths relative
 to the caller unless absolute; guarded remediation still requires the artifact
 to be the configured state directory's `remediation-plan.json`.
 
+When `--from-receipt` is omitted, `plan-yank` and `fix-forward` read
+`receipt.json` from that same workspace-resolved state directory. An explicit
+`--from-receipt` remains relative to the caller unless it is absolute.
+
 ## Commands at a glance
 
 | Command | What it does | Writes state? |

@@ -107,6 +107,10 @@ is used unchanged. Give `--plan` and `--execute-plan` a path accessible from the
 caller's directory; guarded remediation still accepts only the reviewed file
 in the effective state directory.
 
+The planning commands `plan-yank` and `fix-forward` also use that state
+directory for their default receipt. An explicit `--from-receipt` path is
+resolved from the caller's directory unless absolute.
+
 For a one-off operator action you can still use the lower-level primitive:
 
 ```bash
