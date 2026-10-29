@@ -1237,7 +1237,7 @@ pub(crate) fn publish_package_with_timeout(
                 return PackagePublishResult { result: Err(e) };
             }
 
-            let out = match cargo::cargo_publish(
+            let captured = match cargo::cargo_publish_with_capture(
                 &ws.workspace_root,
                 &p.name,
                 &ws.plan.registry.name,
@@ -1255,6 +1255,14 @@ pub(crate) fn publish_package_with_timeout(
                     return PackagePublishResult { result: Err(e) };
                 }
             };
+            let capture_complete = captured.capture.is_complete();
+            let out = captured.output;
+            if !capture_complete {
+                reporter.warn(&format!(
+                    "{}@{}: Cargo diagnostic capture was incomplete; diagnostic tails omitted",
+                    p.name, p.version
+                ));
+            }
             let attempt_ended_at = Utc::now();
 
             // Collect attempt evidence
@@ -1336,6 +1344,12 @@ pub(crate) fn publish_package_with_timeout(
                     (
                         ErrorClass::Ambiguous,
                         "cargo publish process timed out; registry reconciliation required"
+                            .to_string(),
+                    )
+                } else if !capture_complete {
+                    (
+                        ErrorClass::Ambiguous,
+                        "cargo publish diagnostic capture was incomplete; registry reconciliation required"
                             .to_string(),
                     )
                 } else {

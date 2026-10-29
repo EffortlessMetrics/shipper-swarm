@@ -58,21 +58,7 @@ strategy = "exponential"
 # Jitter factor for randomized delays (0.0 = no jitter, 1.0 = full jitter)
 jitter = 0.5
 
-# Per-error-type retry configuration (optional)
-# Uncomment and customize to override retry behavior for specific error types
-# [retry.per_error.retryable]
-# strategy = "immediate"
-# max_attempts = 10
-# base_delay = "0s"
-# max_delay = "1s"
-# jitter = 0.0
-
-# [retry.per_error.ambiguous]
-# strategy = "exponential"
-# max_attempts = 5
-# base_delay = "1s"
-# max_delay = "60s"
-# jitter = 0.3
+# Per-error retry policies are unsupported. Configure the global policy above.
 
 [flags]
 # Allow publishing from a dirty git working tree (not recommended)

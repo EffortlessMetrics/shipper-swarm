@@ -203,6 +203,18 @@ Controls retry behavior for failed publish operations.
 - **max_delay**: Maximum delay between retries (default: `2m`)
 - **jitter**: Jitter factor for randomized delays (default: `0.5`)
 
+`retry.per_error` class policies are unsupported. Earlier versions accepted
+them without changing execution; remove every `retryable`, `ambiguous`, or
+`permanent` class entry and use the global `[retry]` settings instead. `config
+validate`, validated configuration loading, and public engine execution entry
+points refuse configured classes before execution effects, even when CLI retry
+flags or force flags are supplied. An omitted value or empty `[retry.per_error]`
+table is allowed; an empty class subtable still configures that class and is
+refused. Unknown keys within `per_error` fail decoding. Diagnostic-only loaders
+can still inspect known class records, but those records cannot be executed.
+See [failure modes](failure-modes.md#global-retry-configuration) for migration and
+the unchanged retry safety rules.
+
 ### Flags
 
 ```toml

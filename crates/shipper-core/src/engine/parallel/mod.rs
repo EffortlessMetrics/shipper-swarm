@@ -278,6 +278,7 @@ pub fn run_publish_parallel(
     reg: &RegistryClient,
     reporter: &mut dyn crate::engine::Reporter,
 ) -> Result<Vec<PackageReceipt>> {
+    crate::config::validate_per_error_config(&opts.retry_per_error)?;
     // Direct calls always schedule complete dependency levels, independently
     // of the flag used by the full orchestrator to select its scheduler.
     let mut admission_opts = opts.clone();
