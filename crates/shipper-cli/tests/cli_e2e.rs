@@ -39,6 +39,12 @@ edition = "2021"
 }
 
 fn normalize_output(raw: &str) -> String {
+    let workspace_root = raw
+        .lines()
+        .find_map(|line| line.strip_prefix("workspace_root: "));
+    let state_dir = raw
+        .lines()
+        .find_map(|line| line.strip_prefix("state_dir: "));
     raw.lines()
         .map(|line| {
             if line.starts_with("plan_id: ") {
@@ -49,6 +55,15 @@ fn normalize_output(raw: &str) -> String {
                 "workspace_root: <WORKSPACE_ROOT>".to_string()
             } else if line.starts_with("state_dir: ") {
                 "state_dir: <STATE_DIR>".to_string()
+            } else if line.starts_with("    evidence: state_dir: ") {
+                let mut evidence = line.to_string();
+                if let Some(path) = state_dir {
+                    evidence = evidence.replace(path, "<STATE_DIR>");
+                }
+                if let Some(path) = workspace_root {
+                    evidence = evidence.replace(path, "<WORKSPACE_ROOT>");
+                }
+                evidence
             } else if line.starts_with("state:   ") {
                 "state:   <STATE_FILE>".to_string()
             } else if line.starts_with("receipt: ") {
@@ -230,6 +245,7 @@ fn plan_command_with_package_flag() {
 }
 
 #[test]
+#[serial_test::serial]
 fn doctor_command_snapshot() {
     let td = tempdir().expect("tempdir");
     create_workspace(td.path());
@@ -261,7 +277,7 @@ fn doctor_command_snapshot() {
     registry: crates-io (https://crates.io)
     auth_type: NONE FOUND (set CARGO_REGISTRY_TOKEN)
     state_dir: <STATE_DIR>
-    state_dir_exists: false (will be created)
+    state_dir_exists: false (prospective; write access is unverified)
 
     cargo: <CARGO_VERSION>
     git: <GIT_VERSION>
@@ -283,10 +299,19 @@ fn doctor_command_snapshot() {
           - configure Trusted Publishing with `permissions: id-token: write` and `rust-lang/crates-io-auth-action@v1`
           - rerun `shipper doctor` and `shipper preflight`
         docs: docs/how-to/run-in-github-actions.md
+      [unknown] state directory is prospective; write access is unverified (state-dir-not-created)
+        status: unknown
+        severity: warning
+        why: publish and resume need a usable directory for state, events, receipts, and locks; a diagnostic does not guarantee future access or durability
+        evidence: state_dir: <STATE_DIR>; path is absent; existing parent: <WORKSPACE_ROOT>; no directory or access probe was created
+        try next:
+          - create the intended directory or select an existing directory with `--state-dir <path>`
+          - rerun `shipper doctor` to check effective access
+        docs: docs/reference/state-files.md
 
     Doctor: blocked
-    Checks: 8 evaluated, 6 passed, 0 warnings, 1 blocker, 1 unknown
-    Unknown: git context
+    Checks: 8 evaluated, 5 passed, 0 warnings, 1 blocker, 2 unknown
+    Unknown: state directory, git context
     Next: shipper doctor — apply the blocking finding remediation, then rerun diagnostics
 
     Diagnostics complete.
@@ -295,6 +320,7 @@ fn doctor_command_snapshot() {
 }
 
 #[test]
+#[serial_test::serial]
 fn doctor_command_detects_trusted_publishing_auth() {
     let td = tempdir().expect("tempdir");
     create_workspace(td.path());
@@ -331,7 +357,7 @@ fn doctor_command_detects_trusted_publishing_auth() {
     registry: crates-io (https://crates.io)
     auth_type: trusted (detected)
     state_dir: <STATE_DIR>
-    state_dir_exists: false (will be created)
+    state_dir_exists: false (prospective; write access is unverified)
 
     cargo: <CARGO_VERSION>
     git: <GIT_VERSION>
@@ -353,10 +379,19 @@ fn doctor_command_detects_trusted_publishing_auth() {
           - pass `steps.auth.outputs.token` to Shipper as `CARGO_REGISTRY_TOKEN`
           - rerun `shipper doctor` and `shipper preflight`
         docs: docs/how-to/run-in-github-actions.md
+      [unknown] state directory is prospective; write access is unverified (state-dir-not-created)
+        status: unknown
+        severity: warning
+        why: publish and resume need a usable directory for state, events, receipts, and locks; a diagnostic does not guarantee future access or durability
+        evidence: state_dir: <STATE_DIR>; path is absent; existing parent: <WORKSPACE_ROOT>; no directory or access probe was created
+        try next:
+          - create the intended directory or select an existing directory with `--state-dir <path>`
+          - rerun `shipper doctor` to check effective access
+        docs: docs/reference/state-files.md
 
     Doctor: blocked
-    Checks: 8 evaluated, 6 passed, 0 warnings, 1 blocker, 1 unknown
-    Unknown: git context
+    Checks: 8 evaluated, 5 passed, 0 warnings, 1 blocker, 2 unknown
+    Unknown: state directory, git context
     Next: shipper doctor — apply the blocking finding remediation, then rerun diagnostics
 
     Diagnostics complete.
@@ -365,6 +400,7 @@ fn doctor_command_detects_trusted_publishing_auth() {
 }
 
 #[test]
+#[serial_test::serial]
 fn doctor_command_reports_partial_trusted_publishing_env() {
     let td = tempdir().expect("tempdir");
     create_workspace(td.path());
@@ -401,7 +437,7 @@ fn doctor_command_reports_partial_trusted_publishing_env() {
     registry: crates-io (https://crates.io)
     auth_type: unknown
     state_dir: <STATE_DIR>
-    state_dir_exists: false (will be created)
+    state_dir_exists: false (prospective; write access is unverified)
 
     cargo: <CARGO_VERSION>
     git: <GIT_VERSION>
@@ -423,10 +459,19 @@ fn doctor_command_reports_partial_trusted_publishing_env() {
           - run Shipper after the GitHub OIDC request URL and token are both available
           - or configure an explicit Cargo token fallback before rerunning preflight
         docs: docs/how-to/run-in-github-actions.md
+      [unknown] state directory is prospective; write access is unverified (state-dir-not-created)
+        status: unknown
+        severity: warning
+        why: publish and resume need a usable directory for state, events, receipts, and locks; a diagnostic does not guarantee future access or durability
+        evidence: state_dir: <STATE_DIR>; path is absent; existing parent: <WORKSPACE_ROOT>; no directory or access probe was created
+        try next:
+          - create the intended directory or select an existing directory with `--state-dir <path>`
+          - rerun `shipper doctor` to check effective access
+        docs: docs/reference/state-files.md
 
     Doctor: blocked
-    Checks: 8 evaluated, 6 passed, 0 warnings, 1 blocker, 1 unknown
-    Unknown: git context
+    Checks: 8 evaluated, 5 passed, 0 warnings, 1 blocker, 2 unknown
+    Unknown: state directory, git context
     Next: shipper doctor — apply the blocking finding remediation, then rerun diagnostics
 
     Diagnostics complete.

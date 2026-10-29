@@ -19,6 +19,10 @@ mod redaction;
 mod summary;
 
 #[cfg(test)]
+#[path = "tests/state_dir.rs"]
+mod state_dir_tests;
+
+#[cfg(test)]
 pub(crate) use checks::tools::print_cmd_version;
 pub(crate) use redaction::redact_diagnostic_value;
 
@@ -153,11 +157,7 @@ fn summarize_report(
 
     statuses.push((
         "state directory",
-        if state_dir.exists && state_dir.writable.is_none() {
-            summary::DoctorCheckStatus::Unknown
-        } else {
-            summary::status_from_findings(&state_dir.findings)
-        },
+        summary::status_from_findings(&state_dir.findings),
     ));
 
     statuses.extend(tools.iter().map(|tool| {

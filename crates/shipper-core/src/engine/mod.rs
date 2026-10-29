@@ -1102,6 +1102,7 @@ mod tests {
     mod live_retry;
     mod lock_ownership;
     mod per_error_refusal;
+    mod reconciliation_concurrency;
     mod retained_admission;
     mod retained_retryable;
     mod timeout_reconciliation;
