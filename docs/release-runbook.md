@@ -504,7 +504,11 @@ Cargo output is a hint. Registry truth is the safety boundary. Never blind-retry
 
 ## 9. Resume an interrupted train
 
-Use the release record's approved version and SHA. Identify the run that uploaded the last valid `.shipper` state and dispatch resume in `EffortlessMetrics/shipper`:
+Use the release record's approved version and SHA. Identify the original publish
+run, or the most recent interrupted resume run, that uploaded the last valid
+`shipper-state-final` artifact. Every publish and resume run uses this same name
+within its own run. Dispatch a new resume in `EffortlessMetrics/shipper` with that
+predecessor's run ID:
 
 ```bash
 VERSION=<recorded-release-version>
@@ -524,7 +528,7 @@ gh workflow run release.yml \
   --ref "$WORKFLOW_REF" \
   -f mode=resume \
   -f ref="$RELEASE_SHA" \
-  -f artifact_run_id=<source-run-id> \
+  -f artifact_run_id=<prior-publish-or-resume-run-id> \
   -f approved_sha="$RELEASE_SHA" \
   -f approved_tree="$RELEASE_TREE" \
   -f approved_version="$VERSION" \
@@ -540,6 +544,16 @@ SHA/tree, version, tag, registry, approval record, and approved auth posture
 before minting a fresh token or doing work. Record both the source artifact run
 and the resume run. Before resuming, inspect events and state; after resuming,
 verify already-published packages were skipped and no duplicate upload occurred.
+
+Selection is restricted to exactly one nonexpired `shipper-state-final` in the
+requested run; the download consumes its immutable artifact ID. Missing, expired,
+ambiguous, or mismatched evidence stops the job without falling back to another
+run. The job summary records the selected predecessor run and artifact ID. A
+`shipper-state-preflight` artifact is not a resume input. If another interruption
+occurs, start a new resume dispatch with the just-interrupted resume run's ID;
+do not reuse the original publication artifact or rename a download manually.
+Use separate dispatches for continuation rather than rerunning the same workflow
+run, whose immutable artifact name may already have been uploaded.
 
 Do not create a new tag or start a fresh publish workflow to recover an interrupted train.
 
