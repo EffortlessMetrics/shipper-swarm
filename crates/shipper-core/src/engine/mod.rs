@@ -191,14 +191,17 @@ pub trait Reporter {
     fn warn(&mut self, msg: &str);
     fn error(&mut self, msg: &str);
 
-    /// Narrate a retry-backoff wait to the operator and block until the wait
-    /// has elapsed. Called once per retry backoff site after the
-    /// [`EventType::RetryBackoffStarted`] event has been recorded. The default
-    /// implementation preserves the pre-#103 behavior (a single `warn()` line
-    /// then `thread::sleep(delay)`); richer UIs (e.g., the CLI) override it to
-    /// render a live countdown during the wait window. Overrides MUST block
-    /// for the full `delay` before returning â€” the engine relies on this
-    /// method to own the retry sleep. See #103 and #91.
+    /// Narrate the remaining retry-backoff wait after the
+    /// [`EventType::RetryBackoffStarted`] event has been recorded. Both
+    /// schedulers forward this callback on the host thread while the package
+    /// worker owns the actual retry sleep. `delay` is the time remaining on
+    /// that same monotonic wait when the callback is delivered.
+    ///
+    /// The default implementation warns once and sleeps for `delay`; richer
+    /// UIs may render a countdown or return immediately. Callback duration
+    /// does not authorize, extend, or restart the worker's retry delay. A slow
+    /// callback can delay later narration while the worker retains control of
+    /// retry admission and durable transitions.
     #[allow(clippy::too_many_arguments)]
     fn retry_wait(
         &mut self,
@@ -1097,6 +1100,7 @@ pub(crate) fn init_state(ws: &PlannedWorkspace, state_dir: &Path) -> Result<Exec
 mod tests {
     mod capture_reconciliation;
     mod file_sync;
+    mod live_retry;
     mod lock_ownership;
     mod per_error_refusal;
     mod reconciliation_concurrency;

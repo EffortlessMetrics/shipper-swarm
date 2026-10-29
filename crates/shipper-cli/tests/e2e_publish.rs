@@ -6,6 +6,8 @@
 
 #[path = "e2e_publish/ci_github_actions.rs"]
 mod ci_github_actions;
+#[path = "e2e_publish/live_retry.rs"]
+mod live_retry;
 #[path = "e2e_publish/lock_admission.rs"]
 mod lock_admission;
 #[path = "e2e_publish/per_error_refusal.rs"]

@@ -120,20 +120,36 @@ pub(crate) fn run_sequential_scheduler(
             // Already-terminal packages (Published / Skipped) are handled
             // inside publish_package_with_timeout so sequential and parallel
             // share the same resume-skip event + receipt shape (#153).
-            let result = publish_package_with_timeout(
-                package,
-                ws,
-                opts,
-                reg,
-                &st_arc,
-                state_dir,
-                &event_log_arc,
-                events_path,
-                &send_reporter,
-                sequential_cargo_timeout(opts),
-            );
-            crate::engine::parallel::drain_retry_waits_to_host(reporter, &send_reporter);
-            crate::engine::parallel::replay_buffered_messages_to_host(reporter, &send_reporter);
+            // Keep the host reporter on its calling thread while the same
+            // canonical executor owns Cargo, retry sleeps, and transitions.
+            // Only one package worker is live in sequential mode.
+            let result = std::thread::scope(|scope| {
+                let handle = scope.spawn(|| {
+                    publish_package_with_timeout(
+                        package,
+                        ws,
+                        opts,
+                        reg,
+                        &st_arc,
+                        state_dir,
+                        &event_log_arc,
+                        events_path,
+                        &send_reporter,
+                        sequential_cargo_timeout(opts),
+                    )
+                });
+                while !handle.is_finished() {
+                    send_reporter.wait_for_messages();
+                    crate::engine::parallel::replay_buffered_messages_to_host(
+                        reporter,
+                        &send_reporter,
+                    );
+                }
+                let result = handle.join();
+                crate::engine::parallel::replay_buffered_messages_to_host(reporter, &send_reporter);
+                result
+                    .map_err(|_| anyhow::anyhow!("sequential publish worker join failed for {key}"))
+            })?;
 
             match result.result {
                 Ok(receipt) => receipts.push(receipt),
@@ -141,7 +157,6 @@ pub(crate) fn run_sequential_scheduler(
             }
         }
 
-        crate::engine::parallel::drain_retry_waits_to_host(reporter, &send_reporter);
         crate::engine::parallel::replay_buffered_messages_to_host(reporter, &send_reporter);
         Ok(receipts)
     })();

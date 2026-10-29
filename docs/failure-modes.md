@@ -109,6 +109,21 @@ exponential backoff with jitter (the `Default` policy).
 
 With jitter of 0.5, each delay is multiplied by a random factor in `[0.5, 1.5]`.
 
+### Live retry progress
+
+Sequential and parallel publishing deliver retry progress during the wait before
+the next Cargo attempt. The displayed delay is the time remaining on the package
+worker's monotonic backoff deadline. Rendering a countdown does not add another
+retry wait or determine whether an attempt is allowed.
+
+Information, warnings, errors, and retry notices retain their enqueue order, so a
+failed-attempt warning precedes its retry notice and later success message. Across
+parallel packages, this is the order in which workers enqueue their messages.
+Slow reporter callbacks can delay narration while workers continue with the same
+retry policy and durable outcomes. Callbacks run on the caller's thread and do not
+need to be `Send`. Human progress stays on stderr; quiet mode suppresses it and
+JSON publish output remains one command envelope.
+
 ### Global retry configuration
 
 Configure one retry policy in `.shipper.toml`:
