@@ -77,7 +77,7 @@ configured budget. An inconclusive final probe can therefore produce
 A positive API or valid sparse-index observation establishes publication.
 With readiness enabled, negative reconciliation evidence requires a successful
 final observation from every configured authority: API `404`, sparse-index `404`, or a fully readable
-index containing valid version records but not the requested version. In
+index containing valid Cargo semantic versions but not the requested version. In
 `Both` mode both probes must establish absence in the same final poll;
 `prefer_index` changes query order only. Either probe may still establish
 presence while the other is unavailable. Disabled readiness retains its legacy

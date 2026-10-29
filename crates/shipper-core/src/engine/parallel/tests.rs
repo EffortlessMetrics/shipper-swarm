@@ -4812,6 +4812,7 @@ fn test_error_in_second_level_preserves_first_level_success_state() {
     // Level 0 publishes as already existing in registry, so it is marked Skipped.
     // Level 1 depends on level 0 and fails, proving the first level result is still
     // synchronized back on the failure return path.
+    // Base precheck + dependent precheck + conclusive absent reconciliation.
     let server = spawn_registry_server(
         BTreeMap::from([
             (
@@ -4823,7 +4824,7 @@ fn test_error_in_second_level_preserves_first_level_success_state() {
                 vec![(404, "{}".to_string())],
             ),
         ]),
-        2,
+        3,
     );
 
     let ws = PlannedWorkspace {
@@ -4860,6 +4861,7 @@ fn test_error_in_second_level_preserves_first_level_success_state() {
     let state_dir = td.path().join(".shipper");
     let mut opts = default_opts(state_dir.clone());
     opts.max_attempts = 1;
+    opts.readiness.max_total_wait = Duration::ZERO;
 
     let mut packages = BTreeMap::new();
     for p in &ws.plan.packages {

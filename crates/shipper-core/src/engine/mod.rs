@@ -1627,9 +1627,16 @@ mod tests {
     #[test]
     #[serial]
     fn verify_published_returns_false_on_timeout() {
+        let server = spawn_registry_server(
+            std::collections::BTreeMap::from([(
+                "/api/v1/crates/demo/0.1.0".to_string(),
+                vec![(404, "{}".to_string())],
+            )]),
+            1,
+        );
         let reg = test_registry_client(Registry {
             name: "crates-io".to_string(),
-            api_base: "http://127.0.0.1:9".to_string(),
+            api_base: server.base_url.clone(),
             index_base: None,
         })
         .expect("client");
@@ -1650,7 +1657,7 @@ mod tests {
         let td = tempdir().expect("tempdir");
         let events_path = td.path().join("events.jsonl");
         let mut event_log = events::EventLog::new();
-        let (ok, _evidence) = verify_published(
+        let (ok, evidence) = verify_published(
             &reg,
             "demo",
             "0.1.0",
@@ -1662,6 +1669,64 @@ mod tests {
         )
         .expect("verify");
         assert!(!ok);
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].attempt, 1);
+        assert!(!evidence[0].visible);
+        let events = events::EventLog::read_from_file(&events_path).expect("events");
+        assert!(events.all_events().iter().any(|event| matches!(
+            event.event_type,
+            EventType::ReadinessTimeout { max_wait_ms: 0 }
+        )));
+        assert!(
+            !events
+                .all_events()
+                .iter()
+                .any(|event| matches!(event.event_type, EventType::ReadinessError { .. }))
+        );
+        assert_eq!(server.seen.lock().expect("requests").len(), 1);
+        server.join();
+    }
+
+    #[test]
+    #[serial]
+    fn verify_published_keeps_unavailable_registry_unknown() {
+        let reg = test_registry_client(Registry {
+            name: "crates-io".to_string(),
+            api_base: "http://127.0.0.1:9".to_string(),
+            index_base: None,
+        })
+        .expect("client");
+        let mut config = default_opts(PathBuf::from(".shipper")).readiness;
+        config.max_total_wait = Duration::ZERO;
+        let td = tempdir().expect("tempdir");
+        let events_path = td.path().join("events.jsonl");
+        let error = verify_published(
+            &reg,
+            "demo",
+            "0.1.0",
+            &config,
+            &mut CollectingReporter::default(),
+            &mut events::EventLog::new(),
+            &events_path,
+            "demo@0.1.0",
+        )
+        .expect_err("unavailable transport cannot establish absence");
+        assert!(
+            error
+                .downcast_ref::<shipper_registry::ReadinessObservationError>()
+                .is_some()
+        );
+        let events = events::EventLog::read_from_file(&events_path).expect("events");
+        assert!(
+            events
+                .all_events()
+                .iter()
+                .any(|event| matches!(event.event_type, EventType::ReadinessError { .. }))
+        );
+        assert!(!events.all_events().iter().any(|event| matches!(
+            event.event_type,
+            EventType::ReadinessTimeout { .. } | EventType::ReadinessPoll { visible: false, .. }
+        )));
     }
 
     /// The polling loop itself now lives in `shipper-registry`, but the
@@ -3572,10 +3637,24 @@ mod tests {
     #[test]
     #[serial]
     fn enabled_reconciliation_still_unknown_stops_publish_and_resume_in_both_modes() {
-        for (parallel, method) in [
-            (false, crate::types::ReadinessMethod::Api),
-            (true, crate::types::ReadinessMethod::Api),
-            (false, crate::types::ReadinessMethod::Index),
+        for (parallel, method, index_response) in [
+            (false, crate::types::ReadinessMethod::Api, "unused index"),
+            (true, crate::types::ReadinessMethod::Api, "unused index"),
+            (
+                false,
+                crate::types::ReadinessMethod::Index,
+                "secret-response-sentinel",
+            ),
+            (
+                false,
+                crate::types::ReadinessMethod::Index,
+                r#"{"vers":""}"#,
+            ),
+            (
+                true,
+                crate::types::ReadinessMethod::Index,
+                r#"{"vers":"not-a-version"}"#,
+            ),
         ] {
             let td = tempdir().expect("tempdir");
             let bin = td.path().join("bin");
@@ -3598,10 +3677,7 @@ mod tests {
                             "/api/v1/crates/demo/0.1.0".into(),
                             vec![(404, "{}".into()), (500, "secret-response-sentinel".into())],
                         ),
-                        (
-                            "/de/mo/demo".into(),
-                            vec![(200, "secret-response-sentinel".into())],
-                        ),
+                        ("/de/mo/demo".into(), vec![(200, index_response.into())]),
                     ]),
                     3,
                 );
@@ -5992,13 +6068,13 @@ mod tests {
                 ),
             ],
             || {
-                // All registry checks return 404 so the package is never found
+                // Three negative version probes (precheck + two reconciliations)
+                // and one crate-exists probe keep retry evidence conclusive.
                 let server = spawn_registry_server(
                     std::collections::BTreeMap::from([
                         (
                             "/api/v1/crates/demo/0.1.0".to_string(),
                             vec![
-                                (404, "{}".to_string()),
                                 (404, "{}".to_string()),
                                 (404, "{}".to_string()),
                                 (404, "{}".to_string()),
@@ -6009,11 +6085,12 @@ mod tests {
                             vec![(200, "{}".to_string())],
                         ),
                     ]),
-                    5,
+                    4,
                 );
                 let ws = planned_workspace(td.path(), server.base_url.clone());
                 let mut opts = default_opts(PathBuf::from(".shipper"));
                 opts.max_attempts = 2;
+                opts.readiness.max_total_wait = Duration::ZERO;
                 opts.base_delay = Duration::from_millis(0);
                 opts.max_delay = Duration::from_millis(0);
 
@@ -6059,6 +6136,7 @@ mod tests {
                         .iter()
                         .any(|event| matches!(event.event_type, EventType::PublishWaiting { .. }))
                 );
+                assert_eq!(server.seen.lock().expect("requests").len(), 4);
                 server.join();
             },
         );
@@ -6985,7 +7063,7 @@ mod tests {
                 ),
             ],
             || {
-                // 3 attempts * (version check + registry fallback) + final check = many 404s
+                // Initial precheck + three post-failure checks + one final poll.
                 let server = spawn_registry_server(
                     std::collections::BTreeMap::from([(
                         "/api/v1/crates/demo/0.1.0".to_string(),
@@ -7002,6 +7080,7 @@ mod tests {
                 let ws = planned_workspace(td.path(), server.base_url.clone());
                 let mut opts = default_opts(PathBuf::from(".shipper"));
                 opts.max_attempts = 3;
+                opts.readiness.max_total_wait = Duration::ZERO;
                 opts.base_delay = Duration::from_millis(0);
                 opts.max_delay = Duration::from_millis(0);
 
@@ -7029,6 +7108,7 @@ mod tests {
                     }
                     _ => unreachable!("unreachable due guard above"),
                 }
+                assert_eq!(server.seen.lock().expect("requests").len(), 5);
                 server.join();
             },
         );
@@ -7935,6 +8015,7 @@ mod tests {
                 ),
             ],
             || {
+                // Initial precheck + three post-failure checks + one final poll.
                 let server = spawn_registry_server(
                     std::collections::BTreeMap::from([(
                         "/api/v1/crates/demo/0.1.0".to_string(),
@@ -7944,15 +8025,14 @@ mod tests {
                             (404, "{}".to_string()),
                             (404, "{}".to_string()),
                             (404, "{}".to_string()),
-                            (404, "{}".to_string()),
-                            (404, "{}".to_string()),
                         ],
                     )]),
-                    7,
+                    5,
                 );
                 let ws = planned_workspace(td.path(), server.base_url.clone());
                 let mut opts = default_opts(PathBuf::from(".shipper"));
                 opts.max_attempts = 3;
+                opts.readiness.max_total_wait = Duration::ZERO;
                 opts.base_delay = Duration::from_millis(0);
                 opts.max_delay = Duration::from_millis(0);
 
@@ -7979,6 +8059,7 @@ mod tests {
                     attempt_msgs.len(),
                     attempt_msgs
                 );
+                assert_eq!(server.seen.lock().expect("requests").len(), 5);
                 server.join();
             },
         );

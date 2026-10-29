@@ -5994,6 +5994,86 @@ mod tests {
     }
 
     #[test]
+    fn unknown_observation_invalid_semver_is_not_absence_over_http_or_local_index() {
+        for content in [
+            r#"{"vers":""}"#,
+            r#"{"vers":"not-a-version"}"#,
+            "{\"vers\":\"0.9.0\"}\n{\"vers\":\"not-a-version\"}",
+            "{\"vers\":\"not-a-version\"}\n{\"vers\":\"0.9.0\"}",
+        ] {
+            for local in [false, true] {
+                let td = tempfile::tempdir().expect("local index");
+                let path = td.path().join("index");
+                std::fs::write(&path, content).expect("index fixture");
+                let server = spawn_counting_registry(vec![(200, content.into())]);
+                let cli = counting_client(&server);
+                let mut cfg = readiness_config(ReadinessMethod::Index);
+                cfg.max_total_wait = Duration::ZERO;
+                cfg.index_path = local.then_some(path);
+                let mut emitted = Vec::new();
+                let error = cli
+                    .is_version_visible_with_backoff_and_events(
+                        "demo",
+                        "1.0.0",
+                        &cfg,
+                        &mut |event| {
+                            emitted.push(event);
+                            Ok(())
+                        },
+                    )
+                    .expect_err("invalid version records must remain unknown")
+                    .downcast::<ReadinessObservationError>()
+                    .expect("typed observation error");
+                assert_eq!(error.attempts(), 1);
+                assert!(error.evidence().is_empty());
+                assert!(emitted.is_empty(), "no successful negative poll event");
+                assert!(!error.to_string().contains("not-a-version"));
+                assert_eq!(server.request_count(), usize::from(!local));
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_observation_invalid_semver_after_304_requires_conclusive_refresh() {
+        for invalid in ["", "not-a-version"] {
+            let cached = serde_json::json!({ "vers": invalid }).to_string();
+            for (fresh, expected) in [
+                (cached.clone(), None),
+                (r#"{"vers":"0.9.0"}"#.into(), Some(false)),
+                (r#"{"vers":"1.0.0"}"#.into(), Some(true)),
+            ] {
+                let td = tempfile::tempdir().expect("cache");
+                let path = td.path().join("de/mo/demo");
+                std::fs::create_dir_all(path.parent().expect("parent")).expect("cache dir");
+                std::fs::write(&path, &cached).expect("cached invalid version");
+                std::fs::write(path.with_extension("etag"), "\"validator\"").expect("etag");
+                let server = spawn_counting_registry(vec![(304, String::new()), (200, fresh)]);
+                let cli = counting_client(&server).with_cache_dir(td.path().to_path_buf());
+                let mut cfg = readiness_config(ReadinessMethod::Index);
+                cfg.max_total_wait = Duration::ZERO;
+                let result = cli.is_version_visible_with_backoff("demo", "1.0.0", &cfg);
+                match expected {
+                    Some(expected_visible) => {
+                        let (visible, evidence) = result.expect("conclusive refreshed record");
+                        assert_eq!(visible, expected_visible);
+                        assert_eq!(evidence.len(), 1);
+                        assert_eq!(evidence[0].visible, expected_visible);
+                    }
+                    None => {
+                        let error = result
+                            .expect_err("invalid refreshed version must not prove absence")
+                            .downcast::<ReadinessObservationError>()
+                            .expect("typed observation error");
+                        assert_eq!(error.attempts(), 1);
+                        assert!(error.evidence().is_empty());
+                    }
+                }
+                assert_eq!(server.request_count(), 2, "one unconditional refresh");
+            }
+        }
+    }
+
+    #[test]
     fn unknown_observation_transport_timeout_is_not_absence() {
         let server = Server::http("127.0.0.1:0").expect("server");
         let base = format!("http://{}", server.server_addr());

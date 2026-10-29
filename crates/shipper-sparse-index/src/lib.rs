@@ -53,9 +53,10 @@ pub fn contains_version(content: &str, version: &str) -> bool {
 /// Observe version presence without treating unreadable records as absence.
 ///
 /// A valid matching record proves presence even if another record is malformed.
-/// Absence requires at least one record and every nonblank record to parse. An
-/// empty or malformed response cannot authorize another upload. Callers with a
-/// conclusive HTTP 404 should handle that absence at the transport boundary.
+/// Absence requires at least one record and every nonblank record to contain a
+/// valid Cargo semantic version. An empty or malformed response cannot authorize
+/// another upload. Callers with a conclusive HTTP 404 should handle that absence
+/// at the transport boundary.
 /// The permissive [`contains_version`] helper retains its existing contract.
 pub fn observe_version(content: &str, version: &str) -> Result<bool, InvalidIndexObservation> {
     let mut records = 0;
@@ -63,9 +64,12 @@ pub fn observe_version(content: &str, version: &str) -> Result<bool, InvalidInde
     for line in content.lines().filter(|line| !line.trim().is_empty()) {
         records += 1;
         match serde_json::from_str::<SparseIndexEntry>(line) {
-            Ok(entry) if entry.vers == version => return Ok(true),
-            Ok(_) => {}
-            Err(_) => invalid = true,
+            Ok(entry) if semver::Version::parse(&entry.vers).is_ok() => {
+                if entry.vers == version {
+                    return Ok(true);
+                }
+            }
+            _ => invalid = true,
         }
     }
     if records == 0 || invalid {
@@ -114,6 +118,55 @@ mod tests {
             Err(InvalidIndexObservation)
         );
         assert!(!InvalidIndexObservation.to_string().contains("secret"));
+    }
+
+    #[test]
+    fn observe_version_rejects_invalid_semver_without_losing_valid_presence() {
+        for invalid in [
+            "",
+            "not-a-version",
+            "1.0",
+            "01.0.0",
+            "1.0.0-",
+            "1.0.0+",
+            " 1.0.0",
+            "1.0.0\n",
+        ] {
+            let malformed = serde_json::json!({ "vers": invalid }).to_string();
+            assert_eq!(
+                observe_version(&malformed, "2.0.0"),
+                Err(InvalidIndexObservation),
+                "invalid version {invalid:?} must not prove absence"
+            );
+            assert_eq!(
+                observe_version(&malformed, invalid),
+                Err(InvalidIndexObservation)
+            );
+            assert!(
+                contains_version(&malformed, invalid),
+                "legacy search remains permissive"
+            );
+            for mixed in [
+                format!("{malformed}\n{{\"vers\":\"1.0.0\"}}"),
+                format!("{{\"vers\":\"1.0.0\"}}\n{malformed}"),
+            ] {
+                assert_eq!(observe_version(&mixed, "1.0.0"), Ok(true));
+                assert_eq!(
+                    observe_version(&mixed, "2.0.0"),
+                    Err(InvalidIndexObservation)
+                );
+            }
+        }
+        for valid in ["0.0.0", "1.2.3-alpha.1+build.7", "2.0.0+build.42"] {
+            let content = serde_json::json!({ "vers": valid }).to_string();
+            assert_eq!(observe_version(&content, valid), Ok(true));
+            assert_eq!(observe_version(&content, "9.9.9"), Ok(false));
+        }
+        assert_eq!(
+            observe_version(r#"{"vers":"1.2.3+build.7"}"#, "1.2.3+build.8"),
+            Ok(false),
+            "semantic validation must preserve exact version-string matching"
+        );
     }
 
     #[test]
