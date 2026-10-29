@@ -103,7 +103,7 @@ module root and a `pub(crate)` boundary; they are not separately published.
 Examples:
 
 - `shipper_core::ops::auth` - token resolution and OIDC detection
-- `shipper_core::ops::lock` - file-based distributed locking
+- `shipper_core::ops::lock` - owned local OS file guard and advisory holder metadata
 - `shipper_core::ops::process` - subprocess invocation and capture
 - `shipper_core::plan` - workspace analysis, topo-sort, plan ID, levels, chunking
 - `shipper_core::engine` - preflight, publish, resume, reconcile, readiness verification

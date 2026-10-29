@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
@@ -56,7 +55,8 @@ pub(in crate::engine) fn prepare_publish_run(
     // is configured; opt-in until rehearsal phase-2 is stable.
     rehearsal::enforce_gate(ws, opts, &state_dir, reporter)?;
 
-    let lock = acquire_publish_lock(&state_dir, workspace_root, opts, &ws.plan.plan_id)?;
+    let lock = acquire_publish_lock(&state_dir, workspace_root, opts, &ws.plan.plan_id)
+        .context(crate::engine::PublishAdmissionError)?;
 
     // Attribute evidence to the same workspace used by the cleanliness gate,
     // even when an embedding caller or --manifest-path selects it from elsewhere.
@@ -107,13 +107,13 @@ fn acquire_publish_lock(
     opts: &RuntimeOptions,
     plan_id: &str,
 ) -> Result<lock::LockFile> {
-    let lock_timeout = if opts.force {
-        Duration::ZERO
-    } else {
-        opts.lock_timeout
-    };
-    let lock = lock::LockFile::acquire_with_timeout(state_dir, Some(workspace_root), lock_timeout)
-        .context("failed to acquire publish lock")?;
+    let lock = lock::LockFile::acquire_with_timeout_and_force(
+        state_dir,
+        Some(workspace_root),
+        opts.lock_timeout,
+        opts.force,
+    )
+    .context("failed to acquire publish lock")?;
     lock.set_plan_id(plan_id)?;
     Ok(lock)
 }

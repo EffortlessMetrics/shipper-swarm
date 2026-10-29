@@ -73,6 +73,17 @@ pub(crate) struct PublishRecoverableStopError {
     evidence_consistent: bool,
 }
 
+/// Typed context for an invocation refused before publish execution is admitted.
+#[derive(Debug, thiserror::Error)]
+#[error("publish admission was refused")]
+pub(crate) struct PublishAdmissionError;
+
+/// Preserve admission identity across the separate CLI adapter without parsing prose.
+#[doc(hidden)]
+pub fn is_publish_admission_error(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<PublishAdmissionError>().is_some()
+}
+
 #[derive(Debug)]
 struct ResumeRetryBudgetError {
     package: String,
@@ -393,7 +404,7 @@ pub fn run_preflight_in_place_with_options(
 /// Execute the publish operation for all packages in the workspace.
 ///
 /// This is the main publishing function that:
-/// 1. Acquires a distributed lock to prevent concurrent publishes
+/// 1. Acquires an owned local filesystem guard to prevent cooperating concurrent publishes
 /// 2. Checks git cleanliness (if configured)
 /// 3. Initializes or resumes from existing state
 /// 4. Publishes each package in dependency order
@@ -1167,6 +1178,8 @@ pub(crate) fn init_state(ws: &PlannedWorkspace, state_dir: &Path) -> Result<Exec
 
 #[cfg(test)]
 mod tests {
+    mod lock_ownership;
+
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
@@ -6475,9 +6488,8 @@ mod tests {
     }
 
     #[test]
-    fn run_publish_force_skips_lock_timeout() {
-        // When force=true, lock_timeout is set to ZERO. This test verifies
-        // the opts are respected without blocking.
+    fn run_publish_force_without_predecessor_preserves_completed_state() {
+        // Explicit force is accepted when no other invocation owns the guard.
         let td = tempdir().expect("tempdir");
         let ws = planned_workspace(td.path(), "http://127.0.0.1:9".to_string());
         let state_dir = td.path().join(".shipper");
