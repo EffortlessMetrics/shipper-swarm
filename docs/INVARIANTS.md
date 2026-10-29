@@ -160,6 +160,22 @@ reporting and retry sleeps remain outside that critical section. This is an
 in-process concurrency guarantee, not an all-or-nothing filesystem transaction
 or a host/power-loss durability claim.
 
+Reconciliation report generation uses that same event-log mutex across the
+complete durable-event read, record derivation, and report replacement. Package
+workers cannot overwrite newer reconciliation evidence with an older snapshot
+or interfere with another worker's `reconciliation.tmp`. The report path takes
+only the event-log mutex; package transitions retain the event-log-then-state
+lock order. Cargo, registry polling, backoff, and report warnings remain outside
+this report persistence boundary.
+
+Post-join finalization derives the report after workers finish, while the
+invocation still owns its publication key. A failed report read or write remains
+observable, and the complete event/state/report consistency check owns recovery
+authorization. A worker's local result cannot substitute for that check. The
+low-level report writer requires caller-provided exclusion for its whole call;
+this is an engine concurrency guarantee, not a new generic storage transaction,
+cross-process locking primitive, or fsync/power-loss guarantee.
+
 ## Artifact compatibility across the 0.4 to 0.5 line
 
 The compatibility promise is asymmetric:
