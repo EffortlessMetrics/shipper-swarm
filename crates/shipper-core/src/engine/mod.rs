@@ -1099,6 +1099,7 @@ pub(crate) fn init_state(ws: &PlannedWorkspace, state_dir: &Path) -> Result<Exec
 #[cfg(test)]
 mod tests {
     mod capture_reconciliation;
+    mod file_sync;
     mod live_retry;
     mod lock_ownership;
     mod per_error_refusal;
