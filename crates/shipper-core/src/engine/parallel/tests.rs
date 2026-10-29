@@ -2879,8 +2879,14 @@ fn test_webhook_failure_is_non_blocking_and_mode_parity_holds() {
     let webhook_received_clone = Arc::clone(&webhook_received);
     let webhook_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let webhook_done_clone = std::sync::Arc::clone(&webhook_done);
+    let (release_webhooks, await_publish) = std::sync::mpsc::channel();
 
     let webhook_handle = std::thread::spawn(move || {
+        // A valid late-delivery schedule: neither scheduler may require this
+        // notification endpoint to accept requests before returning success.
+        await_publish
+            .recv_timeout(Duration::from_secs(5))
+            .expect("publish schedulers must finish before webhook delivery");
         let mut total = 0usize;
         while !webhook_done_clone.load(std::sync::atomic::Ordering::Acquire) {
             if let Ok(Some(mut req)) = webhook_server.recv_timeout(Duration::from_millis(100)) {
@@ -2990,14 +2996,44 @@ fn test_webhook_failure_is_non_blocking_and_mode_parity_holds() {
         },
     );
 
+    release_webhooks.send(()).expect("release webhook fixture");
+    // Delivery guards are registered before detached threads are spawned. Both
+    // schedulers have returned, so zero now means every queued sender finished;
+    // keep the HTTP fixture alive until then instead of racing its shutdown.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while crate::webhook::active_test_deliveries() != 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let remaining_deliveries = crate::webhook::active_test_deliveries();
     webhook_done.store(true, std::sync::atomic::Ordering::Release);
     registry_server.join();
     webhook_handle.join().expect("webhook thread");
+    assert_eq!(
+        remaining_deliveries, 0,
+        "all queued webhook attempts must finish before checking delivery counts"
+    );
 
     let received = webhook_received.lock().unwrap();
-    assert!(
-        received.len() >= 2,
-        "expected webhook delivery attempts despite webhook failures"
+    assert_eq!(
+        received.len(),
+        4,
+        "each scheduler must attempt its run-start and package-success notifications"
+    );
+    let mut counts = BTreeMap::<String, usize>::new();
+    for body in received.iter() {
+        let payload: shipper_webhook::WebhookPayload =
+            serde_json::from_str(body).expect("complete webhook payload");
+        let event = payload.extra["legacy"]["event"]
+            .as_str()
+            .expect("typed notification kind");
+        *counts.entry(event.to_string()).or_default() += 1;
+    }
+    assert_eq!(
+        counts,
+        BTreeMap::from([
+            ("publish_started".to_string(), 2),
+            ("publish_succeeded".to_string(), 2),
+        ])
     );
 }
 

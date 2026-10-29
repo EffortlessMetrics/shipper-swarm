@@ -1,6 +1,7 @@
 # How to run a Shipper release in GitHub Actions
 
-Goal: a tag push triggers a workspace release driven by Shipper. Interruption-safe, evidence-preserved.
+Goal: an explicitly approved workspace release runs through Shipper and retains
+the evidence needed to inspect its result and choose a later recovery operation.
 
 > **Destructive live-registry fence:** the workflow below can publish permanent
 > versions. Protect the `release` environment with maintainer approval and use
@@ -13,79 +14,107 @@ Goal: a tag push triggers a workspace release driven by Shipper. Interruption-sa
 
 ## Minimal workflow
 
+This example is for GitHub.com with the Cargo workspace at the checkout root.
+Create a protected `release` environment with maintainer approval and its
+`CARGO_REGISTRY_TOKEN` secret. Select an exact, approved Shipper version already
+available on crates.io whose CLI matches the generator used below. For an
+unreleased candidate, install the approved source through the release runbook;
+an unreleased version cannot be installed from crates.io.
+
+The final two steps are the output of `shipper ci github-actions`, inserted under
+`jobs.publish.steps`. The job installs the tool and performs proof first. Its
+preflight uses `--preflight-only`, which writes a session sidecar rather than
+creating authoritative publish history that would make the fresh-run step refuse.
+
 ```yaml
 name: Release
 
 on:
-  push:
-    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      shipper_version:
+        description: Exact approved Shipper version available on crates.io
+        required: true
+        type: string
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     environment: release
     timeout-minutes: 180
+    env:
+      SHIPPER_STATE_DIR: "./.shipper"
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install Shipper
-        run: cargo install shipper --locked
+        env:
+          SHIPPER_VERSION: ${{ inputs.shipper_version }}
+        run: cargo install shipper --version "$SHIPPER_VERSION" --locked
 
       - name: Diagnose release prerequisites
         run: shipper doctor
 
       - name: Plan
         run: |
-          mkdir -p .shipper
-          shipper plan --format json | tee .shipper/plan.txt
+          mkdir -p "$SHIPPER_STATE_DIR"
+          shipper plan --format json | tee "$SHIPPER_STATE_DIR/plan.txt"
 
       - name: Upload plan artifact (before anything destructive)
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: shipper-state-plan
-          path: .shipper/
+          name: shipper-state-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.SHIPPER_STATE_DIR }}/
           include-hidden-files: true
           retention-days: 30
 
       - name: Preflight
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: shipper preflight --policy safe
+        run: shipper preflight --policy safe --preflight-only --state-dir "$SHIPPER_STATE_DIR"
 
       - name: Upload preflight artifact
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: shipper-state-preflight
-          path: .shipper/
+          name: shipper-state-preflight-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.SHIPPER_STATE_DIR }}/
           include-hidden-files: true
           retention-days: 30
 
-      - name: Publish
+      - name: Publish crates from fresh evidence
+        shell: bash
+        working-directory: ${{ github.workspace }}
         env:
+          SHIPPER_STATE_DIR: "./.shipper"
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          shipper publish \
-            --policy safe \
-            --readiness-method both \
-            --max-attempts 12 \
-            --max-delay 15m
+          if [ -e "$SHIPPER_STATE_DIR" ] || [ -L "$SHIPPER_STATE_DIR" ]; then
+            retained=$(find -L "$SHIPPER_STATE_DIR" \( -name state.json -o -name events.jsonl -o -name receipt.json -o -name reconciliation.json \) -print -quit)
+            if [ -n "$retained" ]; then
+              printf '%s\n' 'Retained release evidence is present. Inspect the selected source artifact and choose an approved recovery operation before publishing.' >&2
+              exit 1
+            fi
+          fi
+          shipper publish --quiet --state-dir "$SHIPPER_STATE_DIR"
 
-      - name: Upload final state (always)
+      - name: Retain Shipper evidence
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: shipper-state-final
-          path: .shipper/
+          name: shipper-state-${{ github.run_id }}-${{ github.run_attempt }}
+          path: "./.shipper/"
           include-hidden-files: true
-          retention-days: 90
+          if-no-files-found: error
 ```
 
 ## Key considerations
@@ -96,7 +125,12 @@ jobs:
 
 ### Upload state at every stage
 
-Upload the `.shipper/` directory after plan, after preflight, and after publish (or on failure). If the publish job times out or dies, the most recent artifact is what you need to resume.
+Upload the selected state directory after plan, after preflight, and after
+publish or failure. `if: always()` retains available evidence after a command
+failure; it cannot upload files after a runner disappears or guarantee an upload
+after hard cancellation. Inspect the retained artifact before choosing recovery.
+Keep unrelated files and credentials out of this directory: hidden-file inclusion
+uploads its hidden contents too.
 
 ### Timeout budget
 
@@ -215,6 +249,22 @@ workflow (a `workflow_dispatch` with `mode: resume` and
 `artifact_run_id: <failed run id>`) — or adapt the resume job from the linked
 production workflow while preserving its artifact and identity checks.
 
+The generated fresh-publication recipe does not download or cache mutable
+execution state. For recovery, explicitly select the source run and the named
+`shipper-state-<run_id>-<run_attempt>` artifact, restore it into the matching
+source checkout with the matching Shipper binary and registry configuration, and
+inspect `shipper status --durable` and the retained events. A missing artifact
+is a stopped recovery step, not permission to start a new publication.
+
+`publish` can load existing state, but state existence does not authorize a
+retry. A controlled `NotPublished` stop requires its supported, explicitly chosen
+resume operation and retry budget. `StillUnknown`, mismatched identity, and
+unresolved process-cleanup uncertainty require investigation before another
+upload. Do not remove evidence or substitute an unconditional `publish` to bypass
+those refusals. The generated fresh-run check leaves retained files untouched
+and also checks registry subdirectories. An unreadable directory or symlink loop
+stops the check before publication; it does not establish fresh state.
+
 ### Exit codes
 
 `shipper publish` and `shipper resume` use a structured exit-code vocabulary so CI can distinguish outcomes:
@@ -269,13 +319,42 @@ source checkout and run `shipper status --durable` with the matching candidate
 binary. It should invoke `shipper resume` only when the evidence-backed rerun
 posture allows it.
 
-## Generate a template
+## Generate and place the step snippet
 
 ```bash
-shipper ci github-actions > .github/workflows/release.yml
+shipper ci github-actions > shipper-release-steps.yml
 ```
 
-This prints a recent-defaults template you can customize.
+This produces a YAML **sequence of steps**, not a complete workflow. Keep the
+snippet outside `.github/workflows/` and replace the final two steps of the
+complete workflow above with it. Save the assembled workflow as
+`.github/workflows/release.yml`. Its deliberate manual trigger, protected release
+environment, installation and preflight are part of the wrapper, not generated
+publication authority.
+
+For a custom directory, including spaces:
+
+```bash
+shipper --state-dir 'release evidence' ci github-actions > shipper-release-steps.yml
+```
+
+Set the wrapper's job-level `SHIPPER_STATE_DIR` to `./release evidence` too, so
+plan and preflight use the same directory. The generated publish step passes that
+path to Shipper and the upload step names the same directory. Paths must be
+literal and relative to the checkout/workspace root; absolute paths, `..`, drive
+prefixes, backslashes, globs, control characters and workflow expressions are
+refused. Spaces, quotes and ordinary Unicode names are supported. The snippet
+does not transfer the generator's manifest path or runtime flags: keep the Cargo
+workspace at the checkout root and put the intended policy and registry settings
+in the reviewed checkout configuration.
+
+The recipe uses GitHub.com's
+[`actions/upload-artifact@v7`](https://github.com/actions/upload-artifact), with
+hidden-file inclusion and a run/attempt-specific artifact name. Artifact v4 and
+later are not supported on GitHub Enterprise Server; this generated recipe does
+not claim GHES support. Validate the assembled workflow with the repository's
+`actionlint` entry before use. Local fake-Cargo tests establish the command and
+file contract, not a hosted artifact transfer or successful live publication.
 
 ## See also
 

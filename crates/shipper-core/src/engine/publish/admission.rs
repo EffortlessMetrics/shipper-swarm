@@ -260,10 +260,18 @@ fn load_cleanup_checked_state(state_dir: &Path) -> Result<Option<ExecutionState>
         .try_exists()
         .map_err(anyhow::Error::from)
         .and_then(|_| state::load_state(state_dir))
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "cannot inspect retained publication state; preserve the evidence before retrying"
-            )
+        .map_err(|error| {
+            // Keep the actionable error category without forwarding serde's
+            // arbitrary retained values (for example an unknown enum variant).
+            if error.is::<serde_json::Error>() {
+                anyhow::anyhow!(
+                    "failed to parse state JSON; cannot inspect retained publication state; preserve the evidence before retrying"
+                )
+            } else {
+                anyhow::anyhow!(
+                    "cannot inspect retained publication state; preserve the evidence before retrying"
+                )
+            }
         });
     if let Ok(Some(state)) = &retained {
         ensure_no_cleanup_hold(state)?;

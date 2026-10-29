@@ -125,6 +125,15 @@ history; corrupt evidence without a recognized hold still blocks publish and
 resume. If the hold record itself is unreadable or unrecognizable, explicit
 clean retains its ordinary corrupt-artifact recovery behavior.
 
+For a multi-registry `clean`, Shipper acquires ownership and checks the base
+state directory and every selected registry directory before deleting state,
+events, receipts, reconciliation reports or caches anywhere in that selection.
+A recognized cleanup hold or an unavailable ownership key in any selected
+directory refuses the whole deletion pass, including with `--force` or
+`--keep-receipt`. All acquired owners remain held through the deletion pass.
+This does not make deletion transactional: a filesystem error during the later
+deletion pass can still leave a partial clean.
+
 Events remain authoritative, but a held projection without its matching event
 is evidence of a failed persistence boundary, not authorization to retry.
 `rebuild_state_file_from_events` requires an offline directory or exclusive
