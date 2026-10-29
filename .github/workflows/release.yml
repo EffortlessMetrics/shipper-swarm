@@ -123,6 +123,8 @@ jobs:
       - name: Validate approved source identity
         id: identity
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           args=(
@@ -626,7 +628,11 @@ jobs:
 
       # --- Step 2: plan -----------------------------------------------------
       - name: shipper plan
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           mkdir -p .shipper
           tag_date="$(git for-each-ref --format='%(creatordate:short)' "refs/tags/$GITHUB_REF_NAME")"
           main_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
