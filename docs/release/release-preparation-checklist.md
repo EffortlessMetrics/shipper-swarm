@@ -435,6 +435,14 @@ Stop the train when any of these occurs:
 
 Do not blind-retry an ambiguous publish. Reconcile registry truth first. If the workflow is interrupted, use the retained `.shipper` artifact and the release workflow's `mode=resume` path. Resume requires `state.json`, the event/receipt evidence, and the matching `.shipper/release-identity.json`; it rejects a different source/version/tree/registry/auth posture. Record both the source artifact run and the resume run.
 
+Both publication and continuation upload `shipper-state-final` within their own
+run. For each new resume dispatch, set `artifact_run_id` to the immediately prior
+publish or resume run that retained valid evidence, and record the selected
+immutable artifact ID from the job summary. Selection rejects a missing, expired,
+ambiguous or wrong-run artifact; it never silently falls back to the original
+publication. A successful resume still requires section I's public-release
+verification and finalization.
+
 ## I. Post-release verification and backfill
 
 - [ ] All 13 crate versions are visible on crates.io.
