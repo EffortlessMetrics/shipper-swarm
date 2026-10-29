@@ -13,6 +13,11 @@ In `--execute-plan` mode, consumes that reviewed artifact and executes only the
 recorded containment yanks. It does NOT edit manifests or publish fix-forward
 successors.
 
+Execution uses the selected workspace and single configured registry. Use
+`--registry` to select a target; multi-registry selectors are unsupported.
+The reviewed plan must name that same registry. Relative state paths are
+resolved from the selected workspace, including with `--manifest-path`.
+
 EXAMPLES:
     shipper remediate --dry-run --from-receipt .shipper/receipt.json --crate bad-crate --target-version 0.4.0 --reason "CVE-2026-0001"
     shipper remediate --execute-plan .shipper/remediation-plan.json

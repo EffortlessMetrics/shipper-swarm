@@ -136,7 +136,7 @@ fn create_fake_cargo_proxy(bin_dir: &Path) {
     {
         fs::write(
             bin_dir.join("cargo.cmd"),
-            "@echo off\r\nif \"%1\"==\"publish\" (\r\n  if not \"%SHIPPER_FAKE_PUBLISH_LOG%\"==\"\" echo %*>>\"%SHIPPER_FAKE_PUBLISH_LOG%\"\r\n  if not \"%SHIPPER_FAKE_PUBLISH_STDERR%\"==\"\" echo %SHIPPER_FAKE_PUBLISH_STDERR% 1>&2\r\n  if \"%SHIPPER_FAKE_PUBLISH_EXIT%\"==\"\" (exit /b 0) else (exit /b %SHIPPER_FAKE_PUBLISH_EXIT%)\r\n)\r\n\"%REAL_CARGO%\" %*\r\nexit /b %ERRORLEVEL%\r\n",
+            "@echo off\r\nif \"%1\"==\"publish\" (\r\n  if not \"%SHIPPER_FAKE_PUBLISH_LOG%\"==\"\" echo %*>>\"%SHIPPER_FAKE_PUBLISH_LOG%\"\r\n  if not \"%SHIPPER_FAKE_RECONCILIATION_DIR%\"==\"\" (\r\n    if not exist \"%SHIPPER_FAKE_RECONCILIATION_DIR%\" mkdir \"%SHIPPER_FAKE_RECONCILIATION_DIR%\"\r\n    if not exist \"%SHIPPER_FAKE_RECONCILIATION_DIR%\" exit /b 91\r\n  )\r\n  if not \"%SHIPPER_FAKE_PUBLISH_STDERR%\"==\"\" echo %SHIPPER_FAKE_PUBLISH_STDERR% 1>&2\r\n  if \"%SHIPPER_FAKE_PUBLISH_EXIT%\"==\"\" (exit /b 0) else (exit /b %SHIPPER_FAKE_PUBLISH_EXIT%)\r\n)\r\n\"%REAL_CARGO%\" %*\r\nexit /b %ERRORLEVEL%\r\n",
         )
         .expect("write fake cargo");
     }
@@ -148,7 +148,7 @@ fn create_fake_cargo_proxy(bin_dir: &Path) {
         let path = bin_dir.join("cargo");
         fs::write(
             &path,
-            "#!/usr/bin/env sh\nif [ \"$1\" = \"publish\" ]; then\n  if [ -n \"$SHIPPER_FAKE_PUBLISH_LOG\" ]; then\n    printf '%s\\n' \"$*\" >> \"$SHIPPER_FAKE_PUBLISH_LOG\"\n  fi\n  if [ -n \"$SHIPPER_FAKE_PUBLISH_STDERR\" ]; then\n    printf '%s\\n' \"$SHIPPER_FAKE_PUBLISH_STDERR\" >&2\n  fi\n  exit \"${SHIPPER_FAKE_PUBLISH_EXIT:-0}\"\nfi\n\"$REAL_CARGO\" \"$@\"\n",
+            "#!/usr/bin/env sh\nif [ \"$1\" = \"publish\" ]; then\n  if [ -n \"$SHIPPER_FAKE_PUBLISH_LOG\" ]; then\n    printf '%s\\n' \"$*\" >> \"$SHIPPER_FAKE_PUBLISH_LOG\"\n  fi\n  if [ -n \"$SHIPPER_FAKE_RECONCILIATION_DIR\" ]; then\n    mkdir -p \"$SHIPPER_FAKE_RECONCILIATION_DIR\" || exit 91\n  fi\n  if [ -n \"$SHIPPER_FAKE_PUBLISH_STDERR\" ]; then\n    printf '%s\\n' \"$SHIPPER_FAKE_PUBLISH_STDERR\" >&2\n  fi\n  exit \"${SHIPPER_FAKE_PUBLISH_EXIT:-0}\"\nfi\n\"$REAL_CARGO\" \"$@\"\n",
         )
         .expect("write fake cargo");
         let mut perms = fs::metadata(&path).expect("meta").permissions();
@@ -1159,7 +1159,8 @@ fn run_parallel_inconsistent_controlled_stop(
     let registry = spawn_bounded_registry(vec![404, 404, 404, 404], 4);
     let api_base = registry.base_url.clone();
     let state_dir = td.path().join("parallel-inconsistent-state");
-    fs::create_dir_all(state_dir.join("reconciliation.json"))?;
+    // Inject the write failure only after valid admission, inside fake Cargo.
+    ensure!(!state_dir.exists());
     let publish_log = td.path().join("parallel-inconsistent.log");
     let mut command = loopback_shipper_cmd();
     command
@@ -1195,6 +1196,10 @@ fn run_parallel_inconsistent_controlled_stop(
         .env("SHIPPER_FAKE_PUBLISH_EXIT", "1")
         .env("SHIPPER_FAKE_PUBLISH_STDERR", "ambiguous parallel close")
         .env("SHIPPER_FAKE_PUBLISH_LOG", &publish_log)
+        .env(
+            "SHIPPER_FAKE_RECONCILIATION_DIR",
+            state_dir.join("reconciliation.json"),
+        )
         .env("CARGO_REGISTRY_TOKEN", "CONTROLLED_STOP_SECRET_SENTINEL")
         .output()?;
     registry.finish(Duration::from_secs(2))?;
@@ -1219,9 +1224,7 @@ fn run_initial_controlled_stop_publish(
     let (new_path, real_cargo, fake_cargo) = setup_fake_cargo(td.path());
     let registry = spawn_bounded_registry(vec![404, 404], 2);
     let state_dir = td.path().join("initial-controlled-stop-state");
-    if block_reconciliation_write {
-        fs::create_dir_all(state_dir.join("reconciliation.json"))?;
-    }
+    ensure!(!state_dir.exists());
     let publish_log = td.path().join("initial-controlled-stop.log");
     let mut command = loopback_shipper_cmd();
     command
@@ -1245,6 +1248,15 @@ fn run_initial_controlled_stop_publish(
         .arg(&state_dir);
     if let Some(format) = format {
         command.arg("--format").arg(format);
+    }
+    // A pre-existing invalid artifact must be refused by admission. This
+    // fixture instead faults the later reconciliation write after Cargo starts.
+    command.env_remove("SHIPPER_FAKE_RECONCILIATION_DIR");
+    if block_reconciliation_write {
+        command.env(
+            "SHIPPER_FAKE_RECONCILIATION_DIR",
+            state_dir.join("reconciliation.json"),
+        );
     }
     let output = command
         .arg("publish")
@@ -2507,6 +2519,7 @@ fn controlled_stop_initial_human_and_json_envelopes_have_semantic_parity() -> Re
 }
 
 #[test]
+#[serial_test::serial]
 fn controlled_stop_without_reconciliation_denies_resume_in_human_and_json() -> Result<()> {
     let human = run_initial_controlled_stop_publish(None, true)?;
     let json = run_initial_controlled_stop_publish(Some("json"), true)?;
@@ -2557,6 +2570,7 @@ fn controlled_stop_without_reconciliation_denies_resume_in_human_and_json() -> R
 }
 
 #[test]
+#[serial_test::serial]
 fn parallel_incomplete_reconciliation_never_authorizes_resume() -> Result<()> {
     let human = run_parallel_inconsistent_controlled_stop(None)?;
     let json = run_parallel_inconsistent_controlled_stop(Some("json"))?;

@@ -46,6 +46,7 @@ use shipper_core::types::{
     ReleasePlan, ReleaseSpec, RuntimeOptions,
 };
 
+mod containment;
 mod doctor;
 mod output;
 mod status_durable;
@@ -374,6 +375,16 @@ fn hide_args_from_help(command: Command, hidden_ids: &[&str]) -> Command {
 }
 
 fn validate_cli_combinations(cli: &Cli) -> std::result::Result<(), clap::Error> {
+    let containment = matches!(
+        &cli.cmd,
+        Some(Commands::Yank { .. } | Commands::Remediate { .. })
+    );
+    if containment && (cli.registries.is_some() || cli.all_registries) {
+        return Err(cli_command().error(
+            clap::error::ErrorKind::ArgumentConflict,
+            "yank and remediate support one registry; use --registry, not --registries or --all-registries",
+        ));
+    }
     let durable_status = matches!(&cli.cmd, Some(Commands::Status { durable: true, .. }));
     if durable_status && (cli.registries.is_some() || cli.all_registries) {
         let selector = if cli.registries.is_some() {
@@ -661,6 +672,11 @@ EXAMPLES:
     /// Follow-on commands (`shipper plan-yank`, `shipper fix-forward`)
     /// compose this primitive into reverse-topological containment and
     /// fix-forward plans.
+    ///
+    /// Uses the selected workspace and single configured registry. Select a
+    /// registry with `--registry`; multi-registry selectors are unsupported.
+    /// A reviewed plan must name that same registry. Relative state paths are
+    /// resolved from the selected workspace, including with `--manifest-path`.
     Yank {
         /// Name of the crate to yank (e.g., `shipper-types`). Required
         /// unless `--plan` is supplied.
@@ -776,6 +792,11 @@ publish-directional fix-forward suggestions, then writes
 In `--execute-plan` mode, consumes that reviewed artifact and executes only the
 recorded containment yanks. It does NOT edit manifests or publish fix-forward
 successors.
+
+Execution uses the selected workspace and single configured registry. Use
+`--registry` to select a target; multi-registry selectors are unsupported.
+The reviewed plan must name that same registry. Relative state paths are
+resolved from the selected workspace, including with `--manifest-path`.
 
 EXAMPLES:
     shipper remediate --dry-run --from-receipt .shipper/receipt.json --crate bad-crate --target-version 0.4.0 --reason \"CVE-2026-0001\"
@@ -2143,17 +2164,21 @@ pub fn run() -> Result<std::process::ExitCode> {
             mark_compromised,
             plan,
         } => {
+            use crate::containment::ContainmentContext;
             use shipper_core::cargo;
             use shipper_core::engine::plan_yank;
             use shipper_core::state::events::{EventLog, events_path};
             use shipper_core::state::execution_state::{load_receipt, receipt_path, write_receipt};
             use shipper_core::types::{EventType, PublishEvent};
 
+            let context = ContainmentContext::resolve(planned, &opts)?;
+
             // #98 PR 5 — plan execution mode. Dispatched entirely
             // separately from the single-yank path below; the two share
             // the same cargo_yank primitive but different orchestration.
             if let Some(plan_path) = plan {
                 let yank_plan = plan_yank::load_plan_from_path(&plan_path)?;
+                context.validate_plan_registry("yank plan", &yank_plan.registry)?;
                 reporter.info(&format!(
                     "executing yank plan: {} entries against '{}' (plan_id {})",
                     yank_plan.entries.len(),
@@ -2161,16 +2186,8 @@ pub fn run() -> Result<std::process::ExitCode> {
                     yank_plan.plan_id
                 ));
 
-                let workspace_root = std::env::current_dir()
-                    .context("failed to resolve current dir for plan execution")?;
-                let registry_name = opts
-                    .registries
-                    .first()
-                    .map(|r| r.name.clone())
-                    .unwrap_or_else(|| yank_plan.registry.clone());
-
                 let mut log = EventLog::new();
-                let events_file = events_path(&opts.state_dir);
+                let events_file = events_path(&context.state_dir);
 
                 let mut succeeded = 0usize;
                 let mut failed: Option<(String, i32)> = None;
@@ -2190,10 +2207,10 @@ pub fn run() -> Result<std::process::ExitCode> {
                     ));
 
                     let out = cargo::cargo_yank(
-                        &workspace_root,
+                        context.workspace_root,
                         entry.name.as_str(),
                         entry.version.as_str(),
-                        registry_name.as_str(),
+                        context.registry_name,
                         opts.output_lines,
                         None,
                     )?;
@@ -2280,19 +2297,11 @@ pub fn run() -> Result<std::process::ExitCode> {
                  (containment, not undo) — reason: {reason}"
             ));
 
-            let workspace_root =
-                std::env::current_dir().context("failed to resolve current dir for cargo yank")?;
-            let registry_name = opts
-                .registries
-                .first()
-                .map(|r| r.name.clone())
-                .unwrap_or_else(|| "crates-io".to_string());
-
             let out = cargo::cargo_yank(
-                &workspace_root,
+                context.workspace_root,
                 crate_name.as_str(),
                 version.as_str(),
-                registry_name.as_str(),
+                context.registry_name,
                 opts.output_lines,
                 None,
             )?;
@@ -2308,7 +2317,7 @@ pub fn run() -> Result<std::process::ExitCode> {
                 },
                 package: format!("{crate_name}@{version}"),
             });
-            let events_file = events_path(&opts.state_dir);
+            let events_file = events_path(&context.state_dir);
             if let Err(err) = log.write_to_file(&events_file) {
                 reporter.warn(&format!(
                     "failed to append PackageYanked event to {}: {err:#}",
@@ -2324,8 +2333,8 @@ pub fn run() -> Result<std::process::ExitCode> {
                     // events.jsonl. The receipt is a *projection*, so
                     // mutating one field on one matching package is a
                     // legitimate amendment.
-                    let rpath = receipt_path(&opts.state_dir);
-                    match load_receipt(&opts.state_dir) {
+                    let rpath = receipt_path(&context.state_dir);
+                    match load_receipt(&context.state_dir) {
                         Ok(Some(mut receipt)) => {
                             let matched = receipt
                                 .packages
@@ -2334,7 +2343,7 @@ pub fn run() -> Result<std::process::ExitCode> {
                             if let Some(pkg) = matched {
                                 pkg.compromised_at = Some(chrono::Utc::now());
                                 pkg.compromised_by = Some(reason.clone());
-                                if let Err(err) = write_receipt(&opts.state_dir, &receipt) {
+                                if let Err(err) = write_receipt(&context.state_dir, &receipt) {
                                     reporter.warn(&format!(
                                         "yanked successfully but failed to mark receipt at \
                                          {}: {err:#}",
@@ -2401,8 +2410,11 @@ pub fn run() -> Result<std::process::ExitCode> {
             use shipper_core::engine::plan_yank::{self, PlanYankFilter};
 
             let receipt_path = from_receipt.unwrap_or_else(|| {
-                opts.state_dir
-                    .join(shipper_core::state::execution_state::RECEIPT_FILE)
+                shipper_core::runtime::execution::resolve_state_dir(
+                    &planned.workspace_root,
+                    &opts.state_dir,
+                )
+                .join(shipper_core::state::execution_state::RECEIPT_FILE)
             });
 
             let receipt = plan_yank::load_receipt_from_path(&receipt_path).with_context(|| {
@@ -2455,8 +2467,11 @@ pub fn run() -> Result<std::process::ExitCode> {
             use shipper_core::engine::fix_forward::{self, SuccessorStrategy};
 
             let receipt_path = from_receipt.unwrap_or_else(|| {
-                opts.state_dir
-                    .join(shipper_core::state::execution_state::RECEIPT_FILE)
+                shipper_core::runtime::execution::resolve_state_dir(
+                    &planned.workspace_root,
+                    &opts.state_dir,
+                )
+                .join(shipper_core::state::execution_state::RECEIPT_FILE)
             });
 
             let plan =
@@ -2492,15 +2507,16 @@ pub fn run() -> Result<std::process::ExitCode> {
             dry_run,
             execute_plan,
         } => {
+            use crate::containment::ContainmentContext;
             use shipper_core::cargo;
             use shipper_core::engine::{plan_yank, remediation};
-            use shipper_core::runtime::execution::resolve_state_dir;
             use shipper_core::state::events::{EventLog, events_path};
 
+            let context = ContainmentContext::resolve(planned, &opts)?;
+            let state_dir = &context.state_dir;
             if let Some(plan_path) = execute_plan {
-                let state_dir = resolve_state_dir(&planned.workspace_root, &opts.state_dir);
                 let expected_plan_path =
-                    shipper_core::state::execution_state::remediation_plan_path(&state_dir);
+                    shipper_core::state::execution_state::remediation_plan_path(state_dir);
                 let requested_plan_path = plan_path.canonicalize().with_context(|| {
                     format!(
                         "failed to resolve remediation plan path {}; execute reviewed plans from <state-dir>/remediation-plan.json",
@@ -2521,19 +2537,8 @@ pub fn run() -> Result<std::process::ExitCode> {
                 }
 
                 let plan = remediation::load_plan_from_path(&expected_plan_path)?;
-                let events_file = events_path(&state_dir);
-                let registry_name = opts
-                    .registries
-                    .first()
-                    .map(|r| r.name.clone())
-                    .unwrap_or_else(|| "crates-io".to_string());
-                if plan.registry != registry_name {
-                    anyhow::bail!(
-                        "remediation plan registry '{}' does not match configured registry '{}'",
-                        plan.registry,
-                        registry_name
-                    );
-                }
+                let events_file = events_path(state_dir);
+                context.validate_plan_registry("remediation plan", &plan.registry)?;
 
                 reporter.warn(&format!(
                     "executing reviewed remediation plan: {} containment yanks for {}@{} (plan_id {})",
@@ -2555,14 +2560,14 @@ pub fn run() -> Result<std::process::ExitCode> {
                         plan.yank_order.len(),
                         step.name,
                         step.version,
-                        registry_name
+                        context.registry_name
                     ));
 
                     let out = cargo::cargo_yank(
-                        &planned.workspace_root,
+                        context.workspace_root,
                         step.name.as_str(),
                         step.version.as_str(),
-                        registry_name.as_str(),
+                        context.registry_name,
                         opts.output_lines,
                         None,
                     )?;
@@ -2633,9 +2638,8 @@ pub fn run() -> Result<std::process::ExitCode> {
                 anyhow::anyhow!("--reason is required when --execute-plan is not supplied")
             })?;
 
-            let state_dir = resolve_state_dir(&planned.workspace_root, &opts.state_dir);
             let receipt_path = from_receipt
-                .unwrap_or_else(|| shipper_core::state::execution_state::receipt_path(&state_dir));
+                .unwrap_or_else(|| shipper_core::state::execution_state::receipt_path(state_dir));
             let receipt = plan_yank::load_receipt_from_path(&receipt_path).with_context(|| {
                 "remediate needs a readable receipt; default path is \
                  <state_dir>/receipt.json. Pass --from-receipt <path> to \
@@ -2651,7 +2655,7 @@ pub fn run() -> Result<std::process::ExitCode> {
                 &target_version,
                 &reason,
             )?;
-            let artifact_path = remediation::write_dry_run_artifact(&state_dir, &plan)?;
+            let artifact_path = remediation::write_dry_run_artifact(state_dir, &plan)?;
 
             match cli.format.as_str() {
                 "json" => {

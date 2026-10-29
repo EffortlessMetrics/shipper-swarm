@@ -1085,6 +1085,7 @@ mod tests {
     mod per_error_refusal;
     mod retained_admission;
     mod retained_retryable;
+    mod timeout_reconciliation;
 
     use std::fs;
     use std::path::{Path, PathBuf};

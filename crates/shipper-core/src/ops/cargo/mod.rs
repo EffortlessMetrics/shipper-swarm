@@ -52,15 +52,18 @@ pub fn cargo_yank(
     output_lines: usize,
     timeout: Option<Duration>,
 ) -> Result<CargoOutput> {
+    anyhow::ensure!(
+        !registry_name.trim().is_empty(),
+        "cargo yank requires an explicit registry name"
+    );
     let start = Instant::now();
     let version_arg = format!("--version={version}");
     let mut args: Vec<&str> = vec!["yank", package_name, &version_arg];
 
-    // If the user configured a non-default registry, pass it through.
-    if !registry_name.trim().is_empty() && registry_name != "crates-io" {
-        args.push("--registry");
-        args.push(registry_name);
-    }
+    // Pin even crates.io: omitting this lets Cargo's registry.default silently
+    // retarget a reviewed containment action.
+    args.push("--registry");
+    args.push(registry_name);
 
     let output =
         process::run_command_with_timeout(&cargo_program(), &args, workspace_root, timeout)
@@ -704,7 +707,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn cargo_yank_omits_registry_for_crates_io() {
+    fn cargo_yank_pins_crates_io_registry() {
         let td = tempdir().expect("tempdir");
         let bin = td.path().join("bin");
         fs::create_dir_all(&bin).expect("mkdir");
@@ -730,9 +733,37 @@ mod tests {
                 let _ = cargo_yank(&ws, "my-crate", "0.1.0", "crates-io", 50, None).expect("yank");
 
                 let args = fs::read_to_string(&args_log).expect("args");
-                assert!(!args.contains("--registry"));
+                assert!(args.contains("--registry"));
+                assert!(args.contains("crates-io"));
                 assert!(args.contains("yank"));
                 assert!(args.contains("--version=0.1.0"));
+            },
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn cargo_yank_rejects_empty_registry_before_spawning() {
+        let td = tempdir().expect("tempdir");
+        let bin = td.path().join("bin");
+        fs::create_dir_all(&bin).expect("mkdir");
+        let fake_cargo = write_fake_cargo(&bin);
+        let args_log = td.path().join("args.txt");
+        let cwd_log = td.path().join("cwd.txt");
+        temp_env::with_vars(
+            [
+                ("SHIPPER_CARGO_BIN", Some(fake_cargo.to_str().unwrap())),
+                ("SHIPPER_ARGS_LOG", Some(args_log.to_str().unwrap())),
+                ("SHIPPER_CWD_LOG", Some(cwd_log.to_str().unwrap())),
+                ("SHIPPER_EXIT_CODE", Some("0")),
+            ],
+            || {
+                for registry in ["", " ", "\n"] {
+                    let error = cargo_yank(td.path(), "my-crate", "0.1.0", registry, 50, None)
+                        .expect_err("empty registry must be refused");
+                    assert!(error.to_string().contains("explicit registry name"));
+                    assert!(!args_log.exists(), "refusal must not start Cargo");
+                }
             },
         );
     }
