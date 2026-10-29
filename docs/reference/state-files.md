@@ -12,6 +12,17 @@ That authority order applies to execution state. Other `.shipper/` artifacts
 answer narrower questions: auth posture, reconciliation evidence, remediation
 planning, or captured plan/preflight output.
 
+Ordinary publish/resume requires event-file sync before projecting progress and
+temporary JSON file sync before atomic replacement. A returned sync error can
+leave appended event bytes or an uncommitted `.tmp` file; it does not prove that
+an upload was absent. Preserve that evidence for diagnosis. After an attempted
+append fails, the same in-memory `EventLog` owner refuses further writes and
+retains its pending batch even after `clear()`; this hold does not survive a new
+owner or invocation and does not cancel an already-running peer. Parent-directory
+sync remains best effort, and neither host/power-loss durability nor the separate
+encrypted helper path is covered by this replacement claim. See the precise
+[persistence boundary](../INVARIANTS.md#persistence-boundary-and-failure-model).
+
 ## Per-file summary
 
 | File | Authority | Purpose | When written | Format |

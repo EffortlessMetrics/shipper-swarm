@@ -646,7 +646,7 @@ fn write_reconciliation_report_best_effort(
     // Report errors after releasing the persistence gate. A warning/false
     // result remains failure evidence; it never authorizes a recovery.
     if let Err(err) = result {
-        reporter.warn(&format!("failed to write reconciliation report: {err}"));
+        reporter.warn(&format!("failed to write reconciliation report: {err:#}"));
         return false;
     }
     true
@@ -745,11 +745,10 @@ pub(crate) fn publish_package_with_timeout(
                 &mut log,
             ) {
                 return PackagePublishResult {
-                    result: Err(anyhow::anyhow!(
-                        "{}@{}: failed to write package-skip event: {err}",
-                        p.name,
-                        p.version
-                    )),
+                    result: Err(err.context(format!(
+                        "{}@{}: failed to write package-skip event",
+                        p.name, p.version
+                    ))),
                 };
             }
         }
@@ -789,11 +788,10 @@ pub(crate) fn publish_package_with_timeout(
         });
         if let Err(err) = log.write_to_file(events_path) {
             return PackagePublishResult {
-                result: Err(anyhow::anyhow!(
-                    "{}@{}: failed to write package-start event: {err}",
-                    p.name,
-                    p.version
-                )),
+                result: Err(err.context(format!(
+                    "{}@{}: failed to write package-start event",
+                    p.name, p.version
+                ))),
             };
         }
         log.clear();
@@ -1068,11 +1066,10 @@ pub(crate) fn publish_package_with_timeout(
                         },
                     ) {
                         return PackagePublishResult {
-                            result: Err(anyhow::anyhow!(
-                                "{}@{}: failed to promote uploaded package to published: {e}",
-                                p.name,
-                                p.version
-                            )),
+                            result: Err(e.context(format!(
+                                "{}@{}: failed to promote uploaded package to published",
+                                p.name, p.version
+                            ))),
                         };
                     }
                     maybe_send_event(
@@ -1144,11 +1141,10 @@ pub(crate) fn publish_package_with_timeout(
                     };
                 }
                 return PackagePublishResult {
-                    result: Err(anyhow::anyhow!(
-                        "{}@{}: failed to verify uploaded package visibility before publish: {error}",
-                        p.name,
-                        p.version
-                    )),
+                    result: Err(error.context(format!(
+                        "{}@{}: failed to verify uploaded package visibility before publish",
+                        p.name, p.version
+                    ))),
                 };
             }
         }
@@ -1181,11 +1177,10 @@ pub(crate) fn publish_package_with_timeout(
                     },
                 ) {
                     return PackagePublishResult {
-                        result: Err(anyhow::anyhow!(
-                            "{}@{}: failed to mark package as already published: {err}",
-                            p.name,
-                            p.version
-                        )),
+                        result: Err(err.context(format!(
+                            "{}@{}: failed to mark package as already published",
+                            p.name, p.version
+                        ))),
                     };
                 }
 
@@ -1320,11 +1315,10 @@ pub(crate) fn publish_package_with_timeout(
                 });
                 if let Err(err) = log.write_to_file(events_path) {
                     return PackagePublishResult {
-                        result: Err(anyhow::anyhow!(
-                            "{}@{}: failed to write package-output event: {err}",
-                            p.name,
-                            p.version
-                        )),
+                        result: Err(err.context(format!(
+                            "{}@{}: failed to write package-output event",
+                            p.name, p.version
+                        ))),
                     };
                 }
                 log.clear();
@@ -1897,11 +1891,10 @@ pub(crate) fn publish_package_with_timeout(
                             message,
                         ) {
                             return PackagePublishResult {
-                                result: Err(anyhow::anyhow!(
-                                    "{}@{}: failed to schedule retry backoff: {err}",
-                                    p.name,
-                                    p.version
-                                )),
+                                result: Err(err.context(format!(
+                                    "{}@{}: failed to schedule retry backoff",
+                                    p.name, p.version
+                                ))),
                             };
                         }
                     }
@@ -2107,11 +2100,10 @@ pub(crate) fn publish_package_with_timeout(
                     };
                 }
                 return PackagePublishResult {
-                    result: Err(anyhow::anyhow!(
-                        "{}@{}: failed to verify final visibility after last error: {error}",
-                        p.name,
-                        p.version
-                    )),
+                    result: Err(error.context(format!(
+                        "{}@{}: failed to verify final visibility after last error",
+                        p.name, p.version
+                    ))),
                 };
             }
         }
