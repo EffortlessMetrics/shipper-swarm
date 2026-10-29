@@ -70,15 +70,15 @@ fn write_timed_cargo(bin: &Path) {
     .expect("write Cargo proxy");
 }
 
-struct ProbeRegistry {
-    base_url: String,
-    seen: Arc<Mutex<Vec<u16>>>,
+pub(super) struct ProbeRegistry {
+    pub(super) base_url: String,
+    pub(super) seen: Arc<Mutex<Vec<u16>>>,
     stop: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
 }
 
 impl ProbeRegistry {
-    fn start(statuses: Vec<u16>) -> Self {
+    pub(super) fn start(statuses: Vec<u16>) -> Self {
         let server = Server::http("127.0.0.1:0").expect("loopback registry");
         let base_url = format!("http://{}", server.server_addr());
         let seen = Arc::new(Mutex::new(Vec::new()));

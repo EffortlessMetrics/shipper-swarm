@@ -10,8 +10,10 @@ around this constraint — every step is persisted, classified, and recoverable.
 
 When the Cargo process exceeds Shipper's execution timeout, the shared package
 executor classifies it as **Ambiguous** using the typed timeout result. This
-decision is independent of output text and the configured tail length. For
-other unsuccessful Cargo exits, Shipper inspects the combined stdout/stderr
+decision is independent of output text and the configured tail length. An
+unsuccessful publish whose diagnostic capture was incomplete also enters
+Ambiguous reconciliation. For other unsuccessful Cargo exits with complete
+capture, Shipper inspects the combined stdout/stderr
 and uses the patterns in `crates/shipper-cargo-failure`:
 
 | Class | Meaning | Action taken |
@@ -19,6 +21,28 @@ and uses the patterns in `crates/shipper-cargo-failure`:
 | **Retryable** | Transient — likely to succeed on retry | Retry with backoff |
 | **Permanent** | Requires human intervention | Stop retrying, record failure |
 | **Ambiguous** | Outcome unclear (upload may have succeeded) | Reconcile against registry truth; accept `Published`, retry only a proved `NotPublished`, or stop on `StillUnknown` |
+
+### Bounded publish diagnostics
+
+Publication and rehearsal retain the configured last-N-lines diagnostic tail
+within fixed limits: 256 KiB per stream, 64 KiB per logical line, 4096 retained
+lines, and an 8 KiB read buffer. A very large `--output-lines` value does not
+remove those bounds. Output continues to drain after a limit is reached.
+
+A capacity limit or read failure makes capture incomplete for that invocation.
+Both tails are then omitted; stderr contains
+`[shipper: Cargo diagnostics omitted after capture loss]`. This conservative
+policy prevents a secret suffix or continuation from surviving after its
+redaction context was discarded. `--output-lines 0` still returns empty tails.
+The process exit code and timeout flag are preserved. Successful Cargo proceeds
+through upload/readiness as usual; unsuccessful incomplete capture must
+reconcile before another upload. The omission message is explanatory; the engine
+uses typed completeness to make that decision.
+
+These limits apply to publication capture, including the public Cargo publish
+wrapper. Metadata and generic complete-output runners are unchanged, as are
+yank, install and dry-run capture. The readers still wait for inherited pipes to
+close, so this does not establish a finite descendant-cleanup deadline.
 
 ### Retryable patterns
 
@@ -85,9 +109,9 @@ exponential backoff with jitter (the `Default` policy).
 
 With jitter of 0.5, each delay is multiplied by a random factor in `[0.5, 1.5]`.
 
-### Per-error-class overrides
+### Global retry configuration
 
-In `.shipper.toml` you can set different retry parameters for each error class:
+Configure one retry policy in `.shipper.toml`:
 
 ```toml
 [retry]
@@ -97,15 +121,28 @@ max_attempts = 8
 base_delay = "3s"
 max_delay = "90s"
 jitter = 0.4
-
-[retry.per_error.retryable]
-max_attempts = 10
-base_delay = "1s"
-
-[retry.per_error.ambiguous]
-max_attempts = 4
-base_delay = "5s"
 ```
+
+Per-error retry policies are **unsupported**. Earlier versions parsed
+`[retry.per_error.retryable]`, `[retry.per_error.ambiguous]`, and
+`[retry.per_error.permanent]` without applying them. Remove those class entries
+and use the global `[retry]` policy above. Config validation and public engine
+entry points now reject any configured class, including an empty class subtable,
+before state/event writes, registry requests, notifications, or Cargo publish,
+dry-run, or yank invocation. CLI workspace discovery may run Cargo metadata first.
+An omitted `per_error` or an empty `[retry.per_error]` table keeps global behavior.
+Unknown keys in `per_error` are rejected during decoding.
+
+The package-wide `max_attempts` ceiling remains cumulative across publish and
+resume. Permanent failures stop automatic retries. Ambiguous outcomes reconcile
+against the registry and retry only after a proved `NotPublished`; an inconclusive
+`StillUnknown` stops. This refusal does not change those rules or delay floors.
+
+For embedders inspecting old configurations, the historical
+`RetryStrategyConfig` representation remains parseable: an omitted serialized
+`max_attempts` is `0`, while `RetryStrategyConfig::default()` uses `6`. Diagnostic
+loading preserves that difference; it does not authorize execution of a class
+policy. Use the validated global policy for execution.
 
 ### CLI overrides
 
