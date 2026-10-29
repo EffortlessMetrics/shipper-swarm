@@ -1167,6 +1167,8 @@ pub(crate) fn init_state(ws: &PlannedWorkspace, state_dir: &Path) -> Result<Exec
 
 #[cfg(test)]
 mod tests {
+    mod timeout_reconciliation;
+
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
