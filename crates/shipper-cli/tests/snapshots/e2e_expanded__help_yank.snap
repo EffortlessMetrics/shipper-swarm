@@ -8,6 +8,8 @@ Yank a crate@version from the registry — containment, not undo.
 
 Part of [#98 Remediate](https://github.com/EffortlessMetrics/shipper/issues/98). Follow-on commands (`shipper plan-yank`, `shipper fix-forward`) compose this primitive into reverse-topological containment and fix-forward plans.
 
+Uses the selected workspace and single configured registry. Select a registry with `--registry`; multi-registry selectors are unsupported. A reviewed plan must name that same registry. Relative state paths are resolved from the selected workspace, including with `--manifest-path`.
+
 Usage: shipper-cli yank [OPTIONS]
 
 Options:
