@@ -180,11 +180,11 @@ struct Cli {
     #[arg(long, global = true)]
     force_resume: bool,
 
-    /// Force override of existing locks (use with caution)
+    /// Override unknown lock metadata; never an active OS guard
     #[arg(long, global = true)]
     force: bool,
 
-    /// Lock timeout duration (e.g. 1h, 30m; default: 1h). Locks older than this are considered stale.
+    /// Minimum age for confirmed abandoned legacy locks (e.g. 1h, 30m; default: 1h).
     #[arg(long, global = true)]
     lock_timeout: Option<String>,
 
@@ -1223,6 +1223,27 @@ fn mark_publish_engine_error(
     configured_state_dir: &Path,
     evidence_state_dir: &Path,
 ) -> anyhow::Error {
+    if engine::is_publish_admission_error(&error) {
+        let rendered_error = shipper_output_sanitizer::redact_sensitive(&format_error(&error))
+            .trim_end()
+            .to_string();
+        return PublishEarlyError {
+            format: format.to_string(),
+            category: "state_conflict",
+            summary: "publish admission conflicts with retained state or invocation ownership",
+            rendered_error,
+            safe_to_rerun: PublishEarlySafeRerun {
+                value: Some(false),
+                reason: "the admission conflict must be resolved before publication can proceed",
+            },
+            next_action: OperatorAction::posture(
+                ActionKind::InspectEvents,
+                "inspect the lock and retained state, events, and reconciliation evidence before retrying; preserve that evidence until the conflict is resolved",
+            ),
+            evidence: still_unknown_evidence(evidence_state_dir, true),
+        }
+        .into();
+    }
     let Some(stop) = engine::classify_publish_stop(&error) else {
         let classification = classify_publish_early_error(&error);
         return mark_publish_early_error(
@@ -6177,35 +6198,25 @@ fn clean_single_dir(
     let reconciliation_path = dir.join(shipper_core::state::execution_state::RECONCILIATION_FILE);
     let lock_path = shipper_core::lock::lock_path(dir, Some(workspace_root));
 
-    // Check for active lock
-    if lock_path.exists() {
-        if force {
+    // Ownership spans every deletion, even if the advisory JSON is missing.
+    // Never unlink the persistent OS guard or steal it with --force.
+    let _lock = if force {
+        if lock_path.exists() {
             eprintln!(
-                "[warn] --force specified; removing lock file: {}",
-                lock_path.display()
+                "[warn] --force assumes any legacy or foreign publisher is quiescent; acquiring ownership before cleaning {}",
+                dir.display()
             );
-            std::fs::remove_file(&lock_path)
-                .with_context(|| format!("failed to remove lock file {}", lock_path.display()))?;
-        } else {
-            match shipper_core::lock::LockFile::read_lock_info(dir, Some(workspace_root)) {
-                Ok(lock_info) => {
-                    eprintln!("[warn] Active lock found in {}:", dir.display());
-                    eprintln!("[warn]   PID: {}", lock_info.pid);
-                    eprintln!("[warn]   Hostname: {}", lock_info.hostname);
-                    eprintln!("[warn]   Acquired at: {}", lock_info.acquired_at);
-                    eprintln!("[warn]   Plan ID: {:?}", lock_info.plan_id);
-                }
-                Err(err) => {
-                    eprintln!(
-                        "[warn] Active lock found in {} but metadata could not be read: {err:#}",
-                        dir.display()
-                    );
-                }
-            }
-            eprintln!("[warn] Use --force to override the lock");
-            bail!("cannot clean: active lock exists in {}", dir.display());
         }
+        shipper_core::lock::LockFile::acquire_with_timeout_and_force(
+            dir,
+            Some(workspace_root),
+            Duration::ZERO,
+            true,
+        )
+    } else {
+        shipper_core::lock::LockFile::acquire(dir, Some(workspace_root))
     }
+    .with_context(|| format!("cannot clean: active lock exists or ownership is unavailable in {}", dir.display()))?;
 
     // Remove state file
     if state_path.exists() {
@@ -6323,6 +6334,8 @@ fn run_completion(shell: &Shell) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    mod clean_lock_ownership;
+
     use std::fs;
 
     use chrono::Utc;

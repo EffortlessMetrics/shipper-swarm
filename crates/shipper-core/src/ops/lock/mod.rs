@@ -1,12 +1,13 @@
-//! File-based locking mechanism to prevent concurrent operations.
+//! Owned file locking for cooperating Shipper processes.
 //!
-//! This module provides a simple file-based lock that can be used to prevent
-//! concurrent access to shared resources across processes. The lock file
-//! contains metadata about the lock holder (PID, hostname, timestamp).
+//! A persistent sidecar holds the operating-system lock; the separate JSON
+//! record retains compatible PID, hostname, timestamp, and plan metadata.
+//! Neither age nor removing the JSON record transfers ownership. The guard
+//! sidecar must never be removed while this state directory is in use.
 //!
-//! Absorbed from the standalone `shipper-lock` crate during the decrating
-//! effort (see `docs/decrating-plan.md` §6 Phase 2). The public surface at
-//! `shipper::lock` is preserved via a re-export in `crate::lib`.
+//! This is a local filesystem coordination primitive exposed as
+//! `shipper_core::lock`. It does not provide distributed locking or protect
+//! against old binaries that do not participate in the sidecar protocol.
 //!
 //! # Example
 //!
@@ -27,14 +28,19 @@
 //! # }
 //! ```
 
-use std::fs::{self, File};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+
+mod ownership;
+
+pub use ownership::LockFile;
+pub(crate) use ownership::LockReservation;
 
 /// Default lock file name
 pub const LOCK_FILE: &str = "lock";
@@ -136,7 +142,7 @@ mod process_identity_tests {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct LockRecord {
     #[serde(flatten)]
     pub info: LockInfo,
@@ -163,203 +169,6 @@ pub(crate) enum LockContents {
     Missing,
     Present(LockRecord),
     Corrupt,
-}
-
-/// Lock file handle that automatically releases on Drop
-#[derive(Debug)]
-pub struct LockFile {
-    path: PathBuf,
-}
-
-impl LockFile {
-    /// Acquire a lock file in the specified state directory
-    ///
-    /// This will fail if a lock already exists and is not stale.
-    /// Use `is_locked` first to check, or use `acquire_with_timeout` for
-    /// automatic stale lock handling.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use shipper_core::lock::LockFile;
-    /// use std::path::Path;
-    ///
-    /// # fn example() -> anyhow::Result<()> {
-    /// let lock = LockFile::acquire(Path::new(".mylock"), None)?;
-    /// # drop(lock);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn acquire(state_dir: &Path, workspace_root: Option<&Path>) -> Result<Self> {
-        let lock_path = lock_path(state_dir, workspace_root);
-
-        // Create state directory if it doesn't exist
-        fs::create_dir_all(state_dir)
-            .with_context(|| format!("failed to create state dir {}", state_dir.display()))?;
-
-        // Check if lock already exists
-        if lock_path.exists() {
-            let existing_info = read_lock_info_from_path(&lock_path)?;
-            bail!(
-                "lock already held by pid {} on {} since {} (plan_id: {:?})",
-                existing_info.pid,
-                existing_info.hostname,
-                existing_info.acquired_at,
-                existing_info.plan_id
-            );
-        }
-
-        // Get current process info
-        let pid = std::process::id();
-        let hostname = gethostname::gethostname().to_string_lossy().to_string();
-
-        let record = LockRecord {
-            info: LockInfo {
-                pid,
-                hostname,
-                acquired_at: Utc::now(),
-                plan_id: None,
-            },
-            process_identity: current_process_identity(pid),
-        };
-
-        // Write lock file atomically
-        let tmp_path = lock_path.with_extension("tmp");
-        let json =
-            serde_json::to_string_pretty(&record).context("failed to serialize lock info")?;
-
-        {
-            let mut file = File::create(&tmp_path).with_context(|| {
-                format!("failed to create lock tmp file {}", tmp_path.display())
-            })?;
-            file.write_all(json.as_bytes())
-                .with_context(|| format!("failed to write lock tmp file {}", tmp_path.display()))?;
-            file.sync_all().context("failed to sync lock file")?;
-        }
-
-        fs::rename(&tmp_path, &lock_path)
-            .with_context(|| format!("failed to rename lock file to {}", lock_path.display()))?;
-
-        // Sync parent directory for durability
-        if let Some(parent) = lock_path.parent()
-            && let Ok(dir_file) = File::open(parent)
-        {
-            let _ = dir_file.sync_all();
-        }
-
-        Ok(Self { path: lock_path })
-    }
-
-    /// Acquire a lock, automatically removing stale locks older than timeout
-    ///
-    /// # Arguments
-    ///
-    /// * `state_dir` - Directory to store the lock file
-    /// * `workspace_root` - Optional workspace root to hash for avoiding global lock collisions
-    /// * `timeout` - Age threshold for considering a lock stale
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use shipper_core::lock::LockFile;
-    /// use std::path::Path;
-    /// use std::time::Duration;
-    ///
-    /// # fn example() -> anyhow::Result<()> {
-    /// let lock = LockFile::acquire_with_timeout(
-    ///     Path::new(".mylock"),
-    ///     None,
-    ///     Duration::from_secs(3600)
-    /// )?;
-    /// # drop(lock);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn acquire_with_timeout(
-        state_dir: &Path,
-        workspace_root: Option<&Path>,
-        timeout: Duration,
-    ) -> Result<Self> {
-        let lock_path = lock_path(state_dir, workspace_root);
-
-        if lock_path.exists() {
-            if let Ok(info) = read_lock_info_from_path(&lock_path) {
-                let age = Utc::now() - info.acquired_at;
-                // chrono::Duration doesn't have to_std(), use num_seconds directly
-                if age.num_seconds().unsigned_abs() > timeout.as_secs() {
-                    // Lock is stale, remove it
-                    fs::remove_file(&lock_path).with_context(|| {
-                        format!("failed to remove stale lock file {}", lock_path.display())
-                    })?;
-                } else {
-                    bail!(
-                        "lock already held by pid {} on {} since {} (age: {:?})",
-                        info.pid,
-                        info.hostname,
-                        info.acquired_at,
-                        age
-                    );
-                }
-            } else {
-                // Lock file exists but is corrupt, remove it
-                fs::remove_file(&lock_path).with_context(|| {
-                    format!("failed to remove corrupt lock file {}", lock_path.display())
-                })?;
-            }
-        }
-
-        Self::acquire(state_dir, workspace_root)
-    }
-
-    /// Release the lock file
-    ///
-    /// This is normally called automatically when the lock is dropped,
-    /// but can be called explicitly if needed.
-    pub fn release(&self) -> Result<()> {
-        if self.path.exists() {
-            fs::remove_file(&self.path)
-                .with_context(|| format!("failed to remove lock file {}", self.path.display()))?;
-        }
-        Ok(())
-    }
-
-    /// Update the plan_id in the lock file
-    pub fn set_plan_id(&self, plan_id: &str) -> Result<()> {
-        if !self.path.exists() {
-            bail!("lock file does not exist at {}", self.path.display());
-        }
-
-        let mut record = read_lock_record_from_path(&self.path)?;
-        record.info.plan_id = Some(plan_id.to_string());
-
-        let json =
-            serde_json::to_string_pretty(&record).context("failed to serialize lock info")?;
-
-        let tmp_path = self.path.with_extension("tmp");
-        {
-            let mut file = File::create(&tmp_path).with_context(|| {
-                format!("failed to create lock tmp file {}", tmp_path.display())
-            })?;
-            file.write_all(json.as_bytes())
-                .with_context(|| format!("failed to write lock tmp file {}", tmp_path.display()))?;
-            file.sync_all().context("failed to sync lock file")?;
-        }
-
-        fs::rename(&tmp_path, &self.path)
-            .with_context(|| format!("failed to rename lock file to {}", self.path.display()))?;
-
-        Ok(())
-    }
-
-    /// Check if a lock file exists
-    pub fn is_locked(state_dir: &Path, workspace_root: Option<&Path>) -> Result<bool> {
-        Ok(lock_path(state_dir, workspace_root).exists())
-    }
-
-    /// Read the lock file information
-    pub fn read_lock_info(state_dir: &Path, workspace_root: Option<&Path>) -> Result<LockInfo> {
-        read_lock_info_from_path(&lock_path(state_dir, workspace_root))
-    }
 }
 
 fn current_process_identity(pid: u32) -> Option<ProcessIdentity> {
@@ -466,13 +275,6 @@ pub(crate) fn read_lock_contents(path: &Path) -> Result<LockContents> {
     })
 }
 
-impl Drop for LockFile {
-    fn drop(&mut self) {
-        // Best effort to release the lock
-        let _ = self.release();
-    }
-}
-
 /// Read lock info from a specific path
 fn read_lock_info_from_path(path: &Path) -> Result<LockInfo> {
     Ok(read_lock_record_from_path(path)?.info)
@@ -571,7 +373,8 @@ mod tests {
             }
 
             #[test]
-            fn stale_lock_detected_by_arbitrary_age(
+            #[serial_test::serial]
+            fn unknown_legacy_is_preserved_at_arbitrary_age(
                 age_hours in 2u32..1000u32,
                 timeout_secs in 1u64..3600u64,
             ) {
@@ -589,18 +392,11 @@ mod tests {
                     serde_json::to_string(&old_info).expect("ser"),
                 ).expect("write");
 
-                // age_hours >= 2 means at least 7200 seconds; timeout_secs < 3600
-                // so the lock is always stale relative to the timeout
-                let lock = LockFile::acquire_with_timeout(
-                    td.path(),
-                    None,
-                    Duration::from_secs(timeout_secs),
-                ).expect("should replace stale lock");
-
-                let new_info = LockFile::read_lock_info(td.path(), None).expect("read");
-                prop_assert_eq!(new_info.pid, std::process::id());
-                prop_assert_ne!(new_info.pid, 99999);
-                drop(lock);
+                let before = fs::read(&lp).expect("before");
+                prop_assert!(LockFile::acquire_with_timeout(
+                    td.path(), None, Duration::from_secs(timeout_secs),
+                ).is_err());
+                prop_assert_eq!(fs::read(&lp).expect("after"), before);
             }
 
             #[test]
@@ -691,7 +487,8 @@ mod tests {
             }
 
             #[test]
-            fn stale_lock_with_plan_id_is_replaced(
+            #[serial_test::serial]
+            fn explicit_force_replaces_unknown_legacy_plan(
                 age_hours in 2u32..500u32,
                 plan_id in "[a-zA-Z0-9_-]{1,64}",
             ) {
@@ -709,10 +506,11 @@ mod tests {
                     serde_json::to_string(&old_info).expect("ser"),
                 ).expect("write");
 
-                let lock = LockFile::acquire_with_timeout(
+                let lock = LockFile::acquire_with_timeout_and_force(
                     td.path(),
                     None,
                     Duration::from_hours(1),
+                true,
                 ).expect("should replace stale lock with plan_id");
 
                 let new_info = LockFile::read_lock_info(td.path(), None).expect("read");
@@ -819,7 +617,8 @@ mod tests {
     }
 
     #[test]
-    fn acquire_with_timeout_removes_stale_locks() {
+    #[serial_test::serial]
+    fn acquire_with_timeout_preserves_unknown_old_metadata() {
         let td = tempdir().expect("tempdir");
 
         // Create a lock with old timestamp
@@ -836,13 +635,9 @@ mod tests {
         )
         .expect("write stale lock");
 
-        // Acquire with 1 hour timeout - should succeed and remove stale lock
-        let _lock = LockFile::acquire_with_timeout(td.path(), None, Duration::from_hours(1))
-            .expect("acquire with timeout");
-
-        let info = LockFile::read_lock_info(td.path(), None).expect("read info");
-        assert_eq!(info.pid, std::process::id());
-        assert_ne!(info.pid, 12345);
+        let before = fs::read(&lock_path).expect("before");
+        assert!(LockFile::acquire_with_timeout(td.path(), None, Duration::from_hours(1)).is_err());
+        assert_eq!(fs::read(&lock_path).expect("after"), before);
     }
 
     #[test]
@@ -983,13 +778,19 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn set_plan_id_fails_when_lock_released() {
         let td = tempdir().expect("tempdir");
         let lock = LockFile::acquire(td.path(), None).expect("acquire");
         lock.release().expect("release");
         let result = lock.set_plan_id("some-plan");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("does not exist"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("ownership has already been released")
+        );
     }
 
     #[test]
@@ -1003,16 +804,15 @@ mod tests {
     }
 
     #[test]
-    fn acquire_with_timeout_removes_corrupt_lock() {
+    #[serial_test::serial]
+    fn acquire_with_timeout_preserves_corrupt_lock() {
         let td = tempdir().expect("tempdir");
         let lp = lock_path(td.path(), None);
         fs::write(&lp, "not-valid-json").expect("write corrupt");
 
-        let lock = LockFile::acquire_with_timeout(td.path(), None, Duration::from_hours(1))
-            .expect("acquire after corrupt");
-        let info = LockFile::read_lock_info(td.path(), None).expect("read");
-        assert_eq!(info.pid, std::process::id());
-        drop(lock);
+        let before = fs::read(&lp).expect("before");
+        assert!(LockFile::acquire_with_timeout(td.path(), None, Duration::ZERO).is_err());
+        assert_eq!(fs::read(&lp).expect("after"), before);
     }
 
     #[test]
@@ -1048,7 +848,8 @@ mod tests {
     }
 
     #[test]
-    fn acquire_with_timeout_and_workspace_root() {
+    #[serial_test::serial]
+    fn explicit_force_recovery_with_workspace_root() {
         let td = tempdir().expect("tempdir");
         let root = td.path().join("ws");
         // Create a stale lock with workspace root
@@ -1061,8 +862,13 @@ mod tests {
         };
         fs::write(&lp, serde_json::to_string(&old_info).expect("ser")).expect("write");
 
-        let lock = LockFile::acquire_with_timeout(td.path(), Some(&root), Duration::from_hours(1))
-            .expect("acquire stale with root");
+        let lock = LockFile::acquire_with_timeout_and_force(
+            td.path(),
+            Some(&root),
+            Duration::from_hours(1),
+            true,
+        )
+        .expect("acquire stale with root");
         let info = LockFile::read_lock_info(td.path(), Some(&root)).expect("read");
         assert_eq!(info.pid, std::process::id());
         drop(lock);
@@ -1209,16 +1015,20 @@ mod snapshot_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn error_set_plan_id_after_release() {
         let td = tempdir().expect("tempdir");
         let lock = LockFile::acquire(td.path(), None).expect("acquire");
         lock.release().expect("release");
         let err = lock.set_plan_id("orphan-plan").unwrap_err();
         // Path-independent portion
-        assert!(err.to_string().contains("lock file does not exist"));
+        assert!(
+            err.to_string()
+                .contains("lock ownership has already been released")
+        );
         insta::assert_snapshot!(
             "error_set_plan_id_after_release_prefix",
-            "lock file does not exist"
+            "lock ownership has already been released"
         );
     }
 
@@ -1288,9 +1098,9 @@ mod edge_case_tests {
     // ── 1. Stale lock detection and recovery ────────────────────────────
 
     #[test]
-    fn stale_lock_exactly_at_timeout_boundary_is_not_removed() {
-        // A lock whose age equals the timeout should NOT be considered stale
-        // because the comparison is strictly greater-than.
+    #[serial_test::serial]
+    fn unknown_legacy_near_timeout_is_preserved() {
+        // Unknown legacy ownership is preserved independently of this timestamp.
         let td = tempdir().expect("tempdir");
         let lp = lock_path(td.path(), None);
         let timeout_secs = 3600u64;
@@ -1302,9 +1112,7 @@ mod edge_case_tests {
         };
         fs::write(&lp, serde_json::to_string(&info).unwrap()).unwrap();
 
-        // Lock age ≈ timeout; due to time passing between write and check
-        // this may be slightly over, so we use a timeout 1 second larger to
-        // ensure the lock is truly at the boundary.
+        // Exact age-boundary behavior is covered with a fixed clock in ownership tests.
         let result =
             LockFile::acquire_with_timeout(td.path(), None, Duration::from_secs(timeout_secs + 1));
         assert!(result.is_err());
@@ -1317,7 +1125,8 @@ mod edge_case_tests {
     }
 
     #[test]
-    fn stale_lock_one_second_past_timeout_is_removed() {
+    #[serial_test::serial]
+    fn old_unknown_lock_is_preserved_after_timeout() {
         let td = tempdir().expect("tempdir");
         let lp = lock_path(td.path(), None);
         let timeout_secs = 60u64;
@@ -1329,17 +1138,14 @@ mod edge_case_tests {
         };
         fs::write(&lp, serde_json::to_string(&info).unwrap()).unwrap();
 
-        let lock =
-            LockFile::acquire_with_timeout(td.path(), None, Duration::from_secs(timeout_secs))
-                .expect("should remove stale lock");
-        let new_info = LockFile::read_lock_info(td.path(), None).unwrap();
-        assert_eq!(new_info.pid, std::process::id());
-        assert!(new_info.plan_id.is_none());
-        drop(lock);
+        let before = fs::read(&lp).expect("before");
+        assert!(LockFile::acquire_with_timeout(td.path(), None, Duration::ZERO).is_err());
+        assert_eq!(fs::read(&lp).expect("after"), before);
     }
 
     #[test]
-    fn stale_lock_recovery_preserves_state_dir() {
+    #[serial_test::serial]
+    fn explicit_force_recovery_preserves_state_dir() {
         let td = tempdir().expect("tempdir");
         let nested = td.path().join("deep").join("state");
         fs::create_dir_all(&nested).unwrap();
@@ -1352,7 +1158,9 @@ mod edge_case_tests {
         };
         fs::write(&lp, serde_json::to_string(&info).unwrap()).unwrap();
 
-        let lock = LockFile::acquire_with_timeout(&nested, None, Duration::from_mins(1)).unwrap();
+        let lock =
+            LockFile::acquire_with_timeout_and_force(&nested, None, Duration::from_mins(1), true)
+                .unwrap();
         assert!(nested.exists());
         drop(lock);
     }
@@ -1360,6 +1168,7 @@ mod edge_case_tests {
     // ── 2. Concurrent lock acquisition from multiple threads ────────────
 
     #[test]
+    #[serial_test::serial]
     fn concurrent_acquire_only_one_succeeds() {
         let td = tempdir().expect("tempdir");
         let state_dir = td.path().to_path_buf();
@@ -1379,14 +1188,13 @@ mod edge_case_tests {
 
         let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
         let successes = results.iter().filter(|r| r.is_some()).count();
-        // At most one thread should successfully acquire the lock.
-        // Due to the non-atomic check-then-create in acquire(), more than
-        // one *might* succeed in a race, but at least one must succeed.
-        assert!(successes >= 1, "at least one thread must acquire the lock");
+        // Returned handles stay alive in results until every contender finishes.
+        assert_eq!(successes, 1, "exactly one owner while its handle is live");
     }
 
     #[test]
-    fn concurrent_acquire_with_timeout_replaces_stale() {
+    #[serial_test::serial]
+    fn concurrent_explicit_force_still_has_exactly_one_owner() {
         let td = tempdir().expect("tempdir");
         let state_dir = td.path().to_path_buf();
         let lp = lock_path(&state_dir, None);
@@ -1406,40 +1214,46 @@ mod edge_case_tests {
                 let b = Arc::clone(&barrier);
                 std::thread::spawn(move || {
                     b.wait();
-                    LockFile::acquire_with_timeout(&dir, None, Duration::from_mins(1)).ok()
+                    LockFile::acquire_with_timeout_and_force(
+                        &dir,
+                        None,
+                        Duration::from_mins(1),
+                        true,
+                    )
+                    .ok()
                 })
             })
             .collect();
 
         let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
         let successes = results.iter().filter(|r| r.is_some()).count();
-        assert!(successes >= 1, "at least one thread must succeed");
+        assert_eq!(successes, 1, "force cannot steal held OS ownership");
     }
 
     // ── 3. Force-break of existing lock ─────────────────────────────────
 
     #[test]
-    fn force_break_by_removing_lock_then_reacquire() {
+    #[serial_test::serial]
+    fn deleting_metadata_does_not_release_os_ownership() {
         let td = tempdir().expect("tempdir");
-        let _lock = LockFile::acquire(td.path(), None).expect("initial acquire");
+        let lock = LockFile::acquire(td.path(), None).expect("initial owner");
         let lp = lock_path(td.path(), None);
-        assert!(lp.exists());
-
-        // Simulate a force-break: manually remove the lock file
-        fs::remove_file(&lp).expect("force remove");
-        assert!(!lp.exists());
-
-        // Now a new acquire should succeed
-        let lock2 = LockFile::acquire(td.path(), None).expect("reacquire after force-break");
-        let info = LockFile::read_lock_info(td.path(), None).unwrap();
-        assert_eq!(info.pid, std::process::id());
-        drop(lock2);
+        fs::remove_file(&lp).expect("remove advisory metadata");
+        assert!(LockFile::acquire(td.path(), None).is_err());
+        assert!(
+            LockFile::acquire_with_timeout_and_force(td.path(), None, Duration::ZERO, true)
+                .is_err()
+        );
+        lock.release().expect("release actual owner");
+        let next = LockFile::acquire(td.path(), None).expect("next owner");
+        drop(lock);
+        assert!(LockFile::acquire(td.path(), None).is_err());
+        drop(next);
     }
-
     #[test]
-    fn force_break_stale_via_timeout_zero() {
-        // With timeout=0, any existing lock is considered stale (age > 0)
-        // unless it was literally just created in the same second.
+    #[serial_test::serial]
+    fn explicit_force_replaces_unknown_legacy_record() {
+        // Explicit force can override unknown legacy metadata only after acquiring the OS guard.
         let td = tempdir().expect("tempdir");
         let lp = lock_path(td.path(), None);
         let info = LockInfo {
@@ -1450,29 +1264,36 @@ mod edge_case_tests {
         };
         fs::write(&lp, serde_json::to_string(&info).unwrap()).unwrap();
 
-        let lock = LockFile::acquire_with_timeout(td.path(), None, Duration::from_secs(0)).unwrap();
+        let lock =
+            LockFile::acquire_with_timeout_and_force(td.path(), None, Duration::from_secs(0), true)
+                .unwrap();
         let new_info = LockFile::read_lock_info(td.path(), None).unwrap();
         assert_eq!(new_info.pid, std::process::id());
         drop(lock);
     }
 
     #[test]
-    fn force_break_lock_held_by_different_workspace_root() {
+    #[serial_test::serial]
+    fn workspace_keys_have_independent_owned_guards() {
         let td = tempdir().expect("tempdir");
         let root_a = td.path().join("ws-a");
         let root_b = td.path().join("ws-b");
-        let _lock_a = LockFile::acquire(td.path(), Some(&root_a)).unwrap();
-
-        // Force-break for root_a should not affect root_b
-        let lp_a = lock_path(td.path(), Some(&root_a));
-        fs::remove_file(&lp_a).unwrap();
-
-        let lock_a2 = LockFile::acquire(td.path(), Some(&root_a)).unwrap();
-        // root_b should still be unlocked (never had a lock)
-        assert!(!LockFile::is_locked(td.path(), Some(&root_b)).unwrap());
-        drop(lock_a2);
+        let lock_a = LockFile::acquire(td.path(), Some(&root_a)).unwrap();
+        fs::remove_file(lock_path(td.path(), Some(&root_a))).unwrap();
+        assert!(
+            LockFile::acquire_with_timeout_and_force(
+                td.path(),
+                Some(&root_a),
+                Duration::ZERO,
+                true
+            )
+            .is_err()
+        );
+        let lock_b = LockFile::acquire(td.path(), Some(&root_b)).unwrap();
+        lock_a.release().unwrap();
+        assert!(LockFile::acquire(td.path(), Some(&root_b)).is_err());
+        drop(lock_b);
     }
-
     // ── 4. Lock file with corrupt/invalid content ───────────────────────
 
     #[test]
@@ -1530,17 +1351,16 @@ mod edge_case_tests {
     }
 
     #[test]
-    fn corrupt_lock_removed_by_acquire_with_timeout() {
+    #[serial_test::serial]
+    fn corrupt_lock_requires_explicit_force() {
         let td = tempdir().expect("tempdir");
         let lp = lock_path(td.path(), None);
         fs::write(&lp, "totally-invalid").unwrap();
 
-        // acquire_with_timeout should remove corrupt lock and succeed
-        let lock =
-            LockFile::acquire_with_timeout(td.path(), None, Duration::from_hours(1)).unwrap();
-        let info = LockFile::read_lock_info(td.path(), None).unwrap();
-        assert_eq!(info.pid, std::process::id());
-        drop(lock);
+        // A timeout cannot establish who wrote corrupt metadata.
+        let before = fs::read(&lp).expect("before");
+        assert!(LockFile::acquire_with_timeout(td.path(), None, Duration::ZERO).is_err());
+        assert_eq!(fs::read(&lp).expect("after"), before);
     }
 
     #[test]
@@ -1605,7 +1425,8 @@ mod edge_case_tests {
     // ── 6. Lock with zero timeout ───────────────────────────────────────
 
     #[test]
-    fn zero_timeout_breaks_old_lock() {
+    #[serial_test::serial]
+    fn zero_timeout_preserves_unknown_old_lock() {
         let td = tempdir().expect("tempdir");
         let lp = lock_path(td.path(), None);
         let info = LockInfo {
@@ -1616,10 +1437,9 @@ mod edge_case_tests {
         };
         fs::write(&lp, serde_json::to_string(&info).unwrap()).unwrap();
 
-        let lock = LockFile::acquire_with_timeout(td.path(), None, Duration::from_secs(0)).unwrap();
-        let new_info = LockFile::read_lock_info(td.path(), None).unwrap();
-        assert_eq!(new_info.pid, std::process::id());
-        drop(lock);
+        let before = fs::read(&lp).expect("before");
+        assert!(LockFile::acquire_with_timeout(td.path(), None, Duration::ZERO).is_err());
+        assert_eq!(fs::read(&lp).expect("after"), before);
     }
 
     #[test]
@@ -1631,15 +1451,15 @@ mod edge_case_tests {
     }
 
     #[test]
-    fn zero_timeout_removes_corrupt_lock() {
+    #[serial_test::serial]
+    fn zero_timeout_preserves_corrupt_lock() {
         let td = tempdir().expect("tempdir");
         let lp = lock_path(td.path(), None);
         fs::write(&lp, "garbage").unwrap();
 
-        let lock = LockFile::acquire_with_timeout(td.path(), None, Duration::from_secs(0)).unwrap();
-        let info = LockFile::read_lock_info(td.path(), None).unwrap();
-        assert_eq!(info.pid, std::process::id());
-        drop(lock);
+        let before = fs::read(&lp).expect("before");
+        assert!(LockFile::acquire_with_timeout(td.path(), None, Duration::ZERO).is_err());
+        assert_eq!(fs::read(&lp).expect("after"), before);
     }
 
     // ── 7. Lock with very large timeout ─────────────────────────────────
@@ -1727,13 +1547,17 @@ mod edge_case_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn set_plan_id_on_externally_deleted_lock_fails() {
         let td = tempdir().expect("tempdir");
         let lock = LockFile::acquire(td.path(), None).unwrap();
         let lp = lock_path(td.path(), None);
         fs::remove_file(&lp).unwrap();
         let err = lock.set_plan_id("orphan").unwrap_err();
-        assert!(err.to_string().contains("does not exist"));
+        assert!(
+            err.to_string()
+                .contains("metadata is missing or unreadable")
+        );
     }
 
     #[test]
@@ -1888,7 +1712,8 @@ mod proptest_edge_cases {
         }
 
         #[test]
-        fn corrupt_lock_always_recoverable_with_timeout(
+        #[serial_test::serial]
+        fn explicit_force_recovers_unknown_metadata(
             dir_suffix in "[a-zA-Z0-9]{1,16}",
             garbage in "[^\x00]{1,256}",
         ) {
@@ -1898,10 +1723,11 @@ mod proptest_edge_cases {
             let lp = lock_path(&state_dir, None);
             fs::write(&lp, &garbage).expect("write garbage");
 
-            let lock = LockFile::acquire_with_timeout(
+            let lock = LockFile::acquire_with_timeout_and_force(
                 &state_dir,
                 None,
                 Duration::from_hours(1),
+            true,
             ).expect("should recover from corrupt lock");
 
             let info = LockFile::read_lock_info(&state_dir, None).expect("read");
@@ -2052,7 +1878,8 @@ mod hardened_tests {
     // ── Stale lock: force acquisition ───────────────────────────────────
 
     #[test]
-    fn force_acquire_via_timeout_replaces_all_metadata() {
+    #[serial_test::serial]
+    fn explicit_force_replaces_all_metadata() {
         let td = tempdir().unwrap();
         let lp = lock_path(td.path(), None);
         let old = LockInfo {
@@ -2064,7 +1891,8 @@ mod hardened_tests {
         fs::write(&lp, serde_json::to_string(&old).unwrap()).unwrap();
 
         let _lock =
-            LockFile::acquire_with_timeout(td.path(), None, Duration::from_mins(1)).unwrap();
+            LockFile::acquire_with_timeout_and_force(td.path(), None, Duration::from_mins(1), true)
+                .unwrap();
         let info = LockFile::read_lock_info(td.path(), None).unwrap();
         assert_ne!(info.pid, 65432);
         assert_ne!(info.hostname, "old-machine");
@@ -2191,7 +2019,8 @@ mod lock_edge_case_tests {
     // ── Stale lock with wrong (non-existent) PID ────────────────────
 
     #[test]
-    fn stale_lock_with_wrong_pid_replaced_by_timeout() {
+    #[serial_test::serial]
+    fn old_foreign_pid_is_not_proof_of_abandonment() {
         let td = tempdir().expect("tempdir");
         let lp = lock_path(td.path(), None);
 
@@ -2204,42 +2033,37 @@ mod lock_edge_case_tests {
         };
         std::fs::write(&lp, serde_json::to_string(&info).expect("ser")).expect("write");
 
-        let lock = LockFile::acquire_with_timeout(td.path(), None, Duration::from_hours(1))
-            .expect("should replace stale lock with wrong PID");
-        let new_info = LockFile::read_lock_info(td.path(), None).expect("read");
-        assert_eq!(new_info.pid, std::process::id());
-        assert!(new_info.plan_id.is_none());
-        drop(lock);
+        let before = fs::read(&lp).expect("before");
+        assert!(LockFile::acquire_with_timeout(td.path(), None, Duration::ZERO).is_err());
+        assert_eq!(fs::read(&lp).expect("after"), before);
     }
 
     // ── Lock file with truncated JSON (corrupt) ─────────────────────
 
     #[test]
-    fn truncated_json_lock_is_treated_as_corrupt() {
+    #[serial_test::serial]
+    fn truncated_json_lock_is_preserved() {
         let td = tempdir().expect("tempdir");
         let lp = lock_path(td.path(), None);
         std::fs::write(&lp, r#"{"pid": 42, "hostname":"#).expect("write");
 
-        let lock = LockFile::acquire_with_timeout(td.path(), None, Duration::from_hours(1))
-            .expect("should replace corrupt lock");
-        let info = LockFile::read_lock_info(td.path(), None).expect("read");
-        assert_eq!(info.pid, std::process::id());
-        drop(lock);
+        let before = fs::read(&lp).expect("before");
+        assert!(LockFile::acquire_with_timeout(td.path(), None, Duration::ZERO).is_err());
+        assert_eq!(fs::read(&lp).expect("after"), before);
     }
 
     // ── Lock file with empty content ────────────────────────────────
 
     #[test]
-    fn empty_lock_file_treated_as_corrupt() {
+    #[serial_test::serial]
+    fn empty_lock_file_is_preserved() {
         let td = tempdir().expect("tempdir");
         let lp = lock_path(td.path(), None);
         std::fs::write(&lp, "").expect("write");
 
-        let lock = LockFile::acquire_with_timeout(td.path(), None, Duration::from_hours(1))
-            .expect("should replace empty lock");
-        let info = LockFile::read_lock_info(td.path(), None).expect("read");
-        assert_eq!(info.pid, std::process::id());
-        drop(lock);
+        let before = fs::read(&lp).expect("before");
+        assert!(LockFile::acquire_with_timeout(td.path(), None, Duration::ZERO).is_err());
+        assert_eq!(fs::read(&lp).expect("after"), before);
     }
 
     // ── Lock in deeply nested directory ──────────────────────────────
