@@ -1409,6 +1409,21 @@ fn mark_publish_engine_error(
         );
     };
     match stop {
+        engine::PublishStopClassification::Interrupted => {
+            PublishEarlyError {
+                format: format.to_string(),
+                category: "interrupted",
+                summary: "publication stopped after a termination request",
+                rendered_error: shipper_output_sanitizer::redact_sensitive(&format_error(&error)),
+                safe_to_rerun: PublishEarlySafeRerun {
+                    value: Some(false),
+                    reason: "the current process is stopping; retained evidence must be preserved for a fresh invocation",
+                },
+                next_action: OperatorAction::posture(ActionKind::InspectEvents,
+                    "inspect retained evidence, then use a fresh resume invocation with the same plan, registry, workspace, and state directory; ambiguous attempts reconcile before any new upload"),
+                evidence: still_unknown_evidence(evidence_state_dir, false),
+            }.into()
+        }
         engine::PublishStopClassification::StillUnknown {
             reconciliation_written,
         } => {
@@ -1464,6 +1479,12 @@ fn mark_resume_engine_error(
             CleanupCommand::Resume,
             evidence_state_dir,
         );
+    }
+    if matches!(
+        engine::classify_publish_stop(&error),
+        Some(engine::PublishStopClassification::Interrupted)
+    ) {
+        return error.context("resume was interrupted; preserve the retained evidence for a fresh invocation; ambiguous attempts reconcile before any new upload");
     }
     let Some(budget) = engine::classify_resume_retry_budget(&error) else {
         if engine::is_publish_admission_error(&error) {
@@ -1666,8 +1687,20 @@ fn is_registry_destination_validation_error(error: &anyhow::Error) -> bool {
 
 /// CLI entry point. Exposed for the `shipper` crate's binary target
 /// and for the `shipper-cli` crate's own `shipper-cli` binary — both
-/// are three-line `fn main() { shipper_cli::run() }` wrappers over
+/// are three-line `fn main() { shipper_cli::run_process() }` wrappers over
 /// this function.
+/// Executable-only entry point with process-lifetime termination handling.
+/// Embedders should call [`run`] and retain ownership of their signal policy.
+pub fn run_process() -> Result<std::process::ExitCode> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    process_signals::install()?;
+    run()
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod process_signals;
+
+/// Parse and execute CLI arguments without installing process signal handlers.
 pub fn run() -> Result<std::process::ExitCode> {
     // Build via cli_command() then from_arg_matches (swarm#108: scope first-run
     // help flags) so the manual Command can carry long_help-only arg scoping
@@ -7299,7 +7332,7 @@ mod tests {
     fn cli_reporter_retry_wait_without_progress_blocks_for_delay() {
         // With no progress handle installed, retry_wait falls back to the
         // legacy warn-line + sleep path. Assert it still blocks for the
-        // full delay (the engine relies on this).
+        // full remaining delay for compatibility with countdown callers.
         use std::time::Instant;
         let mut rep = CliReporter::new(true, false); // quiet to suppress stderr
         let delay = Duration::from_millis(60);

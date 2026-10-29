@@ -34,6 +34,9 @@ use crate::types::{
 #[cfg(test)]
 use crate::types::{Finishability, PreflightPackage};
 
+#[doc(hidden)]
+pub use crate::ops::process::interruption::PublishInterruption;
+
 mod cleanup;
 pub(crate) mod execute_package;
 mod preflight;
@@ -160,6 +163,7 @@ pub fn classify_resume_retry_budget(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PublishStopClassification {
     CleanupIncomplete,
+    Interrupted,
     StillUnknown { reconciliation_written: bool },
     RecoverableNotPublished { evidence_consistent: bool },
 }
@@ -171,6 +175,12 @@ pub fn classify_publish_stop(error: &anyhow::Error) -> Option<PublishStopClassif
         .is_some()
     {
         return Some(PublishStopClassification::CleanupIncomplete);
+    }
+    if error
+        .downcast_ref::<crate::ops::process::interruption::Interrupted>()
+        .is_some()
+    {
+        return Some(PublishStopClassification::Interrupted);
     }
     if let Some(still_unknown) = error.downcast_ref::<PublishStillUnknownError>() {
         return Some(PublishStopClassification::StillUnknown {
@@ -214,14 +224,17 @@ pub trait Reporter {
     fn warn(&mut self, msg: &str);
     fn error(&mut self, msg: &str);
 
-    /// Narrate a retry-backoff wait to the operator and block until the wait
-    /// has elapsed. Called once per retry backoff site after the
-    /// [`EventType::RetryBackoffStarted`] event has been recorded. The default
-    /// implementation preserves the pre-#103 behavior (a single `warn()` line
-    /// then `thread::sleep(delay)`); richer UIs (e.g., the CLI) override it to
-    /// render a live countdown during the wait window. Overrides MUST block
-    /// for the full `delay` before returning â€” the engine relies on this
-    /// method to own the retry sleep. See #103 and #91.
+    /// Narrate the remaining retry-backoff wait after the
+    /// [`EventType::RetryBackoffStarted`] event has been recorded. Both
+    /// schedulers forward this callback on the host thread while the package
+    /// worker owns the actual retry sleep. `delay` is the time remaining on
+    /// that same monotonic wait when the callback is delivered.
+    ///
+    /// The default implementation warns once and sleeps for `delay`; richer
+    /// UIs may render a countdown or return immediately. Callback duration
+    /// does not authorize, extend, or restart the worker's retry delay. A slow
+    /// callback can delay later narration while the worker retains control of
+    /// retry admission and durable transitions.
     #[allow(clippy::too_many_arguments)]
     fn retry_wait(
         &mut self,
@@ -497,6 +510,7 @@ fn run_publish_with_state_requirement(
     reporter: &mut dyn Reporter,
     require_existing_state: bool,
 ) -> Result<PublishRunOutcome> {
+    crate::ops::process::interruption::check()?;
     crate::config::validate_per_error_config(&opts.retry_per_error)?;
     let state_dir = resolve_state_dir(&ws.workspace_root, &opts.state_dir);
     let require_existing_state =
@@ -535,6 +549,7 @@ fn run_publish_with_state_requirement(
         };
 
         publish::finalize::record_consistency_drift(&events_path, &st, &mut event_log, reporter);
+        crate::ops::process::interruption::check()?;
         let receipt = publish::finalize::finish_parallel_run(
             ws,
             opts,
@@ -574,6 +589,7 @@ fn run_publish_with_state_requirement(
         }
     };
     publish::finalize::record_consistency_drift(&events_path, &st, &mut event_log, reporter);
+    crate::ops::process::interruption::check()?;
     let receipt = publish::finalize::finish_sequential_run(
         ws,
         opts,
@@ -743,6 +759,7 @@ pub fn run_rehearsal(
     opts: &RuntimeOptions,
     reporter: &mut dyn Reporter,
 ) -> Result<RehearsalOutcome> {
+    crate::ops::process::interruption::check()?;
     crate::config::validate_per_error_config(&opts.retry_per_error)?;
     let rehearsal_name = opts
         .rehearsal_registry
@@ -840,6 +857,7 @@ pub fn run_rehearsal(
     let mut first_failure: Option<String> = None;
 
     for p in &ws.plan.packages {
+        crate::ops::process::interruption::check()?;
         let pkg_label = format!("{}@{}", p.name, p.version);
         reporter.info(&format!("rehearsing {pkg_label} â†’ {rehearsal_name}"));
         let start = Instant::now();
@@ -862,6 +880,22 @@ pub fn run_rehearsal(
                 &pkg_label,
                 message,
             ));
+        }
+        if captured.interrupted || crate::ops::process::interruption::requested() {
+            event_log.record(PublishEvent {
+                timestamp: Utc::now(),
+                event_type: EventType::RehearsalPackageFailed {
+                    name: p.name.clone(),
+                    version: p.version.clone(),
+                    class: ErrorClass::Ambiguous,
+                    message: "publication interrupted; process cleanup confirmed; registry outcome is unknown".into(),
+                },
+                package: pkg_label.clone(),
+            });
+            event_log
+                .write_to_file(&events_path)
+                .context(crate::ops::process::interruption::Interrupted)?;
+            return Err(crate::ops::process::interruption::Interrupted.into());
         }
         let capture_complete = captured.capture.is_complete();
         let out = captured.output;
@@ -899,6 +933,9 @@ pub fn run_rehearsal(
             first_failure = Some(format!("{pkg_label}: {msg}"));
             break;
         }
+
+        drop(captured._interruption_lease);
+        crate::ops::process::interruption::check()?;
 
         // Post-publish visibility check on the rehearsal registry. Reuse
         // `version_exists` â€” same mechanism live publish trusts.
@@ -1135,8 +1172,11 @@ pub(crate) fn init_state(ws: &PlannedWorkspace, state_dir: &Path) -> Result<Exec
 mod tests {
     mod capture_reconciliation;
     mod cleanup_hold;
+    mod file_sync;
+    mod live_retry;
     mod lock_ownership;
     mod per_error_refusal;
+    mod reconciliation_concurrency;
     mod retained_admission;
     mod retained_retryable;
     mod timeout_reconciliation;

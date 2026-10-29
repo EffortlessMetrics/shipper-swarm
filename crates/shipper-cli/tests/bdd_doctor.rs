@@ -243,7 +243,8 @@ mod workspace_health {
 
     // Scenario: Doctor reports state directory status when it does not yet exist
     #[test]
-    fn given_nonexistent_state_dir_when_running_doctor_then_reports_will_be_created() {
+    #[serial_test::serial]
+    fn given_nonexistent_state_dir_when_running_doctor_then_reports_unverified_access() {
         // Given: A workspace where the state dir has not been created yet
         let td = tempdir().expect("tempdir");
         create_workspace(td.path());
@@ -262,12 +263,17 @@ mod workspace_health {
             .env_remove("CARGO_REGISTRY_TOKEN")
             .env_remove("CARGO_REGISTRIES_CRATES_IO_TOKEN");
 
-        // Then: Output indicates the state directory will be created
+        // Then: The missing state directory remains prospective and unproven
         cmd.assert()
             .success()
-            .stdout(contains("state_dir_exists: false (will be created)"));
+            .stdout(contains(
+                "state_dir_exists: false (prospective; write access is unverified)",
+            ))
+            .stdout(contains("state-dir-not-created"))
+            .stdout(contains("Unknown: state directory"));
 
         registry.join();
+        assert!(!td.path().join(".shipper").exists());
     }
 }
 

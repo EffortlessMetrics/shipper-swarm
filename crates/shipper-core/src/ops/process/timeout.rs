@@ -48,6 +48,9 @@ pub(crate) fn run_command_with_timeout(
     if let Some(failure) = captured.cleanup_failure {
         bail!("command cleanup incomplete: {}", failure.description());
     }
+    if captured.interrupted || super::interruption::requested() {
+        return Err(super::interruption::Interrupted.into());
+    }
     Ok(captured.output)
 }
 

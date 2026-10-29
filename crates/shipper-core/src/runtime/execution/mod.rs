@@ -672,6 +672,12 @@ mod tests {
             }),
             "ambiguous"
         );
+        assert_eq!(
+            short_state(&shipper_types::PackageState::CleanupIncomplete {
+                message: "x".into()
+            }),
+            "cleanup_incomplete"
+        );
     }
 
     #[test]

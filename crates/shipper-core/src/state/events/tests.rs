@@ -28,6 +28,153 @@ fn sample_event(package: &str) -> PublishEvent {
     }
 }
 
+#[test]
+#[serial_test::serial]
+fn file_sync_failure_keeps_flushed_event_bytes_and_reports_path() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let dir = tempdir().expect("temporary state directory");
+    let path = events_path(dir.path());
+    let mut log = EventLog::new();
+    log.record(sample_event("demo@1.0.0"));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed_calls = Arc::clone(&calls);
+    let expected_path = path.clone();
+    let _fault = crate::state::file_sync::test_support::observe(dir.path(), move |path| {
+        assert_eq!(path, expected_path);
+        let bytes = fs::read(path).expect("event write and flush preceded file sync");
+        assert!(bytes.ends_with(b"\n"));
+        let event: PublishEvent = serde_json::from_slice(&bytes).expect("complete JSON event");
+        assert_eq!(event.package, "demo@1.0.0");
+        observed_calls.fetch_add(1, Ordering::SeqCst);
+        Err(std::io::Error::other("injected event file-sync failure"))
+    });
+
+    let error = log
+        .write_to_file(&path)
+        .expect_err("flush success must not hide a required event file-sync failure");
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(format!("{error:#}").contains(&path.display().to_string()));
+    assert!(format!("{error:#}").contains("injected event file-sync failure"));
+    assert!(error.downcast_ref::<std::io::Error>().is_some());
+    assert_eq!(
+        EventLog::read_from_file(&path)
+            .expect("retained bytes")
+            .len(),
+        1
+    );
+    assert_eq!(
+        log.len(),
+        1,
+        "failed persistence does not clear pending evidence"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn file_sync_failed_owner_preserves_pending_and_io_metadata_after_clear() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Debug)]
+    struct OriginalCause;
+
+    impl std::fmt::Display for OriginalCause {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("original typed file-sync cause")
+        }
+    }
+
+    impl std::error::Error for OriginalCause {}
+
+    for raw_os_error in [None, Some(5)] {
+        let dir = tempdir().expect("temporary state directory");
+        let path = events_path(dir.path());
+        let other_path = dir.path().join("other").join("events.jsonl");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed_calls = Arc::clone(&calls);
+        let _fault = crate::state::file_sync::test_support::observe(dir.path(), move |_| {
+            observed_calls.fetch_add(1, Ordering::SeqCst);
+            Err(match raw_os_error {
+                Some(code) => io::Error::from_raw_os_error(code),
+                None => io::Error::new(io::ErrorKind::PermissionDenied, OriginalCause),
+            })
+        });
+        let mut log = EventLog::new();
+        log.record(sample_event("alpha@1.0.0"));
+        let first = log.write_to_file(&path).expect_err("injected sync failure");
+        let first_io = first.downcast_ref::<io::Error>().expect("original I/O");
+        assert_eq!(first_io.raw_os_error(), raw_os_error);
+        if raw_os_error.is_none() {
+            assert!(
+                first_io
+                    .get_ref()
+                    .and_then(|source| source.downcast_ref::<OriginalCause>())
+                    .is_some(),
+                "the first returned error must retain its original typed source"
+            );
+        }
+        let bytes = fs::read(&path).expect("already-flushed evidence");
+        assert_eq!(EventLog::read_from_file(&path).unwrap().len(), 1);
+
+        log.record(sample_event("beta@1.0.0"));
+        log.clear();
+        assert_eq!(log.len(), 2, "clear cannot discard an indeterminate batch");
+        assert_eq!(log.all_events()[0].package, "alpha@1.0.0");
+        assert_eq!(log.all_events()[1].package, "beta@1.0.0");
+        for destination in [&path, &other_path] {
+            let error = log
+                .write_to_file(destination)
+                .expect_err("the same owner cannot blindly retry a failed batch");
+            let diagnostic = format!("{error:#}");
+            assert!(diagnostic.contains(&format!("{first:#}")), "{diagnostic}");
+            assert!(diagnostic.contains(&path.display().to_string()));
+            let source = error.downcast_ref::<io::Error>().expect("retained I/O");
+            assert_eq!(source.kind(), first_io.kind());
+            assert_eq!(source.raw_os_error(), first_io.raw_os_error());
+            assert_eq!(source.to_string(), first_io.to_string());
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            assert!(!other_path.parent().unwrap().exists());
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+        }
+        log.clear();
+        assert_eq!(log.len(), 2, "later refusal must not reset the hold");
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn file_sync_owner_can_retry_a_failure_before_any_append() {
+    for fail_create in [false, true] {
+        let dir = tempdir().expect("temporary state directory");
+        let blocked = dir.path().join("blocked");
+        let path = if fail_create {
+            fs::write(&blocked, b"parent is a file").unwrap();
+            blocked.join("events.jsonl")
+        } else {
+            fs::create_dir(&blocked).unwrap();
+            blocked.clone()
+        };
+        let mut log = EventLog::new();
+        log.record(sample_event("alpha@1.0.0"));
+        log.write_to_file(&path)
+            .expect_err("failure before opening an append stream");
+        assert_eq!(log.len(), 1);
+        if fail_create {
+            fs::remove_file(&blocked).unwrap();
+        } else {
+            fs::remove_dir(&blocked).unwrap();
+        }
+        log.write_to_file(&path)
+            .expect("no append was attempted, so the batch remains retryable");
+        assert_eq!(EventLog::read_from_file(&path).unwrap().len(), 1);
+        log.clear();
+        assert!(log.is_empty());
+    }
+}
+
 fn fixed_event(event_type: EventType, package: &str) -> PublishEvent {
     PublishEvent {
         timestamp: fixed_time(),

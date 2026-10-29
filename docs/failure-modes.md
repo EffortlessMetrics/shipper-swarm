@@ -63,6 +63,12 @@ A failed group signal is provisional. If the direct child is then reaped, the
 group is proved absent, and both pipes reach EOF, cleanup is complete. If those
 facts remain unproved at the deadline, the invocation retains the cleanup hold.
 
+On Linux, orphaned zombie descendants can keep the group probe positive even
+after all active work has stopped. This can occur in containers whose PID 1 does
+not reap orphaned children. Shipper conservatively retains the hold; it does not
+treat a zombie-only group as absent. Use a container init that reaps children to
+avoid accumulating this condition.
+
 An early direct-child exit keeps its exit code and `timed_out=false`, including
 when its descendants inherited output handles. Only exceeding the execution
 deadline sets `timed_out=true`. Known incomplete cleanup is a separate typed
@@ -81,6 +87,32 @@ cannot be discovered through this mechanism.
 Windows and other platforms retain the existing direct-child/reader behavior;
 the bounded Unix cleanup claim does not apply to them. Their owned-process and
 cancellable-I/O implementation and native proof remain tracked by issue #412.
+
+### Termination during publication
+
+On Linux and macOS, the shipped `shipper` and `shipper-cli` executables install
+process-lifetime handling for SIGINT, SIGTERM and SIGHUP. While a supervised Cargo
+group is active, a signal requests its existing bounded cleanup and stops later
+commands. For live publish/resume, confirmed cleanup retains the attempt as an
+ambiguous failure. The command returns an interruption error without an
+in-run retry. A fresh `resume` reconciles that attempt against the registry before
+any replacement upload. A signal does not assert that the upload was rejected.
+If cleanup cannot be confirmed, the absorbing cleanup hold below takes precedence.
+Rehearsal instead retains its existing `rehearsal_package_failed` event with an
+ambiguous class; it does not create a resumable live-publish attempt projection.
+
+Deferred termination remains owned through the interrupted or uncertain result's
+persistence attempt, including parallel peers. Outside those intervals, signals
+retain ordinary termination behavior; planning, untimed metadata/dry-run work,
+registry waits and backoff do not acquire a new cancellation-latency guarantee.
+The shutdown request is sticky within the process and is never reset between
+packages or retries. SIGKILL, process crashes, arbitrary external reapers and
+processes escaping the owned group remain outside this cooperative signal path.
+
+Plain `shipper_cli::run()` and core embedding entry points install no handlers.
+The executable-only `run_process()` wrapper owns this policy; embedders retain
+responsibility for their host's process and signal lifecycle. Native signal proof
+is Linux-only; macOS runtime qualification remains outstanding.
 
 ### Retained process cleanup hold
 
@@ -197,6 +229,21 @@ exponential backoff with jitter (the `Default` policy).
 | 6 | 64 s |
 
 With jitter of 0.5, each delay is multiplied by a random factor in `[0.5, 1.5]`.
+
+### Live retry progress
+
+Sequential and parallel publishing deliver retry progress during the wait before
+the next Cargo attempt. The displayed delay is the time remaining on the package
+worker's monotonic backoff deadline. Rendering a countdown does not add another
+retry wait or determine whether an attempt is allowed.
+
+Information, warnings, errors, and retry notices retain their enqueue order, so a
+failed-attempt warning precedes its retry notice and later success message. Across
+parallel packages, this is the order in which workers enqueue their messages.
+Slow reporter callbacks can delay narration while workers continue with the same
+retry policy and durable outcomes. Callbacks run on the caller's thread and do not
+need to be `Send`. Human progress stays on stderr; quiet mode suppresses it and
+JSON publish output remains one command envelope.
 
 ### Global retry configuration
 

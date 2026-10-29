@@ -48,6 +48,68 @@ event advances the projection to `published`. `EventType::ReadinessStarted`
 continues to map to `uploaded` for backward compatibility with historical
 event logs.
 
+## Persistence boundary and failure model
+
+The filesystem path used by ordinary publish/resume requires a successful
+`sync_all` of the event file after flushing each buffered JSONL batch. Only then
+may a package transition clear its pending event batch and write its state
+projection. Plaintext JSON replacements (`state.json`, `receipt.json`,
+`reconciliation.json`, and remediation plans) require the temporary file's
+write and `sync_all` to succeed before renaming it over the destination.
+Required file-sync errors retain the affected path and underlying I/O error.
+Cleanup persistence refusals retain both the typed cleanup stop and that I/O
+cause; a successful projection fallback does not turn the sync failure into success.
+The first returned error keeps its original source chain. After an attempted
+append, a write/flush/sync error makes that `EventLog` instance refuse all later
+writes, including writes to another path. It preserves pending events even when
+`clear()` is called. Later refusals retain the original diagnostic and reconstruct
+the I/O error kind, raw OS code (when present), and message; arbitrary custom
+source types remain available only on the first error. Directory-creation and
+file-open failures before any append can still be retried.
+
+This is a checked file-sync boundary, not an atomic transaction across files or
+between local files and a registry. In particular:
+
+| Failure or interruption | Supported result and limit |
+|---|---|
+| Returned event write, flush, or sync error | The transition returns an error before advancing its projection. The same event-log owner refuses later appends and retains pending evidence, so a peer or readiness close cannot blindly replay the failed batch. Already-appended bytes remain; an error does not prove that the event or the remote upload is absent. |
+| Returned temporary JSON write or sync error | Rename is not attempted. An existing destination remains readable and unchanged, or a missing destination stays missing. The temporary file may remain for diagnosis. |
+| Projection failure after event sync | The synchronized event remains authoritative while the old projection can lag. Rebuild can recover from readable complete events; no rollback or fabricated replacement event is performed. |
+| Receipt sync failure | Finalization returns an error and does not install a new receipt. A prior receipt, if any, remains prior evidence. `ExecutionFinished` may already be present: that event does not prove the command returned success or installed its receipt. |
+| Abrupt Shipper process termination | Recovery uses the evidence actually retained. Termination during append may leave an incomplete final JSONL record or a projection behind its events. The checked boundary does not make each append atomic or guarantee automatic recovery at every instruction. |
+| Runner loss and artifact transfer | A successful rehearsal proves continuation from the artifacts that were successfully retained and transferred. It does not prove that an abruptly lost runner uploaded its newest bytes. |
+| Host crash, power loss, filesystem or controller failure | No certification is made. A successful file-sync call is the OS-reported boundary, not independent proof of hardware persistence or atomic multi-file recovery. |
+
+Parent-directory synchronization after JSON rename remains **best effort**:
+open/sync errors are ignored for platform portability. Event-file or directory
+creation is not followed by a required directory-sync barrier. File sync alone
+therefore does not guarantee the persistence of a new name or a rename across
+host loss. Required file-sync errors are not downgraded to this directory policy.
+
+The separate `save_state_encrypted` / `write_receipt_encrypted` helpers delegate
+to `shipper-encrypt`'s direct-write implementation, even when encryption is
+disabled in that helper. They do not use the atomic JSON writer and are outside
+this bounded replacement guarantee. Their behavior and support tier are not
+promoted by these tests.
+
+After a sync error, preserve the event log and inspect the artifacts and registry
+truth before continuing; do not delete appended bytes or blindly append the same
+pending batch again. The failed-owner hold is in memory: constructing a new log
+or restarting does not retain it, and it does not cancel already-running peer
+Cargo processes. Strict event readers still reject incomplete, malformed,
+and unknown records. Follow-mode buffering is a separate streaming behavior and
+does not authorize silently repairing authoritative history.
+
+The deterministic `file_sync` tests inject a file-sync error only after reading
+the actual flushed event or written temporary JSON. They prove error propagation,
+event-before-projection ordering, preservation before rename, rebuild after a
+projection failure, and no success receipt for the selected failure points in
+both schedulers. A two-worker fault also checks the actual event count and
+independently rebuilt attempt history; public resume and readiness-close faults
+exercise contextual error forwarding and refusal of a repeated append. Native
+proof is Linux-only; no macOS, Windows, filesystem,
+controller-cache, or real power-loss qualification follows from fault injection.
+
 ## Process timeout enters reconciliation
 
 The canonical package executor treats `CargoOutput::timed_out` as
@@ -159,6 +221,22 @@ Lock ordering is event log, then execution state; Cargo, registry queries,
 reporting and retry sleeps remain outside that critical section. This is an
 in-process concurrency guarantee, not an all-or-nothing filesystem transaction
 or a host/power-loss durability claim.
+
+Reconciliation report generation uses that same event-log mutex across the
+complete durable-event read, record derivation, and report replacement. Package
+workers cannot overwrite newer reconciliation evidence with an older snapshot
+or interfere with another worker's `reconciliation.tmp`. The report path takes
+only the event-log mutex; package transitions retain the event-log-then-state
+lock order. Cargo, registry polling, backoff, and report warnings remain outside
+this report persistence boundary.
+
+Post-join finalization derives the report after workers finish, while the
+invocation still owns its publication key. A failed report read or write remains
+observable, and the complete event/state/report consistency check owns recovery
+authorization. A worker's local result cannot substitute for that check. The
+low-level report writer requires caller-provided exclusion for its whole call;
+this is an engine concurrency guarantee, not a new generic storage transaction,
+cross-process locking primitive, or fsync/power-loss guarantee.
 
 ### Local process cleanup holds
 

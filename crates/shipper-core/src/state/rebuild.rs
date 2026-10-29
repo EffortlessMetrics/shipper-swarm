@@ -109,7 +109,25 @@ pub fn rebuild_state_file_from_events(
     // persistence boundary. Rebuilding from an older event prefix must not
     // silently erase that observed local-safety condition. The caller provides
     // exclusion against concurrent writers as required by this API contract.
-    if let Some(retained) = execution_state::load_state(state_dir)? {
+    let retained = match execution_state::load_state(state_dir) {
+        Ok(retained) => retained,
+        Err(error) if error.downcast_ref::<serde_json::Error>().is_some() => {
+            // A damaged projection is the reason this recovery API exists.
+            // Still preserve a complete typed hold nested in otherwise invalid
+            // JSON/schema; never mistake a projection parse failure for proof
+            // that local process cleanup was confirmed.
+            let raw = std::fs::read(execution_state::state_path(state_dir))
+                .context("failed to inspect damaged state before rebuilding")?;
+            if recognizable_cleanup_hold(&raw) {
+                bail!(
+                    "cannot rebuild away retained cleanup hold in damaged state; preserve the evidence and inspect the owned processes"
+                );
+            }
+            None
+        }
+        Err(error) => return Err(error),
+    };
+    if let Some(retained) = retained {
         for (key, progress) in &retained.packages {
             if matches!(progress.state, PackageState::CleanupIncomplete { .. })
                 && !state.packages.get(key).is_some_and(|rebuilt| {
@@ -124,6 +142,22 @@ pub fn rebuild_state_file_from_events(
     }
     execution_state::save_state(state_dir, &state)?;
     Ok(state)
+}
+
+/// Find complete typed states even when surrounding projection JSON is damaged.
+/// Deserialize each possible object boundary as a prefix so trailing damage
+/// cannot erase an already recognizable hold. Escaped strings are handled by
+/// serde, and arbitrary prose mentioning the state name is not a typed hold.
+fn recognizable_cleanup_hold(raw: &[u8]) -> bool {
+    raw.iter().enumerate().any(|(offset, byte)| {
+        *byte == b'{'
+            && matches!(
+                serde_json::Deserializer::from_slice(&raw[offset..])
+                    .into_iter::<PackageState>()
+                    .next(),
+                Some(Ok(PackageState::CleanupIncomplete { .. }))
+            )
+    })
 }
 
 fn apply_event(
@@ -1499,6 +1533,98 @@ mod tests {
 
         assert_eq!(rebuilt.plan_id, "plan-123");
         assert_eq!(loaded.packages["demo@0.1.0"].state, PackageState::Published);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn rebuild_recovers_corrupt_projection_without_recognizable_cleanup_hold() {
+        for damaged in [
+            "",
+            "{",
+            "broken JSON",
+            "{}",
+            r#"{"packages":false}"#,
+            r#"{"message":"cleanup_incomplete"}"#,
+            r#"{"state":"cleanup_incomplete","message":false}"#,
+        ] {
+            let td = tempdir().expect("tempdir");
+            let events_path = events::events_path(td.path());
+            write_events(
+                &events_path,
+                vec![
+                    event(
+                        0,
+                        "all",
+                        EventType::PlanCreated {
+                            plan_id: "plan-123".into(),
+                            package_count: 1,
+                        },
+                    ),
+                    event(
+                        1,
+                        "demo@0.1.0",
+                        EventType::PackagePublished { duration_ms: 100 },
+                    ),
+                ],
+            );
+            let events_before = std::fs::read(&events_path).unwrap();
+            std::fs::write(execution_state::state_path(td.path()), damaged).unwrap();
+
+            let rebuilt = rebuild_state_file_from_events(td.path(), options())
+                .expect("authoritative events recover a corrupt projection without a hold");
+
+            assert_eq!(
+                rebuilt.packages["demo@0.1.0"].state,
+                PackageState::Published
+            );
+            assert_eq!(
+                serde_json::to_value(execution_state::load_state(td.path()).unwrap().unwrap())
+                    .unwrap(),
+                serde_json::to_value(rebuilt).unwrap(),
+            );
+            assert_eq!(std::fs::read(events_path).unwrap(), events_before);
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn rebuild_preserves_recognizable_hold_inside_corrupt_projection() {
+        let hold = serde_json::to_string(&PackageState::CleanupIncomplete {
+            message: "retained process ownership is uncertain".into(),
+        })
+        .unwrap();
+        for damaged in [
+            format!(r#"{{"packages":{{"demo@0.1.0":{{"state":{hold}}}}}}}"#),
+            format!(r#"{{"packages":{{"demo@0.1.0":{{"state":{hold}}}}}"#),
+            format!("invalid prefix {hold} invalid suffix"),
+            format!(
+                "invalid prefix {}",
+                hold.replace("cleanup_incomplete", r"cleanup_\u0069ncomplete")
+            ),
+        ] {
+            let td = tempdir().expect("tempdir");
+            let events_path = events::events_path(td.path());
+            write_events(
+                &events_path,
+                vec![event(
+                    0,
+                    "all",
+                    EventType::PlanCreated {
+                        plan_id: "plan-123".into(),
+                        package_count: 1,
+                    },
+                )],
+            );
+            let state_path = execution_state::state_path(td.path());
+            std::fs::write(&state_path, &damaged).unwrap();
+            let events_before = std::fs::read(&events_path).unwrap();
+
+            let error = rebuild_state_file_from_events(td.path(), options()).unwrap_err();
+
+            assert!(format!("{error:#}").contains("cannot rebuild away retained cleanup hold"));
+            assert_eq!(std::fs::read_to_string(state_path).unwrap(), damaged);
+            assert_eq!(std::fs::read(events_path).unwrap(), events_before);
+        }
     }
 
     #[test]

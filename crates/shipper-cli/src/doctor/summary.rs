@@ -200,6 +200,11 @@ pub(super) fn status_from_findings(findings: &[Finding]) -> DoctorCheckStatus {
         DoctorCheckStatus::Blocked
     } else if findings
         .iter()
+        .any(|finding| finding.status == FindingLevel::Unknown)
+    {
+        DoctorCheckStatus::Unknown
+    } else if findings
+        .iter()
         .any(|finding| finding.status == FindingLevel::Warning)
     {
         DoctorCheckStatus::Warning

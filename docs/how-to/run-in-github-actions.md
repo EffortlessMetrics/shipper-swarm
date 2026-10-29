@@ -165,20 +165,20 @@ configured until the Trusted Publishing path is proven end to end.
 3. Repeat for **every** crate the workspace publishes. Do NOT enable
    OIDC until the list is complete.
 
-> **Why "every crate"**: if only some crates are registered, the
-> OIDC action still succeeds and mints a token — but that token 401s
-> on the unregistered crates mid-train, after some publishes have
-> already succeeded. Shipper's preflight catches scope mismatches
-> for *existing* crates via ownership checks, but new crates have no
-> owner record yet so the first-publish case depends on operator
-> discipline. Complete registration first; rehearse second; tag third.
+> **Why "every crate"**: if only some crates are registered, an exchanged
+> token can still fail on an unregistered crate after earlier publishes
+> succeeded. Shipper's preflight ownership checks add evidence for existing
+> crates, but do not prove all token permissions. New crates have no owner
+> record yet, so their first publication still depends on complete setup.
+> Complete registration first; rehearse second; tag third.
 >
-> **Rehearsal validates the mechanism.** `release.yml`'s
+> **Rehearsal checks the mechanism.** `release.yml`'s
 > `release-rehearse` job binds to `environment: release` so the OIDC
-> scope it mints matches production. A rehearsal that mints
-> successfully proves the scope wiring. A mid-train 401 on a
-> different crate proves you missed a registration step — fix the
-> missing registration, don't retry the tag.
+> context matches the intended production environment. A successful mint
+> establishes that the exchange returned a token; it does not establish
+> authorization for every crate or successful publication. A mid-train 401
+> can indicate missing registration. Check the retained auth evidence and
+> per-crate configuration before choosing a recovery action.
 
 **Workflow**:
 
@@ -199,23 +199,57 @@ jobs:
       # Exchange the workflow's OIDC token for a short-lived
       # crates.io publish token. Output: steps.auth.outputs.token.
       - id: auth
+        # Allow an approved fallback to be evaluated after a failed mint.
+        continue-on-error: true
         uses: rust-lang/crates-io-auth-action@v1
 
       - name: shipper publish
+        shell: bash
         env:
-          # Falls back to the long-lived secret if OIDC is unavailable
-          # (e.g. during incident response or the first bootstrap run).
+          # Keep the release workflow's selection: minted output first,
+          # then the explicitly configured long-lived fallback secret.
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token || secrets.CARGO_REGISTRY_TOKEN }}
-        run: shipper publish --policy safe
+          SHIPPER_TOKEN_MINTED: ${{ steps.auth.outputs.token != '' }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${CARGO_REGISTRY_TOKEN//[[:space:]]/}" ]]; then
+            echo "::error::No usable publish token; publication was not started." >&2
+            exit 1
+          fi
+          if [[ "$SHIPPER_TOKEN_MINTED" == "true" ]]; then
+            echo "Publish token source: trusted_publishing"
+          else
+            echo "::warning::Publish token source: fallback_secret"
+          fi
+          shipper publish --policy safe
 ```
+
+The auth action's
+[`continue-on-error`](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idstepscontinue-on-error)
+allows a failed mint to reach the explicit fallback selection. A nonempty minted
+output wins over the fallback; successful minting also works without a fallback
+secret. If the selected token is empty or whitespace-only, the shell exits before
+`shipper publish`. A nonempty but unusable minted token does not trigger an
+automatic fallback after publication fails. The fixed source labels reveal no
+token values. If you add Doctor or preflight steps to this fragment, give each
+the same selected-token expression rather than a different credential source.
 
 `shipper doctor` validates the local workflow prerequisites it can see:
 `id-token: write`, `environment: release`,
 `rust-lang/crates-io-auth-action@v1`, and an explicit
 `secrets.CARGO_REGISTRY_TOKEN` fallback. It does not validate crates.io's
-per-crate Trusted Publishing registration; that remains a crates.io-side
-setup step and is proven by the token exchange plus preflight ownership
-checks for existing crates.
+per-crate Trusted Publishing registration. Visible OIDC environment variables,
+a returned token, per-crate registration, fallback use, and successful publication
+are separate observations. Ownership checks for existing crates do not establish
+authorization for a new crate's first publication.
+
+The local example fixtures parse this YAML and execute its publish shell with
+synthetic tokens and a fake command. They cover minted-token precedence, failed
+mint with fallback, minted-only use, and refusal without a usable token. They do
+not perform an OIDC exchange, inspect crates.io registration, or publish anything.
+The release authority's auth evidence remains owned by
+[#105](https://github.com/EffortlessMetrics/shipper/issues/105); this example does
+not promote the [Trusted Publishing support tier](../status/SUPPORT_TIERS.md).
 
 When the workflow keeps `secrets.CARGO_REGISTRY_TOKEN` as a fallback,
 `shipper doctor` and `shipper preflight` keep that path visible with
@@ -228,7 +262,8 @@ explicitly unnecessary for the published crate set.
 **Troubleshooting**:
 
 - `id-token: write` missing → GitHub refuses the OIDC exchange → the
-  action fails loudly; add the permission.
+  action fails. This example continues to the explicit fallback, or refuses
+  publication when no usable token is selected; fix the missing permission.
 - Crate not registered as a trusted publisher → `cargo publish` returns
   401 despite a valid-looking token. Check crates.io's Trusted
   Publishing panel for the crate.

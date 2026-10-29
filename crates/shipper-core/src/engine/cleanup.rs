@@ -90,10 +90,11 @@ pub(super) fn stop_publish(
         } else {
             "cleanup evidence could not be recorded reliably; no safe rerun is established; preserve the available evidence and inspect processes before any further action"
         };
-        return anyhow::Error::from(PublishCleanupIncompleteError {
-            message: format!("{message}; {persistence}"),
-        })
-        .context(format!("failed to persist cleanup hold: {error:#}"));
+        return error
+            .context(PublishCleanupIncompleteError {
+                message: format!("{message}; {persistence}"),
+            })
+            .context("failed to persist cleanup hold");
     }
     PublishCleanupIncompleteError { message }.into()
 }
@@ -114,9 +115,9 @@ pub(super) fn stop_rehearsal(
         package: package.to_string(),
     });
     if let Err(error) = log.write_to_file(events_path) {
-        return anyhow::Error::from(PublishCleanupIncompleteError {
+        return error.context(PublishCleanupIncompleteError {
             message: format!("{message}; rehearsal cleanup evidence could not be recorded; no safe rerun is established"),
-        }).context(format!("failed to persist rehearsal cleanup hold: {error:#}"));
+        }).context("failed to persist rehearsal cleanup hold");
     }
     log.clear();
     PublishCleanupIncompleteError { message }.into()
