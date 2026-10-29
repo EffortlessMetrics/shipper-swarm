@@ -14,6 +14,39 @@ use crate::types::{
 };
 use crate::webhook::{self, WebhookEvent};
 
+/// Complete the evidence for a typed recoverable stop without claiming a
+/// finished run or writing a receipt. Other failure classes keep their owner.
+pub(in crate::engine) fn record_recoverable_stop(
+    error: anyhow::Error,
+    state_dir: &Path,
+    events_path: &Path,
+    event_log: &mut events::EventLog,
+    state: &ExecutionState,
+    reporter: &mut dyn Reporter,
+) -> Result<anyhow::Error> {
+    let Some(stop) = error.downcast_ref::<crate::engine::PublishRecoverableStopError>() else {
+        return Ok(error);
+    };
+    let package = stop.package.clone();
+    event_log.record(PublishEvent {
+        timestamp: Utc::now(),
+        event_type: EventType::ExecutionStopped {
+            reason: crate::types::ControlledStopReason::NotPublishedRetryBudgetExhausted,
+        },
+        package: package.clone(),
+    });
+    event_log.write_to_file(events_path)?;
+    record_consistency_drift(events_path, state, event_log, reporter);
+    let evidence_consistent =
+        crate::engine::controlled_stop_evidence_consistent(state_dir, events_path, state);
+    Ok(crate::engine::PublishRecoverableStopError {
+        message: format!("{error:#}"),
+        package,
+        evidence_consistent,
+    }
+    .into())
+}
+
 pub(in crate::engine) fn record_consistency_drift(
     events_path: &Path,
     state: &ExecutionState,

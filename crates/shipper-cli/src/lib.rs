@@ -1314,6 +1314,11 @@ fn mark_resume_engine_error(
     evidence_state_dir: &Path,
 ) -> anyhow::Error {
     let Some(budget) = engine::classify_resume_retry_budget(&error) else {
+        if engine::is_publish_admission_error(&error) {
+            return error.context(
+                "resume was refused before changing retained evidence or dispatching a publish attempt; inspect the lock, state, events, and reconciliation evidence before retrying",
+            );
+        }
         return error.context(resume_failure_hint(configured_state_dir));
     };
     let evidence = still_unknown_evidence(evidence_state_dir, true);

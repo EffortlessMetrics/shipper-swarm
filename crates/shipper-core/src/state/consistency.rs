@@ -264,6 +264,77 @@ pub(crate) fn has_not_published_retryable_posture(
     saw_retryable
 }
 
+/// Recognize a possible controlled stop independently of derived state/report
+/// identities. This only selects the full consistency validator; it never
+/// authorizes a retry or manufactures reconciliation evidence.
+///
+/// The pair must belong to the same package's latest unresolved attempt.
+/// Informational run/package starts preserve it; actual attempts and outcomes
+/// supersede it, and a finished execution retires history. Other unresolved
+/// failure or upload postures retain their existing recovery owner, matching
+/// parallel aggregation where ordinary blockers and StillUnknown outrank this
+/// stop.
+pub(crate) fn has_current_not_published_retryable_failure(events_path: &Path) -> Result<bool> {
+    #[derive(Clone, Copy)]
+    enum Posture {
+        ReconciledAbsent,
+        RetryableAbsent,
+        OtherRecovery,
+    }
+
+    let log = EventLog::read_from_file(events_path)?;
+    let mut packages = BTreeMap::new();
+    for event in log.all_events() {
+        let key = event.package.as_str();
+        match &event.event_type {
+            EventType::ExecutionFinished { .. } => packages.clear(),
+            EventType::PublishReconciled {
+                outcome: ReconciliationOutcome::NotPublished { .. },
+            } => {
+                packages.insert(key, Posture::ReconciledAbsent);
+            }
+            EventType::PackageFailed {
+                class: ErrorClass::Retryable,
+                ..
+            } => {
+                let posture = match packages.get(key) {
+                    Some(Posture::ReconciledAbsent | Posture::RetryableAbsent) => {
+                        Posture::RetryableAbsent
+                    }
+                    _ => Posture::OtherRecovery,
+                };
+                packages.insert(key, posture);
+            }
+            EventType::PackageAttempted { .. }
+            | EventType::PackageUploaded
+            | EventType::PackageFailed { .. }
+            | EventType::PublishReconciling { .. }
+            | EventType::PublishReconciled {
+                outcome: ReconciliationOutcome::StillUnknown { .. },
+            } => {
+                packages.insert(key, Posture::OtherRecovery);
+            }
+            EventType::PackagePublished { .. }
+            | EventType::PackageSkipped { .. }
+            | EventType::PublishReconciled {
+                outcome: ReconciliationOutcome::Published { .. },
+            } => {
+                packages.remove(key);
+            }
+            _ => {}
+        }
+    }
+    Ok(packages
+        .values()
+        .any(|posture| matches!(posture, Posture::RetryableAbsent))
+        && !packages
+            .values()
+            .any(|posture| matches!(posture, Posture::OtherRecovery)))
+}
+
+#[cfg(test)]
+mod controlled_candidate_tests;
+
 /// Render a human-readable summary of a drift report. Used by the Reporter
 /// to surface the finding loudly at end of run.
 pub fn format_drift_summary(drift: &StateEventDrift) -> String {

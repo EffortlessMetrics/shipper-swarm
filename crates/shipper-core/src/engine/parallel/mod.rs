@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::plan::PlannedWorkspace;
 use crate::registry::RegistryClient;
@@ -256,9 +256,16 @@ pub(crate) fn drain_retry_waits_to_host(
 
 /// Run publish in parallel mode using `shipper`'s wrapped `RegistryClient`.
 ///
-/// This is the entry point called by `engine::run_publish`. It adapts the
-/// host crate's types (`crate::registry::RegistryClient`, `crate::engine::Reporter`)
-/// into the inner ones expected by the parallel engine.
+/// This lower-level entry point owns its invocation lock and validates retained
+/// evidence before notifications or workers. It reloads durable state under
+/// that ownership; supplied memory can initialize only a fresh, unattempted run.
+/// A caller already holding this invocation key is deliberately refused, even
+/// in the same process. Use `engine::run_publish` / `engine::run_resume` for the
+/// full execution lifecycle and receipt, or call this function without a
+/// separately held lock. The full orchestrator uses the private adapter below.
+/// Each admitted call records a new execution segment and completes coherent
+/// controlled-stop evidence on a recoverable failure. Success returns package
+/// receipts without writing a full receipt or an `ExecutionFinished` marker.
 ///
 /// Preserves the preconfigured registry client (including cache directory and
 /// transport configuration) while adapting host reporters for parallel
@@ -271,12 +278,60 @@ pub fn run_publish_parallel(
     reg: &RegistryClient,
     reporter: &mut dyn crate::engine::Reporter,
 ) -> Result<Vec<PackageReceipt>> {
+    // Direct calls always schedule complete dependency levels, independently
+    // of the flag used by the full orchestrator to select its scheduler.
+    let mut admission_opts = opts.clone();
+    admission_opts.parallel.enabled = true;
+    let require_existing =
+        crate::engine::publish::admission::precheck(ws, &admission_opts, state_dir, false)?;
+    if !require_existing {
+        crate::engine::publish::admission::validate_fresh_parallel_state(ws, st)
+            .context(crate::engine::PublishAdmissionError)?;
+    }
+    let (reservation, retained) = crate::engine::publish::admission::reserve_and_admit(
+        ws,
+        &admission_opts,
+        state_dir,
+        require_existing,
+    )?;
+    let fresh = retained.is_none();
+    let admitted = retained.unwrap_or_else(|| st.clone());
+    let _lock = reservation
+        .claim(Some(&ws.plan.plan_id))
+        .context(crate::engine::PublishAdmissionError)?;
+    if fresh {
+        crate::state::execution_state::save_state(state_dir, &admitted)?;
+    }
+    *st = admitted;
+    // This lower-level API owns start/controlled-stop evidence, but leaves
+    // successful receipt finalization to the full publish/resume orchestrator.
+    let events_path = events::events_path(state_dir);
+    let mut event_log = events::EventLog::new();
+    crate::engine::publish::bootstrap::record_execution_start(
+        ws,
+        opts,
+        &events_path,
+        &mut event_log,
+        chrono::Utc::now(),
+        &crate::ops::auth::collect_auth_evidence(&ws.plan.registry.name),
+        &reg.policy_evidence(),
+    )?;
     crate::engine::publish::notify_publish_started(ws, opts);
-    run_publish_parallel_without_start(ws, opts, st, state_dir, reg, reporter)
+    match run_publish_parallel_without_start(ws, opts, st, state_dir, reg, reporter) {
+        Ok(receipts) => Ok(receipts),
+        Err(error) => Err(crate::engine::publish::finalize::record_recoverable_stop(
+            error,
+            state_dir,
+            &events_path,
+            &mut event_log,
+            st,
+            reporter,
+        )?),
+    }
 }
 
-/// Host-reporter entry point for orchestration that has already emitted the
-/// run-level start notification.
+/// Private adapter for orchestration that already owns the invocation lock,
+/// admitted freshly loaded evidence, and emitted the run-start notification.
 pub(crate) fn run_publish_parallel_without_start(
     ws: &crate::plan::PlannedWorkspace,
     opts: &RuntimeOptions,

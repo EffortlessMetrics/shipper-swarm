@@ -58,41 +58,70 @@ fn observe_run_with(
     probe: &mut dyn ProcessProbe,
 ) -> Result<RunObservation> {
     let events = EventLog::read_from_file(&events_path(state_dir))?;
-    match event_phase(&events) {
-        EventPhase::NoEvidence => Ok(RunObservation::NoEvidence),
-        EventPhase::Finished { plan_id, result } => {
-            Ok(RunObservation::Finished { plan_id, result })
+    let phase = event_phase(&events);
+    let contents = match &phase {
+        EventPhase::Stopped { .. } | EventPhase::Unfinished { .. } => {
+            read_lock_contents(&lock_path(state_dir, workspace_root))?
         }
+        _ => LockContents::Missing,
+    };
+    Ok(observe_phase(phase, &contents, hostname, probe))
+}
+
+/// Observe fresh events against the predecessor captured while invocation
+/// ownership was reserved, before this caller installs its own lock metadata.
+pub(crate) fn observe_run_with_prior_lock(
+    state_dir: &Path,
+    prior: &LockContents,
+) -> Result<RunObservation> {
+    let events = EventLog::read_from_file(&events_path(state_dir))?;
+    Ok(observe_phase(
+        event_phase(&events),
+        prior,
+        &gethostname::gethostname().to_string_lossy(),
+        &mut SystemProcessProbe,
+    ))
+}
+
+fn observe_phase(
+    phase: EventPhase,
+    contents: &LockContents,
+    hostname: &str,
+    probe: &mut dyn ProcessProbe,
+) -> RunObservation {
+    match phase {
+        EventPhase::NoEvidence => RunObservation::NoEvidence,
+        EventPhase::Finished { plan_id, result } => RunObservation::Finished { plan_id, result },
         EventPhase::Stopped {
             plan_id,
             reason,
             package,
         } => {
-            let liveness = match read_lock_contents(&lock_path(state_dir, workspace_root))? {
+            let liveness = match contents {
                 LockContents::Missing => None,
                 LockContents::Corrupt => {
                     Some(RunLiveness::Unknown(UnknownLivenessReason::CorruptLock))
                 }
                 LockContents::Present(record) => {
-                    Some(observe_lock(&record, plan_id.as_deref(), hostname, probe))
+                    Some(observe_lock(record, plan_id.as_deref(), hostname, probe))
                 }
             };
-            Ok(RunObservation::Stopped {
+            RunObservation::Stopped {
                 plan_id,
                 reason,
                 package,
                 liveness,
-            })
+            }
         }
         EventPhase::Unfinished { plan_id } => {
-            let liveness = match read_lock_contents(&lock_path(state_dir, workspace_root))? {
+            let liveness = match contents {
                 LockContents::Missing => RunLiveness::Unknown(UnknownLivenessReason::MissingLock),
                 LockContents::Corrupt => RunLiveness::Unknown(UnknownLivenessReason::CorruptLock),
                 LockContents::Present(record) => {
-                    observe_lock(&record, plan_id.as_deref(), hostname, probe)
+                    observe_lock(record, plan_id.as_deref(), hostname, probe)
                 }
             };
-            Ok(RunObservation::Unfinished { plan_id, liveness })
+            RunObservation::Unfinished { plan_id, liveness }
         }
     }
 }
@@ -482,6 +511,31 @@ mod tests {
                 liveness: Some(RunLiveness::Unknown(UnknownLivenessReason::CorruptLock)),
                 ..
             }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn reserved_predecessor_observation_does_not_read_the_new_holder() -> Result<()> {
+        let td = tempdir()?;
+        let mut kinds = started("p");
+        kinds.push(EventType::ExecutionStopped {
+            reason: shipper_types::ControlledStopReason::NotPublishedRetryBudgetExhausted,
+        });
+        write_events(td.path(), kinds)?;
+        let current = crate::lock::LockFile::acquire(td.path(), None)?;
+        current.set_plan_id("p")?;
+        ensure!(matches!(
+            observe_run(td.path(), None)?,
+            RunObservation::Stopped {
+                liveness: Some(_),
+                ..
+            }
+        ));
+        ensure!(matches!(
+            observe_run_with_prior_lock(td.path(), &LockContents::Missing)?,
+            RunObservation::Stopped { liveness: None, .. }
         ));
         Ok(())
     }

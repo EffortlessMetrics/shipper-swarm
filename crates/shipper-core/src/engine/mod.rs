@@ -464,7 +464,18 @@ pub fn run_publish_with_state(
     opts: &RuntimeOptions,
     reporter: &mut dyn Reporter,
 ) -> Result<PublishRunOutcome> {
-    publish::bootstrap::validate_resume_target(ws, opts)?;
+    run_publish_with_state_requirement(ws, opts, reporter, false)
+}
+
+fn run_publish_with_state_requirement(
+    ws: &PlannedWorkspace,
+    opts: &RuntimeOptions,
+    reporter: &mut dyn Reporter,
+    require_existing_state: bool,
+) -> Result<PublishRunOutcome> {
+    let state_dir = resolve_state_dir(&ws.workspace_root, &opts.state_dir);
+    let require_existing_state =
+        publish::admission::precheck(ws, opts, &state_dir, require_existing_state)?;
     let publish::bootstrap::PublishBootstrap {
         state_dir,
         _lock,
@@ -476,7 +487,7 @@ pub fn run_publish_with_state(
         mut event_log,
         state: mut st,
         run_started,
-    } = publish::bootstrap::prepare_publish_run(ws, opts, reporter)?;
+    } = publish::bootstrap::prepare_publish_run(ws, opts, reporter, require_existing_state)?;
 
     publish::notify_publish_started(ws, opts);
 
@@ -487,32 +498,14 @@ pub fn run_publish_with_state(
         ) {
             Ok(receipts) => receipts,
             Err(error) => {
-                if let Some(stop) = error.downcast_ref::<PublishRecoverableStopError>() {
-                    let package = stop.package.clone();
-                    event_log.record(PublishEvent {
-                        timestamp: Utc::now(),
-                        event_type: EventType::ExecutionStopped {
-                            reason: shipper_types::ControlledStopReason::NotPublishedRetryBudgetExhausted,
-                        },
-                        package: package.clone(),
-                    });
-                    event_log.write_to_file(&events_path)?;
-                    publish::finalize::record_consistency_drift(
-                        &events_path,
-                        &st,
-                        &mut event_log,
-                        reporter,
-                    );
-                    let evidence_consistent =
-                        controlled_stop_evidence_consistent(&state_dir, &events_path, &st);
-                    return Err(PublishRecoverableStopError {
-                        message: format!("{error:#}"),
-                        package,
-                        evidence_consistent,
-                    }
-                    .into());
-                }
-                return Err(error);
+                return Err(publish::finalize::record_recoverable_stop(
+                    error,
+                    &state_dir,
+                    &events_path,
+                    &mut event_log,
+                    &st,
+                    reporter,
+                )?);
             }
         };
 
@@ -545,33 +538,14 @@ pub fn run_publish_with_state(
     ) {
         Ok(receipts) => receipts,
         Err(error) => {
-            if let Some(stop) = error.downcast_ref::<PublishRecoverableStopError>() {
-                let package = stop.package.clone();
-                event_log.record(PublishEvent {
-                    timestamp: Utc::now(),
-                    event_type: EventType::ExecutionStopped {
-                        reason:
-                            shipper_types::ControlledStopReason::NotPublishedRetryBudgetExhausted,
-                    },
-                    package: package.clone(),
-                });
-                event_log.write_to_file(&events_path)?;
-                publish::finalize::record_consistency_drift(
-                    &events_path,
-                    &st,
-                    &mut event_log,
-                    reporter,
-                );
-                let evidence_consistent =
-                    controlled_stop_evidence_consistent(&state_dir, &events_path, &st);
-                return Err(PublishRecoverableStopError {
-                    message: format!("{error:#}"),
-                    package,
-                    evidence_consistent,
-                }
-                .into());
-            }
-            return Err(error);
+            return Err(publish::finalize::record_recoverable_stop(
+                error,
+                &state_dir,
+                &events_path,
+                &mut event_log,
+                &st,
+                reporter,
+            )?);
         }
     };
     publish::finalize::record_consistency_drift(&events_path, &st, &mut event_log, reporter);
@@ -640,81 +614,7 @@ pub fn run_resume_with_state(
     opts: &RuntimeOptions,
     reporter: &mut dyn Reporter,
 ) -> Result<PublishRunOutcome> {
-    let workspace_root = &ws.workspace_root;
-    let state_dir = resolve_state_dir(workspace_root, &opts.state_dir);
-    let Some(existing_state) = state::load_state(&state_dir)? else {
-        bail!(
-            "no existing state found in {}; run shipper publish first",
-            state_dir.display()
-        );
-    };
-    publish::bootstrap::validate_existing_plan_id(&existing_state, ws, opts)?;
-    let observation = crate::state::run_observation::observe_run(&state_dir, Some(workspace_root))?;
-    let reconciliation_path = state::reconciliation_path(&state_dir);
-    let reconciliation = if reconciliation_path.exists() {
-        Some(
-            std::fs::read_to_string(&reconciliation_path)
-                .with_context(|| {
-                    format!(
-                        "failed to read reconciliation evidence {}",
-                        reconciliation_path.display()
-                    )
-                })
-                .and_then(|raw| {
-                    serde_json::from_str::<shipper_types::ReconciliationReport>(&raw).with_context(
-                        || {
-                            format!(
-                                "failed to parse reconciliation evidence {}",
-                                reconciliation_path.display()
-                            )
-                        },
-                    )
-                })?,
-        )
-    } else {
-        None
-    };
-    let derived_recoverable = crate::state::consistency::has_not_published_retryable_posture(
-        &existing_state,
-        reconciliation.as_ref(),
-    );
-    let marker_present = matches!(
-        &observation,
-        crate::cli_bridge::RunObservation::Stopped { .. }
-    );
-    if derived_recoverable || marker_present {
-        match observation {
-            crate::cli_bridge::RunObservation::Stopped {
-                liveness: None | Some(crate::cli_bridge::RunLiveness::NotLive),
-                ..
-            } => {}
-            crate::cli_bridge::RunObservation::Stopped {
-                liveness: Some(crate::cli_bridge::RunLiveness::Live),
-                ..
-            } => bail!("controlled-stop publisher is still live; resume is blocked"),
-            crate::cli_bridge::RunObservation::Stopped {
-                liveness: Some(crate::cli_bridge::RunLiveness::Unknown(reason)),
-                ..
-            } => bail!(
-                "controlled-stop lock liveness is inconclusive ({reason:?}); resume is blocked"
-            ),
-            _ => bail!(
-                "retryable NotPublished posture lacks the current controlled-stop marker; resume is blocked"
-            ),
-        }
-        if state::receipt_path(&state_dir).exists() {
-            bail!("controlled-stop evidence unexpectedly includes a receipt");
-        }
-        crate::state::consistency::verify_controlled_stop_consistency(
-            &events::events_path(&state_dir),
-            &existing_state,
-            reconciliation.as_ref(),
-        )
-        .context("controlled-stop evidence does not authorize resume")?;
-        publish::bootstrap::validate_resume_target(ws, opts)?;
-        reject_exhausted_resume_retry_ceiling(ws, opts, &existing_state)?;
-    }
-    run_publish_with_state(ws, opts, reporter)
+    run_publish_with_state_requirement(ws, opts, reporter, true)
 }
 
 fn reject_exhausted_resume_retry_ceiling(
@@ -1179,6 +1079,7 @@ pub(crate) fn init_state(ws: &PlannedWorkspace, state_dir: &Path) -> Result<Exec
 #[cfg(test)]
 mod tests {
     mod lock_ownership;
+    mod retained_admission;
     mod retained_retryable;
     mod timeout_reconciliation;
 

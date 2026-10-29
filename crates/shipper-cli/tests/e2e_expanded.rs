@@ -3329,6 +3329,7 @@ fn resume_no_state_file_exit_code() {
 
 /// Snapshot: resume with a corrupted (non-JSON) state file.
 #[test]
+#[serial_test::serial]
 fn resume_corrupted_state_file_snapshot() {
     let td = tempdir().expect("tempdir");
     create_workspace(td.path());
@@ -3355,6 +3356,7 @@ fn resume_corrupted_state_file_snapshot() {
 
 /// Snapshot: resume with an empty state file.
 #[test]
+#[serial_test::serial]
 fn resume_empty_state_file_snapshot() {
     let td = tempdir().expect("tempdir");
     create_workspace(td.path());
@@ -3982,17 +3984,25 @@ fn publish_package_filter_no_registry_runs() {
 
 /// Snapshot: resume with a valid JSON state file that has a mismatched plan_id.
 #[test]
+#[serial_test::serial]
 fn resume_wrong_plan_id_snapshot() {
     let td = tempdir().expect("tempdir");
     create_workspace(td.path());
     let state_dir = td.path().join(".shipper");
     fs::create_dir_all(&state_dir).expect("mkdir");
-    // Write a valid JSON state file with a bogus plan_id
-    fs::write(
-        state_dir.join("state.json"),
-        r#"{"plan_id":"bogus-plan-id-12345","packages":[],"started_at":"2025-01-01T00:00:00Z"}"#,
-    )
-    .expect("write");
+    // This fixture must reach plan admission, not fail decoding beforehand.
+    let retained = serde_json::json!({
+        "state_version": "shipper.state.v1",
+        "plan_id": "bogus-plan-id-12345",
+        "registry": {"name": "crates-io", "api_base": "https://crates.io", "index_base": null},
+        "created_at": "2025-01-01T00:00:00Z",
+        "updated_at": "2025-01-01T00:00:00Z",
+        "packages": {}
+    });
+    serde_json::from_value::<shipper_core::types::ExecutionState>(retained.clone())
+        .expect("fixture must be a valid execution state");
+    let before = serde_json::to_vec_pretty(&retained).expect("encode state");
+    fs::write(state_dir.join("state.json"), &before).expect("write");
 
     let output = loopback_shipper_cmd()
         .arg("--manifest-path")
@@ -4004,7 +4014,24 @@ fn resume_wrong_plan_id_snapshot() {
         .expect("failed to run");
 
     assert!(!output.status.success());
+    assert_eq!(
+        fs::read(state_dir.join("state.json")).expect("retained state"),
+        before
+    );
+    assert!(!state_dir.join("events.jsonl").exists());
     let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr
+            .contains("existing state plan_id bogus-plan-id-12345 does not match current plan_id "),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("failed to parse state JSON"), "{stderr}");
+    let current_plan_id = stderr
+        .split("current plan_id ")
+        .nth(1)
+        .and_then(|rest| rest.split(';').next())
+        .expect("current plan identifier");
+    let stderr = stderr.replace(current_plan_id, "<PLAN_ID>");
     assert_snapshot!(
         "resume_wrong_plan_id",
         normalize_output(&normalize_stderr(&normalize_tempdir_paths(
@@ -4016,6 +4043,7 @@ fn resume_wrong_plan_id_snapshot() {
 
 /// Snapshot: resume with a state file containing only `{}` (minimal valid JSON).
 #[test]
+#[serial_test::serial]
 fn resume_minimal_json_state_snapshot() {
     let td = tempdir().expect("tempdir");
     create_workspace(td.path());
