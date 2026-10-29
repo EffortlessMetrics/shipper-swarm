@@ -219,6 +219,20 @@ Controls parallel publishing behavior. When enabled, packages at the same depend
 - **max_concurrent**: Maximum number of concurrent publish operations (default: `4`)
 - **per_package_timeout**: Timeout for each individual package publish (default: `30m`)
 
+The per-package Cargo timeout applies in both sequential and parallel mode;
+the setting remains in `[parallel]` for configuration compatibility. Shipper
+drains stdout and stderr while Cargo runs, so verbose output does not block
+the child on a full pipe. The configured line tails are sanitized before
+being retained in events and receipts.
+
+This is an execution deadline for the direct child, not a bound on total
+capture or cleanup time. Output is still collected in full before tailing,
+and inherited pipe handles in descendants can delay EOF after the child exits
+or is killed. Bounded capture, descendant cleanup, and typed publish-timeout
+reconciliation remain open acceptance in
+[#412](https://github.com/EffortlessMetrics/shipper-swarm/issues/412). A killed
+Cargo process does not establish that the registry rejected its upload.
+
 ### Registry
 
 ```toml

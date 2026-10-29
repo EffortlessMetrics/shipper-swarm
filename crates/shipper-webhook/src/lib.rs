@@ -62,12 +62,15 @@ pub struct WebhookPayload {
     pub extra: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
-/// Send a webhook notification
+/// Send a webhook notification.
+///
+/// Transport errors expose only a failure category or HTTP status. Endpoint
+/// URLs, response bodies and the underlying HTTP error chain are never retained.
 pub fn send_webhook(config: &WebhookConfig, payload: &WebhookPayload) -> Result<()> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(config.timeout_secs))
         .build()
-        .context("failed to create HTTP client")?;
+        .map_err(safe_transport_error)?;
 
     let body = match config.webhook_type {
         WebhookType::Generic => serde_json::to_string(payload)?,
@@ -91,25 +94,17 @@ pub fn send_webhook(config: &WebhookConfig, payload: &WebhookPayload) -> Result<
         request = request.header("X-Hub-Signature-256", signature);
     }
 
-    let response = request.send().context("failed to send webhook request")?;
-
-    if !response.status().is_success() {
-        return Err(anyhow::anyhow!(
-            "webhook request failed with status {}: {}",
-            response.status(),
-            response.text().unwrap_or_default()
-        ));
-    }
-
-    Ok(())
+    let response = request.send().map_err(safe_transport_error)?;
+    check_delivery_status(response.status())
 }
 
-/// Send a webhook notification asynchronously
+/// Send a webhook notification asynchronously, with the same diagnostic
+/// non-disclosure boundary as [`send_webhook`].
 pub async fn send_webhook_async(config: &WebhookConfig, payload: &WebhookPayload) -> Result<()> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(config.timeout_secs))
         .build()
-        .context("failed to create HTTP client")?;
+        .map_err(safe_transport_error)?;
 
     let body = match config.webhook_type {
         WebhookType::Generic => serde_json::to_string(payload)?,
@@ -133,19 +128,41 @@ pub async fn send_webhook_async(config: &WebhookConfig, payload: &WebhookPayload
         request = request.header("X-Hub-Signature-256", signature);
     }
 
-    let response = request
-        .send()
-        .await
-        .context("failed to send webhook request")?;
+    let response = request.send().await.map_err(safe_transport_error)?;
+    check_delivery_status(response.status())
+}
 
-    if !response.status().is_success() {
-        return Err(anyhow::anyhow!(
-            "webhook request failed with status {}: {}",
-            response.status(),
-            response.text().await.unwrap_or_default()
-        ));
+// Never wrap or format the original error: removing only its top-level URL
+// would still leave arbitrary nested transport diagnostics accessible through
+// anyhow's Debug, alternate Display or chain(). Keep only safe classifications.
+fn safe_transport_error(error: reqwest::Error) -> anyhow::Error {
+    let category = if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connection or TLS failure"
+    } else if error.is_redirect() {
+        "redirect failure"
+    } else if error.is_builder() {
+        "invalid request or HTTP client configuration"
+    } else if error.is_body() || error.is_decode() {
+        "response handling failure"
+    } else if error.is_request() {
+        "request failure"
+    } else {
+        "transport failure"
+    };
+    anyhow::anyhow!("webhook delivery failed: {category}")
+}
+
+fn check_delivery_status(status: reqwest::StatusCode) -> Result<()> {
+    if !status.is_success() {
+        // Do not read the response body. Endpoints may echo payloads, signing
+        // material or confidential diagnostic text even for ordinary 4xx/5xx.
+        anyhow::bail!(
+            "webhook request failed with HTTP status {}",
+            status.as_u16()
+        );
     }
-
     Ok(())
 }
 
@@ -2324,7 +2341,7 @@ mod tests {
     }
 
     #[test]
-    fn send_webhook_5xx_error_message_includes_body() {
+    fn send_webhook_5xx_error_message_excludes_body() {
         let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
         let addr = server.server_addr().to_ip().unwrap();
 
@@ -2351,11 +2368,11 @@ mod tests {
         handle.join().unwrap();
         let err = result.unwrap_err().to_string();
         assert!(err.contains("500"));
-        assert!(err.contains("internal server error detail xyz"));
+        assert!(!err.contains("internal server error detail xyz"));
     }
 
     #[test]
-    fn send_webhook_4xx_error_message_includes_body() {
+    fn send_webhook_4xx_error_message_excludes_body() {
         let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
         let addr = server.server_addr().to_ip().unwrap();
 
@@ -2382,7 +2399,7 @@ mod tests {
         handle.join().unwrap();
         let err = result.unwrap_err().to_string();
         assert!(err.contains("422"));
-        assert!(err.contains("invalid webhook payload format"));
+        assert!(!err.contains("invalid webhook payload format"));
     }
 
     #[tokio::test]
