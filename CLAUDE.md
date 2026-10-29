@@ -95,7 +95,7 @@ Written to `.shipper/` (configurable via `--state-dir`):
 - `state.json` — resumable execution state (schema-versioned). **Projection** of events.
 - `receipt.json` — audit receipt with evidence (stdout/stderr, exit codes, git context, environment fingerprint). **Summary** derived at end-of-run.
 - `events.jsonl` — append-only event log. **Authoritative truth.**
-- `lock` — distributed lock preventing concurrent publishes
+- `lock` (or `lock_<workspace-hash>`) — advisory holder metadata; the persistent `.guard` sidecar provides local OS ownership for cooperating invocations
 
 ### Events-as-truth invariant
 

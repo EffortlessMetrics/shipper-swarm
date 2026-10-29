@@ -121,10 +121,10 @@ Options:
           Force resume even if the computed plan differs from the state file
 
       --force
-          Force override of existing locks (use with caution)
+          Override unknown lock metadata; never an active OS guard
 
       --lock-timeout <LOCK_TIMEOUT>
-          Lock timeout duration (e.g. 1h, 30m; default: 1h). Locks older than this are considered stale
+          Minimum age for confirmed abandoned legacy locks (e.g. 1h, 30m; default: 1h)
 
       --policy <POLICY>
           Publish policy: safe (verify+strict), balanced (verify when needed), fast (no verify; default: safe)

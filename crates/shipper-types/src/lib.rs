@@ -613,9 +613,9 @@ pub struct RuntimeOptions {
     pub readiness: ReadinessConfig,
     /// Number of stdout/stderr lines to capture as evidence.
     pub output_lines: usize,
-    /// Force override of existing locks
+    /// Explicitly override unknown lock metadata after acquiring OS ownership.
     pub force: bool,
-    /// Lock timeout duration (after which locks are considered stale)
+    /// Minimum age for positively abandoned legacy lock recovery.
     pub lock_timeout: Duration,
     /// Parallel publishing configuration
     pub parallel: ParallelConfig,
