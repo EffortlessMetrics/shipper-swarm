@@ -368,7 +368,12 @@ gh workflow run release.yml \
 - [ ] The reversible release proof gate passes on the same source SHA/tree.
 - [ ] Rehearsal passes on `RELEASE_SHA` and its artifacts are retained.
 - [ ] Four-target binary matrix passes on `RELEASE_SHA` using matching operating-system runners.
-- [ ] `verify-binaries` validates every uploaded archive's source SHA/tree, target, retention metadata, and checksum.
+- [ ] Binary builds use `--locked` and the approved tracked source and `Cargo.lock` remain unchanged.
+- [ ] Every actual archive is extracted and its executable passes exact-version, primary-help, and offline tiny-workspace plan checks on its matching native host.
+- [ ] The offline plan reports the expected package/version/dependencies, registry metadata, and no publication.
+- [ ] Each retained `<archive>.smoke.json` binds target/host, actual toolchain, source SHA/tree, approved version, lockfile digest, archive/executable digests, and all three successful checks.
+- [ ] `verify-binaries` independently validates every uploaded archive's source SHA/tree, target, retention metadata, checksum, executable payload, and matching successful native receipt; missing or skipped proof fails the gate.
+- [ ] Synthetic regression fixtures are not counted as native Shipper qualification; all four actual release-candidate archives have current native evidence.
 - [ ] Binary checksums and artifacts are retained and unexpired through publication.
 - [ ] Interruption/upload and download/resume evidence is current for the approved SHA or an explicitly unchanged execution tree.
 - [ ] Auth evidence identifies Trusted Publishing, fallback configuration/use, and selected source without exposing token material.
