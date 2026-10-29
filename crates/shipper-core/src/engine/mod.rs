@@ -1081,6 +1081,7 @@ mod tests {
     mod lock_ownership;
     mod retained_admission;
     mod retained_retryable;
+    mod timeout_reconciliation;
 
     use std::fs;
     use std::path::{Path, PathBuf};

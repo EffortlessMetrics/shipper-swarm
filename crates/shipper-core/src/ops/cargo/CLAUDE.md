@@ -26,7 +26,7 @@ Re-exported at `shipper::cargo` (preserved backward compatibility with the old
 - **Timeout is a polling loop.** `cargo_publish` with `Some(timeout)` polls `try_wait` every 100ms and SIGKILLs on deadline; on timeout the returned `CargoOutput` has `timed_out: true`, `exit_code: -1`, and a stderr tail annotated with `cargo publish timed out after ...`.
 - **Output is always tailed + redacted.** Every `CargoOutput.stdout_tail` / `stderr_tail` is passed through `shipper_output_sanitizer::tail_lines`, which internally applies `redact_sensitive`. Callers can assume bearer tokens / `CARGO_REGISTRY_TOKEN=` values / `CARGO_REGISTRIES_<NAME>_TOKEN=` values are `[REDACTED]` before they ever reach `receipt.json` or the event log.
 - **Redaction is idempotent** (see `redact_is_idempotent_*` tests).
-- **Non-default registries only.** `--registry` is passed through only when the registry name is non-empty and not literally `crates-io`; the crates.io default is implicit.
+- **Registry identity.** Publish wrappers pass `--registry` only for non-empty non-`crates-io` names. Containment via `cargo_yank` always passes the exact non-empty registry name, including `crates-io`, so Cargo's `registry.default` cannot retarget the action; empty names are refused before spawning.
 - **`WorkspaceMetadata::is_publishable`** treats version `0.0.0` as non-publishable and `publish = []` as non-publishable, matching Cargo's own semantics.
 - **`topological_order`** is a DFS-based visitor (distinct from the Kahn/BTreeSet sort in `crate::plan`). It's still useful for diagnostics; production planning goes through `crate::plan::build_release_plan`.
 

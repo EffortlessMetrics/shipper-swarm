@@ -1329,7 +1329,18 @@ pub(crate) fn publish_package_with_timeout(
                 }
             } else {
                 let failure_output = format!("{}\n{}", out.stderr_tail, out.stdout_tail);
-                let (class, msg) = classify_cargo_failure(&out.stderr_tail, &out.stdout_tail);
+                // Killing Cargo cannot establish whether the upload reached the
+                // registry. The typed timeout owns this decision even when the
+                // retained output is empty or matches a different error class.
+                let (class, msg) = if out.timed_out {
+                    (
+                        ErrorClass::Ambiguous,
+                        "cargo publish process timed out; registry reconciliation required"
+                            .to_string(),
+                    )
+                } else {
+                    classify_cargo_failure(&out.stderr_tail, &out.stdout_tail)
+                };
                 let completion_timestamp = Utc::now();
                 last_err = Some((class.clone(), msg.clone()));
                 let mut attempt_detail = AttemptDetail {

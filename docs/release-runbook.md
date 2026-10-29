@@ -340,8 +340,12 @@ release-identity-gate ──> build-binaries ──> verify-binaries ──┐
 
 The reversible proof gate runs the full Rust, package, and policy ladder on the
 approved source. The binary verification gate downloads each retained artifact
-and checks its source SHA/tree, target, retention metadata, and checksum before
-publication. Publication cannot begin if the proof, MSRV/policy checks, any
+and checks its source SHA/tree, target, retention metadata, checksum, and native
+executable smoke receipt before publication. Each matrix job builds with
+`--locked`, extracts its actual archive, verifies the approved embedded version
+and primary help, and executes an offline plan for a tiny dependency-free Cargo
+workspace. The plan must report the expected package and registry metadata and
+confirm that no publication occurred. Publication cannot begin if the proof, MSRV/policy checks, any
 binary matrix child, or binary verification is failed, skipped, unavailable,
 expired, or tied to a different SHA/tree.
 
@@ -407,9 +411,20 @@ Require four matching-platform artifacts:
 - Windows x86_64.
 
 Record the workflow runs, artifact names, checksums, source SHA/tree, and expiry
-window. The workflow's `verify-binaries` job independently validates all four
-uploaded artifacts before publication; publication remains blocked until every
-exact-source build and verification succeeds.
+window. Each archive has a `<archive>.smoke.json` receipt binding its exact digest
+and extracted executable digest to the approved source/version, unchanged
+`Cargo.lock`, native target/host, actual Rust/Cargo toolchain, and successful
+version, help, and offline-plan checks. The workflow's `verify-binaries` job
+reopens all four archives and requires matching successful receipts; missing,
+skipped, wrong-version, wrong-architecture, invalid-payload, or mismatched-digest
+evidence fails the gate. Its aggregate receipt is retained for 90 days, and the
+per-archive receipts accompany the eventual GitHub Release assets.
+
+The nonpublishing regression harness uses explicit synthetic protocol fixtures
+to exercise refusals. Those fixtures do not qualify Shipper on any native target:
+all four actual archived Shipper binaries must pass on their matching operating
+systems for the exact approved release candidate. Publication remains blocked
+until every exact-source build and verification succeeds.
 Rehearsal and binary-only modes cannot publish crates or create a GitHub
 Release. Do not tag if artifacts will expire before publication or if a target
 used the wrong operating-system runner.

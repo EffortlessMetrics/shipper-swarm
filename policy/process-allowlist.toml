@@ -67,8 +67,9 @@ allowed_processes = [
   "tar",
   "sha256sum",
   "mkdir",
+  "python",
 ]
 owner = "release/ci"
-reason = "Release workflow validates approved tag/source/tree identity with git and gh, dogfoods shipper itself, installs the supported facade path with `cargo install --path crates/shipper --locked`, verifies exact public versions through the crates.io API or sparse index with curl and jq, packages and independently verifies release binaries with tar, sha256sum or shasum, and jq, creates the GitHub release with gh, attempts Trusted Publishing via OIDC, records auth evidence, and uses the configured fallback secret only when that posture is approved."
+reason = "Release workflow validates approved tag/source/tree identity with git and gh, dogfoods shipper itself, installs the supported facade path with `cargo install --path crates/shipper --locked`, verifies exact public versions through the crates.io API or sparse index with curl and jq, packages and independently verifies release binaries with tar, sha256sum or shasum, and jq, uses Python to extract and execute each native archive and validate its retained proof, creates the GitHub release with gh, attempts Trusted Publishing via OIDC, records auth evidence, and uses the configured fallback secret only when that posture is approved."
 created = "2026-05-11"
 review_after = "2026-11-12"
