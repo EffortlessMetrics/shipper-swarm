@@ -1515,15 +1515,16 @@ impl GitContext {
         self.dirty.unwrap_or(true)
     }
 
-    /// Get a short commit hash (first 7 bytes).
+    /// Get the first seven bytes of the commit when they form a valid UTF-8 prefix.
     ///
-    /// Returns `None` if the context has no commit. The original `shipper-git`
-    /// implementation sliced by byte index assuming ASCII hex; we preserve the
-    /// same behavior here (input shorter than 7 bytes is returned verbatim).
+    /// Returns the full input when it is shorter than seven bytes or byte seven
+    /// falls inside a UTF-8 character, and `None` when no commit is present.
+    /// ASCII values retain the usual seven-byte abbreviation. This method does
+    /// not validate whether the input is a Git hash.
     pub fn short_commit(&self) -> Option<&str> {
         self.commit
-            .as_ref()
-            .map(|c| if c.len() > 7 { &c[..7] } else { c.as_str() })
+            .as_deref()
+            .map(|commit| commit.get(..7).unwrap_or(commit))
     }
 }
 
@@ -6356,6 +6357,53 @@ mod tests {
     fn git_context_short_commit_returns_none_when_no_commit() {
         let ctx = GitContext::new();
         assert_eq!(ctx.short_commit(), None);
+    }
+
+    #[test]
+    fn git_context_short_commit_utf8_boundary_matrix() {
+        let cases = [
+            (Some("aaaaaaé"), Some("aaaaaaé")),
+            (None, None),
+            (Some(""), Some("")),
+            (Some("abcdef"), Some("abcdef")),
+            (Some("abcdefg"), Some("abcdefg")),
+            (Some("abcdefgh"), Some("abcdefg")),
+            (Some("0123456789abcdef"), Some("0123456")),
+            (Some("é"), Some("é")),
+            (Some("€"), Some("€")),
+            (Some("🦀"), Some("🦀")),
+            (Some("ééé"), Some("ééé")),
+            (Some("aaaaaé"), Some("aaaaaé")),
+            (Some("aaaaaé-tail"), Some("aaaaaé")),
+            (Some("aaaa€-tail"), Some("aaaa€")),
+            (Some("aaa🦀-tail"), Some("aaa🦀")),
+            (Some("aaaaaaé-tail"), Some("aaaaaaé-tail")),
+            (Some("aaaaa€"), Some("aaaaa€")),
+            (Some("aaaaaa€"), Some("aaaaaa€")),
+            (Some("aaaa🦀"), Some("aaaa🦀")),
+            (Some("aaaaa🦀"), Some("aaaaa🦀")),
+            (Some("aaaaaa🦀"), Some("aaaaaa🦀")),
+        ];
+
+        for (commit, expected) in cases {
+            let direct = GitContext {
+                commit: commit.map(str::to_owned),
+                ..GitContext::default()
+            };
+            assert_eq!(direct.short_commit(), expected, "direct input {commit:?}");
+
+            let decoded: GitContext =
+                serde_json::from_value(serde_json::json!({ "commit": commit }))
+                    .expect("deserialize public GitContext");
+            assert_eq!(
+                decoded.short_commit(),
+                expected,
+                "deserialized input {commit:?}"
+            );
+        }
+
+        let absent: GitContext = serde_json::from_str("{}").expect("absent commit field");
+        assert_eq!(absent.short_commit(), None);
     }
 
     // ===== group_packages_by_levels generic edge cases =====
