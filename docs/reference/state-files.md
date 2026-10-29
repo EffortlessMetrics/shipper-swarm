@@ -72,6 +72,12 @@ is therefore unsupported; there is no universal old-consumer fail-closed claim.
 
 ### `events.jsonl` (one JSON object per line)
 
+Line order is the authoritative append/replay order, including when timestamps
+decrease. Events retain the original wall-clock observation time; delayed
+workers and clock rollback can make timestamp order differ from the package's
+causal sequence. `shipper inspect-events` and `--follow` preserve append order
+within each log. See the [ordering contract](../INVARIANTS.md#event-order-and-wall-clock-time).
+
 ```json
 {
   "timestamp": "2026-04-17T...",
@@ -165,6 +171,15 @@ platform scope are described in [failure modes](../failure-modes.md#retained-pro
 
 **Field path caveat**: package state lives at `.packages[].state.state` (nested), **not** `.packages[].status`. Common misread.
 
+For a nonempty rebuild, top-level `created_at` and `updated_at` use the first
+and last appended event timestamps respectively, not the minimum and maximum.
+An empty rebuild with a fallback plan ID uses rebuild time for both. Package
+`last_updated_at` uses the last appended event that updates that projection.
+Ordinary live transitions sample projection update time separately; cleanup-hold
+persistence fallback can retain the observed attempt end instead. These
+wall-clock fields need not increase, and rebuilt `updated_at` can precede
+`created_at`.
+
 `plan_id` binds the registry API base and ordered package names/versions. It
 does not bind source bytes, workspace path, or a unique execution. Resume uses
 it as one guard, not as provenance for the checkout restored by an operator.
@@ -175,6 +190,13 @@ cross-host evidence remain `Unknown`; PID or lock age alone is not equivalent
 proof.
 
 `attempt_history` is the per-attempt projection replayed from `events.jsonl` and is used by diagnostics and recovery workflows after interruption.
+It is not guaranteed to be timestamp-sorted. `started_at` retains the original
+start observation. `ended_at` follows the live or replay completion path without
+clamping a backward clock: a retry decision preserves an earlier failure end,
+but replaying `StillUnknown` can replace it with the reconciliation event time.
+The live executor retains the earlier failure end on that path, so live and
+rebuilt values are not universally identical. An unfinished attempt without an
+end observation retains its start time in `ended_at`.
 
 Per-attempt recovery fields are under `.attempt_history[]`, keyed by:
 

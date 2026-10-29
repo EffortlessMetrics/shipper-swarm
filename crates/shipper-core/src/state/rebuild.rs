@@ -43,6 +43,15 @@ impl StateRebuildOptions {
 /// record the plan id but not the full registry definition. If the log contains
 /// no `plan_created` event, `fallback_plan_id` is used; otherwise this returns
 /// an error.
+///
+/// Replay follows JSONL append order, never timestamp order. For a nonempty
+/// log, `created_at` and `updated_at` are the first and last appended events'
+/// timestamps, not the minimum and maximum wall-clock values. Both use the
+/// rebuild time for an empty log. Attempt timestamps follow the existing
+/// per-event completion semantics without clock normalization. A `StillUnknown`
+/// reconciliation can replace an earlier failure end with its event time, so
+/// live and rebuilt attempt ends are not universally identical. Clock rollback
+/// can leave an attempt's end earlier than its start.
 pub fn rebuild_state_from_events(
     events_path: &Path,
     options: StateRebuildOptions,
@@ -556,6 +565,206 @@ mod tests {
             log.record(event);
         }
         log.write_to_file(path).expect("write events");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn rebuild_append_order_preserves_original_attempt_times_and_cleanup_hold() {
+        let td = tempdir().expect("tempdir");
+        let events_path = events::events_path(td.path());
+        // Worker b observed these events earlier, but appends after worker a.
+        let delayed = vec![
+            event(
+                20,
+                "b@1.0.0",
+                EventType::PackageAttempted {
+                    attempt: 1,
+                    command: "cargo publish".to_string(),
+                    max_attempts: 1,
+                },
+            ),
+            event(21, "b@1.0.0", EventType::PackageUploaded),
+            event(
+                22,
+                "b@1.0.0",
+                EventType::PackagePublished { duration_ms: 2 },
+            ),
+        ];
+        write_events(
+            &events_path,
+            vec![
+                event(
+                    30,
+                    "all",
+                    EventType::PlanCreated {
+                        plan_id: "append-order-plan".to_string(),
+                        package_count: 3,
+                    },
+                ),
+                event(
+                    50,
+                    "a@1.0.0",
+                    EventType::PackageAttempted {
+                        attempt: 1,
+                        command: "cargo publish".to_string(),
+                        max_attempts: 2,
+                    },
+                ),
+            ],
+        );
+        write_events(&events_path, delayed);
+        write_events(
+            &events_path,
+            vec![
+                // Wall-clock rollback does not reverse a's causal sequence:
+                // failure, retry decision, second attempt, then upload.
+                event(
+                    42,
+                    "a@1.0.0",
+                    EventType::PackageFailed {
+                        class: ErrorClass::Retryable,
+                        message: "rate limited".to_string(),
+                    },
+                ),
+                event(
+                    43,
+                    "a@1.0.0",
+                    EventType::RetryScheduled {
+                        attempt: 1,
+                        max_attempts: 2,
+                        delay_ms: 1_000,
+                        next_attempt_at: ts(44),
+                        reason: ErrorClass::Retryable,
+                        message: "retry after backoff".to_string(),
+                    },
+                ),
+                event(
+                    44,
+                    "a@1.0.0",
+                    EventType::PackageAttempted {
+                        attempt: 2,
+                        command: "cargo publish".to_string(),
+                        max_attempts: 2,
+                    },
+                ),
+                event(45, "a@1.0.0", EventType::PackageUploaded),
+                event(
+                    46,
+                    "a@1.0.0",
+                    EventType::PackagePublished { duration_ms: 2 },
+                ),
+                event(
+                    58,
+                    "held@1.0.0",
+                    EventType::PackageAttempted {
+                        attempt: 1,
+                        command: "cargo publish".to_string(),
+                        max_attempts: 1,
+                    },
+                ),
+                event(
+                    15,
+                    "held@1.0.0",
+                    EventType::PackageCleanupIncomplete {
+                        message: "cleanup could not be confirmed".to_string(),
+                    },
+                ),
+                // A later ordinary event updates observed metadata but cannot
+                // clear a retained hold after clock rollback.
+                event(
+                    16,
+                    "held@1.0.0",
+                    EventType::PackagePublished { duration_ms: 1 },
+                ),
+            ],
+        );
+        let original_bytes = std::fs::read(&events_path).expect("original events");
+
+        let state = rebuild_state_file_from_events(td.path(), options()).expect("rebuild file");
+        assert_eq!(state.plan_id, "append-order-plan");
+        assert_eq!(state.created_at, ts(30), "first append, not minimum time");
+        assert_eq!(state.updated_at, ts(16), "last append, not maximum time");
+        assert!(state.updated_at < state.created_at);
+        assert_eq!(state.packages.len(), 3);
+        for (key, attempts, last_update) in [("a@1.0.0", 2, 46), ("b@1.0.0", 1, 22)] {
+            let package = &state.packages[key];
+            assert!(matches!(package.state, PackageState::Published));
+            assert_eq!(package.attempts, attempts);
+            assert_eq!(package.last_updated_at, ts(last_update));
+        }
+        let held = &state.packages["held@1.0.0"];
+        assert!(matches!(
+            &held.state,
+            PackageState::CleanupIncomplete { message }
+                if message == "cleanup could not be confirmed"
+        ));
+        assert_eq!(held.attempts, 1);
+        assert_eq!(held.last_updated_at, ts(16));
+
+        // These are completed attempts in replay/finalization order. Sorting
+        // by start time would reverse a's attempts; clamping would fabricate
+        // the first failure and cleanup observations.
+        assert_eq!(
+            state.attempt_history,
+            vec![
+                AttemptDetail {
+                    package: "b".to_string(),
+                    version: "1.0.0".to_string(),
+                    attempt: 1,
+                    max_attempts: 1,
+                    started_at: ts(20),
+                    ended_at: ts(21),
+                    error_class: None,
+                    next_attempt_at: None,
+                    redacted_message: None,
+                },
+                AttemptDetail {
+                    package: "a".to_string(),
+                    version: "1.0.0".to_string(),
+                    attempt: 1,
+                    max_attempts: 2,
+                    started_at: ts(50),
+                    ended_at: ts(42),
+                    error_class: Some(ErrorClass::Retryable),
+                    next_attempt_at: Some(ts(44)),
+                    redacted_message: Some("rate limited".to_string()),
+                },
+                AttemptDetail {
+                    package: "a".to_string(),
+                    version: "1.0.0".to_string(),
+                    attempt: 2,
+                    max_attempts: 2,
+                    started_at: ts(44),
+                    ended_at: ts(45),
+                    error_class: None,
+                    next_attempt_at: None,
+                    redacted_message: None,
+                },
+                AttemptDetail {
+                    package: "held".to_string(),
+                    version: "1.0.0".to_string(),
+                    attempt: 1,
+                    max_attempts: 1,
+                    started_at: ts(58),
+                    ended_at: ts(15),
+                    error_class: Some(ErrorClass::Ambiguous),
+                    next_attempt_at: None,
+                    redacted_message: Some("cleanup could not be confirmed".to_string()),
+                },
+            ]
+        );
+        let persisted = execution_state::load_state(td.path())
+            .expect("load rebuilt file")
+            .expect("persisted state");
+        assert_eq!(
+            serde_json::to_value(&persisted).expect("persisted state JSON"),
+            serde_json::to_value(&state).expect("rebuilt state JSON")
+        );
+        assert_eq!(
+            std::fs::read(&events_path).expect("events after rebuild"),
+            original_bytes,
+            "rebuild must not rewrite authoritative observations"
+        );
     }
 
     #[test]

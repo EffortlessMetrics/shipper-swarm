@@ -3716,6 +3716,47 @@ fn error_unknown_subcommand_exit_code() {
 // 41. Inspect-events with actual events file
 // ===========================================================================
 
+#[test]
+#[serial_test::serial]
+fn inspect_events_preserves_append_order_and_original_timestamps() {
+    let td = tempdir().expect("tempdir");
+    create_workspace(td.path());
+    let state_dir = td.path().join(".shipper");
+    fs::create_dir_all(&state_dir).expect("mkdir");
+    let events_path = state_dir.join("events.jsonl");
+    // Exact canonical JSONL, including subsecond precision. Package order and
+    // a package's causal order both differ from wall-clock timestamp order.
+    let observations = concat!(
+        r#"{"timestamp":"2025-01-01T00:00:30.123456789Z","event_type":{"type":"package_started","name":"demo","version":"0.1.0"},"package":"demo@0.1.0"}"#,
+        "\n",
+        r#"{"timestamp":"2025-01-01T00:00:10.987654321Z","event_type":{"type":"package_started","name":"peer","version":"0.1.0"},"package":"peer@0.1.0"}"#,
+        "\n",
+        r#"{"timestamp":"2025-01-01T00:00:20.234567891Z","event_type":{"type":"package_published","duration_ms":1},"package":"demo@0.1.0"}"#,
+        "\n",
+    );
+    fs::write(&events_path, observations).expect("write observations");
+
+    let output = loopback_shipper_cmd()
+        .arg("--manifest-path")
+        .arg(td.path().join("Cargo.toml"))
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .args(["--format", "json", "inspect-events"])
+        .output()
+        .expect("run inspect-events");
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, observations.as_bytes());
+    assert_eq!(
+        fs::read(events_path).expect("retained log"),
+        observations.as_bytes()
+    );
+}
+
 /// Snapshot: inspect-events with a populated events file.
 #[test]
 fn inspect_events_with_data_snapshot() {

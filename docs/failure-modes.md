@@ -411,7 +411,7 @@ Do not resume while registry truth is inconclusive. Follow the typed
 
 **Inspect evidence:**
 ```bash
-shipper inspect-events     # chronological event log
+shipper inspect-events     # event log in authoritative append order
 shipper inspect-receipt    # structured receipt with attempt details
 ```
 
