@@ -1180,6 +1180,7 @@ pub(crate) fn init_state(ws: &PlannedWorkspace, state_dir: &Path) -> Result<Exec
 mod tests {
     mod lock_ownership;
     mod retained_retryable;
+    mod timeout_reconciliation;
 
     use std::fs;
     use std::path::{Path, PathBuf};

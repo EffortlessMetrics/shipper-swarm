@@ -8,9 +8,11 @@ around this constraint — every step is persisted, classified, and recoverable.
 
 ## Error classification
 
-When `cargo publish` fails, Shipper inspects the combined stdout/stderr output
-and classifies the error into one of three classes
-(see `crates/shipper-cargo-failure`):
+When the Cargo process exceeds Shipper's execution timeout, the shared package
+executor classifies it as **Ambiguous** using the typed timeout result. This
+decision is independent of output text and the configured tail length. For
+other unsuccessful Cargo exits, Shipper inspects the combined stdout/stderr
+and uses the patterns in `crates/shipper-cargo-failure`:
 
 | Class | Meaning | Action taken |
 |---|---|---|
@@ -214,8 +216,9 @@ or change permanent-error classification.
 but its output does not establish whether the registry accepted the crate.
 
 **What happens:**
-1. No retryable/permanent pattern matches the output — classified as **Ambiguous**.
-2. Shipper queries the registry API: does `macros@0.3.0` exist?
+1. Cargo exceeds Shipper's process timeout, or no retryable/permanent pattern
+   matches an ordinary unsuccessful exit — classified as **Ambiguous**.
+2. Shipper queries the configured readiness authorities: does `macros@0.3.0` exist?
 3. **If `Published`:** marks `published`, continues to the next crate.
 4. **If `NotPublished`:** the proved-absent upload may retry under policy.
 5. **If `StillUnknown`:** persists reconciliation evidence and stops before
