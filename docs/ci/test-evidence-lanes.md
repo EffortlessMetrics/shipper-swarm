@@ -1,13 +1,17 @@
 # Test Evidence Lanes
 
-This document maps the test evidence strategy for `shipper`: which lanes run when, what each lane proves, and how they compose into a complete evidence picture.
+This document maps the configured test evidence lanes for `shipper`: their
+triggers, selected checks, and proof scope. See the [Testing Guide](../testing.md)
+for local commands and workspace selection. A configured lane is not a passing
+receipt: candidate claims require its source SHA, run ID, selected-job results,
+and artifacts.
 
 ## Doctrine
 
 ```
 PRs:     routed Rust-small required gate + ripr (advisory) + targeted mutation when risk warrants it
 Main:    broad full-CI evidence after merge
-Weekly:  deeper fuzz / proptest / mutation lanes
+Scheduled: weekly broad CI / crypto / mutation; nightly fuzz campaigns
 Release: publish / readiness / security proof must be clean to ship
 ```
 
@@ -25,7 +29,7 @@ this inventory aligned when workflows are added, removed, or retargeted.
 | `em-ci-routed-rust.yml` | `push` + `pull_request` + `merge_group` + `workflow_dispatch` | Required PR gate | Required via `Shipper Rust Small Result` |
 | `ci.yml` | `push` + `workflow_dispatch` + weekly `schedule` | Main/manual full-CI evidence + weekly heavy proptest | Required when triggered; not the default PR gate |
 | `coverage.yml` | `push` (main) + `pull_request` + `workflow_dispatch` | Advisory / labeled | Advisory |
-| `fuzz.yml` | `schedule` + `workflow_dispatch` | Nightly | Advisory |
+| `fuzz.yml` | path-scoped `push` + `pull_request`; nightly `schedule` + `workflow_dispatch` | Compile all fuzz binaries; execute selected campaigns only nightly/manually | Advisory |
 | `live-runner-interruption-rehearsal.yml` | `workflow_dispatch` + path-scoped same-repository `pull_request` | Safe two-job artifact interruption/resume proof; automatic GitHub-hosted route in swarm | Both selected jobs required when triggered |
 | `mutation.yml` | `schedule` + `workflow_dispatch` + `pull_request` (label-gated) | Weekly + label-gated PR | Advisory |
 | `release.yml` | `push` (tags `v*.*.*`) + `workflow_dispatch` | Tag-triggered | Required (when triggered) |
@@ -110,23 +114,27 @@ gate. Only the runner differs.
 ## `ci.yml` — Full-CI Lane Map
 
 `ci.yml` is the broad full-CI workflow. It no longer runs on every PR. It runs
-on pushes to `main`, manual `workflow_dispatch`, and the weekly schedule. Every
-entry below is required when `ci.yml` is triggered unless the `Predicate`
-column carries a gate.
+on pushes to `main`, manual `workflow_dispatch`, and Sunday at 03:00 UTC
+(`0 3 * * 0`). The [workflow source](../../.github/workflows/ci.yml) owns the
+predicates and commands. The table names its default Linux self-hosted jobs;
+explicit manual hosted selection substitutes the counterparts described below.
+Every selected job must complete successfully before its configured scope can
+be claimed as passing evidence.
 
-| Job | Predicate | Wall clock | What it proves |
-|---|---|---|---|
-| `lint` | `push` / `workflow_dispatch` / `schedule` | ~1 min | `cargo fmt --check` + `cargo clippy --workspace --all-targets -- -D warnings`. |
-| `policy` | `push` / `workflow_dispatch` / `schedule` | ~1 min | All seven xtask policy checks in `--mode blocking-allowlist`, plus `policy-report`. See `docs/policy/NON_RUST_ROLLOUT.md`. |
-| `test` (nextest) | `push` / `workflow_dispatch` / `schedule` | ~17 min | Unit and integration tests pass on the self-hosted runner pool. Doc-tests run alongside. |
-| `crypto-proptests-heavy` | `push` / `workflow_dispatch` / `schedule` | ~60 min (90-minute budget) | Full-strength `proptest` for `shipper-encrypt` round-trips. **Not** on PR — too slow. |
-| `msrv` | `push` / `workflow_dispatch` / `schedule` | ~1 min | `cargo check --workspace` on the declared MSRV (1.95). |
-| `security` | `push` / `workflow_dispatch` / `schedule` | ~1 min | `cargo audit` against the current advisory database. |
-| `docs` | `push` / `workflow_dispatch` / `schedule` | ~1 min | `cargo doc --workspace --no-deps` clean under `-D warnings` (catches `rustdoc::invalid-html-tags` and friends). |
-| `bdd` | `push` / `workflow_dispatch` / `schedule` | ~3 min | Publish and resume BDD scenarios plus the synthetic interruption-resume rehearsal (`e2e_rehearse`) that proves persisted state/events let `shipper resume` complete without duplicate publishes. |
-| `fuzz-smoke` | `push` / `workflow_dispatch` | ~10 min | Five fuzz targets at low energy: load state, resolve token, schema version, release levels, and output redaction. |
-| `cross-platform` | `push` / `workflow_dispatch` / `schedule` | ~2 min | Native Linux target check for x86_64 on self-hosted runners. aarch64 requires a cross C toolchain in the runner image and is not part of the current default swarm CI proof. Windows/macOS release assets stay a release-authority concern. |
-| `release-build` | `push` / `workflow_dispatch` only | ~2 min | Release-profile build (LTO + strip) remains available on main and manual runs; tag-time binaries are built by `release.yml`. |
+| Job | Predicate | Configured check |
+|---|---|---|
+| `lint` | `push` / `workflow_dispatch` / `schedule` | `cargo fmt --all -- --check` and `cargo clippy --workspace --all-targets --all-features -- -D warnings`. |
+| `policy` | `push` / `workflow_dispatch` / `schedule` | Seven policy checks in `--mode blocking-allowlist`, advisory doc contracts, and `policy-report`. See [non-Rust rollout](../policy/NON_RUST_ROLLOUT.md). |
+| `test` (nextest) | `push` / `workflow_dispatch` / `schedule` | `cargo nextest run --workspace --all-features --profile ci` with `INSTA_UPDATE=no`, `PROPTEST_CASES=16`, and `PROPTEST_MAX_SHRINK_ITERS=1000`; then `cargo test --workspace --doc`. Execution is on Linux. |
+| `install-smoke` | `push` / `workflow_dispatch` / `schedule` | Install the `shipper` facade from its local path, then run version/help commands. This is separate from the PR lane's `.crate` package verification. |
+| `crypto-proptests-heavy` | `push` / `workflow_dispatch` / `schedule` | `cargo nextest run -p shipper-encrypt --all-features --profile ci` with `PROPTEST_CASES=256`; only this crate receives the heavier job. |
+| `msrv` | `push` / `workflow_dispatch` / `schedule` | `cargo check --workspace` on Rust 1.95.0. |
+| `security` | `push` / `workflow_dispatch` / `schedule` | `cargo audit` against the advisory database fetched by the run. |
+| `docs` | `push` / `workflow_dispatch` / `schedule` | `cargo doc --workspace --no-deps --document-private-items` with `RUSTDOCFLAGS=-Dwarnings`. |
+| `bdd` | `push` / `workflow_dispatch` / `schedule` | Run the `bdd_publish`, `bdd_resume`, and `e2e_rehearse` CLI integration binaries. |
+| `fuzz-smoke` | `push` / `workflow_dispatch` | Five targets with a 60-second budget each: `load_state`, `resolve_token`, `schema_version`, `release_levels`, and `redact_output`. |
+| `cross-platform` | `push` / `workflow_dispatch` / `schedule` | `cargo check --workspace --target x86_64-unknown-linux-gnu`. The current matrix contains only that Linux target and does not execute tests. |
+| `release-build` | `push` / `workflow_dispatch` | `cargo build --release` for the default members, followed by a Linux CLI artifact upload. This is release-profile compilation, not publication. |
 
 Broad full-CI remains part of the evidence story, but it is not the merge gate
 for ordinary PRs. The required PR signal is the routed result above.
