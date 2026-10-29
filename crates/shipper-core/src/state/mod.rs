@@ -6,6 +6,9 @@
 pub mod consistency;
 pub mod events;
 pub mod execution_state;
+mod file_sync;
+#[cfg(test)]
+pub(crate) use file_sync::test_support as file_sync_test_support;
 pub mod rebuild;
 pub mod reconciliation;
 pub mod rehearsal;
