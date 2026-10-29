@@ -159,3 +159,25 @@ redacted, ordinary prose is preserved, and webhook configuration secrets do
 not appear in events, state, receipts, diagnostics, structured output, or
 logs. OIDC availability requires both request variables to be present and
 nonblank; blank diagnostics never include their values.
+
+## Containment effects and local evidence
+
+Single yank, yank-plan execution, and guarded remediation prepare their shared
+event destination before invoking Cargo. Each observed result must append its
+`PackageYanked` event before the command counts success or starts another yank.
+A returned append error stops the remaining plan and produces a nonzero,
+essential diagnostic even under `--quiet`. The diagnostic preserves the
+observed Cargo result without treating missing local evidence as proof that no
+registry effect occurred.
+
+A requested receipt amendment is checked against the selected registry and
+package before the effect and re-read after the event is recorded. Failure to
+load, match, or write that amendment is an incomplete operation, not a successful
+containment command. Existing event bytes are preserved. Direct and yank-plan
+reasons retain their intentional
+recording contract; guarded remediation retains its redacted reason placeholder.
+
+These checks handle ordinary returned filesystem errors. They do not make
+preflight a transaction or add a host/power-loss durability guarantee. An
+incomplete-evidence diagnostic calls for registry and artifact reconciliation,
+not an automatic repeat of the remote operation.

@@ -93,6 +93,15 @@ steps. It does not edit manifests, publish fix-forward successors, or invent new
 commands. It halts on the first failed yank and records `PackageYanked` event
 evidence.
 
+An unusable event-log destination stops the command before Cargo starts. If
+event persistence fails after Cargo has run, the command stops the remaining
+plan and returns a nonzero incomplete-evidence error even with `--quiet`.
+Preserve the available files and reconcile the observed Cargo result with the
+registry before taking another containment action. A local write failure does
+not establish that the registry effect failed.
+Execution accepts `--format text`; `--format json` is rejected before any effect.
+Use JSON with `remediate --dry-run` to inspect the planning artifact.
+
 Select the same single registry recorded in the reviewed artifact, for example
 `shipper --registry private remediate --execute-plan .shipper/remediation-plan.json`.
 The legacy `[registry]` configuration also supplies this target; an explicit
@@ -124,6 +133,13 @@ shipper yank \
 Use this direct path only when you intentionally want to combine live yank
 execution with receipt annotation for a known crate version. Prefer the
 dry-run plan when the compromise may affect multiple workspace crates.
+
+`--mark-compromised` checks that the receipt belongs to the selected registry and
+contains the package entry before the yank, then rechecks and amends the receipt
+after recording the event.
+If that amendment fails, the command returns nonzero while retaining the
+recorded yank event. Repair the receipt from retained evidence rather than
+repeating the yank to retry a local annotation.
 
 ## Step 4 - Plan the Fix-Forward
 
