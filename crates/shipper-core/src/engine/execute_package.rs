@@ -623,15 +623,29 @@ fn wait_after_retry(
 fn write_reconciliation_report_best_effort(
     state_dir: &Path,
     ws: &PlannedWorkspace,
+    event_log: &Arc<Mutex<events::EventLog>>,
     events_path: &Path,
     reporter: &Arc<SendReporter>,
 ) -> bool {
-    if let Err(err) = crate::state::reconciliation::write_report_from_events(
-        state_dir,
-        &ws.plan.plan_id,
-        &ws.plan.registry,
-        events_path,
-    ) {
+    // Call after the package transition releases its guards. The complete
+    // durable-event snapshot and report replacement share the append gate:
+    // locking only the rename would still let an older snapshot win later.
+    // Transitions acquire event log before execution state; this path never
+    // acquires execution state or holds the gate during Cargo/registry work.
+    let result = event_log
+        .lock()
+        .map_err(|_| anyhow::anyhow!("event log lock poisoned while writing reconciliation report"))
+        .and_then(|_log_guard| {
+            crate::state::reconciliation::write_report_from_events(
+                state_dir,
+                &ws.plan.plan_id,
+                &ws.plan.registry,
+                events_path,
+            )
+        });
+    // Report errors after releasing the persistence gate. A warning/false
+    // result remains failure evidence; it never authorizes a recovery.
+    if let Err(err) = result {
         reporter.warn(&format!("failed to write reconciliation report: {err:#}"));
         return false;
     }
@@ -874,8 +888,13 @@ pub(crate) fn publish_package_with_timeout(
                 ) {
                     return PackagePublishResult { result: Err(e) };
                 }
-                let _ =
-                    write_reconciliation_report_best_effort(state_dir, ws, events_path, reporter);
+                let _ = write_reconciliation_report_best_effort(
+                    state_dir,
+                    ws,
+                    event_log,
+                    events_path,
+                    reporter,
+                );
                 reporter.info(&format!(
                     "{}@{}: reconciliation outcome: Published; action: mark published and continue without republish (evidence: {})",
                     p.name,
@@ -922,8 +941,13 @@ pub(crate) fn publish_package_with_timeout(
                 ) {
                     return PackagePublishResult { result: Err(e) };
                 }
-                let _ =
-                    write_reconciliation_report_best_effort(state_dir, ws, events_path, reporter);
+                let _ = write_reconciliation_report_best_effort(
+                    state_dir,
+                    ws,
+                    event_log,
+                    events_path,
+                    reporter,
+                );
                 reporter.info(&format!(
                     "{}@{}: reconciliation outcome: NotPublished; action: retry under publish policy (evidence: {})",
                     p.name,
@@ -946,8 +970,13 @@ pub(crate) fn publish_package_with_timeout(
                 ) {
                     return PackagePublishResult { result: Err(e) };
                 }
-                let reconciliation_written =
-                    write_reconciliation_report_best_effort(state_dir, ws, events_path, reporter);
+                let reconciliation_written = write_reconciliation_report_best_effort(
+                    state_dir,
+                    ws,
+                    event_log,
+                    events_path,
+                    reporter,
+                );
                 reporter.error(&format!(
                     "{}@{}: reconciliation outcome: StillUnknown; action: stop before blind retry; operator action required (evidence: {}): {}",
                     p.name,
@@ -1430,6 +1459,7 @@ pub(crate) fn publish_package_with_timeout(
                             let _ = write_reconciliation_report_best_effort(
                                 state_dir,
                                 ws,
+                                event_log,
                                 events_path,
                                 reporter,
                             );
@@ -1453,6 +1483,7 @@ pub(crate) fn publish_package_with_timeout(
                             let _ = write_reconciliation_report_best_effort(
                                 state_dir,
                                 ws,
+                                event_log,
                                 events_path,
                                 reporter,
                             );
@@ -1523,6 +1554,7 @@ pub(crate) fn publish_package_with_timeout(
                             let reconciliation_written = write_reconciliation_report_best_effort(
                                 state_dir,
                                 ws,
+                                event_log,
                                 events_path,
                                 reporter,
                             );

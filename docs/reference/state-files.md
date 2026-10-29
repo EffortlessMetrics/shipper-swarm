@@ -43,6 +43,36 @@ runs:
 | `plan.txt` | Captured output | Plan JSON captured for workflow artifacts | Release workflow plan stage | Text containing JSON |
 | `preflight_workspace_verify.txt` | Captured output | ANSI-stripped Cargo workspace dry-run output | Preflight workspace verification | Text |
 
+## Doctor state-path diagnostics
+
+`shipper doctor` checks the resolved state path before calling it usable. A
+regular file, another non-directory type, or a non-directory parent produces a
+blocking finding. An absent path is prospective: doctor leaves it absent and
+reports an unknown check with a reason. A metadata inspection error also remains unknown;
+it is not converted into a missing path or a passed check.
+
+For an existing directory, doctor exclusively creates a uniquely named
+`.shipper-doctor-probe-*` file, writes a small disposable payload, and removes
+that exact file. A name collision is never opened, overwritten, or removed.
+Existing state, events, receipts, locks, and configuration files are not modified.
+The probe does change directory metadata. A returned probe failure is blocking;
+if removal fails, the finding names the probe that may remain for inspection.
+Permission mode bits alone are not proof of effective access for the current user.
+
+Text and `shipper.doctor.v1` JSON use the same finding status when counting this
+check. JSON adds a typed `state_dir.observation`, including the failed operation
+and I/O error kind when available. Known `exists` values remain booleans; the
+field is omitted when inspection cannot establish existence. `writable: true`
+requires a successful create/write/remove probe. A returned create or write
+failure reports `writable: false`; untested access or unsuccessful probe removal
+omits the field. Unknown findings have `status: unknown`, an explanatory reason,
+and warning severity; they count as unknown checks rather than passed checks or
+warnings. Definite blockers retain `status: blocked`.
+
+This is a current access observation, not a promise of future access, evidence
+consistency, invocation ownership, or host/power-loss durability. A passing
+doctor check does not authorize publication.
+
 ## Compatibility note
 
 0.5 artifacts are rebuildable for every field promised by the event vocabulary.

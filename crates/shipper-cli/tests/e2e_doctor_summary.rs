@@ -128,11 +128,15 @@ fn configured_doctor_command(workspace: &Path, cargo_home: &Path, registry: &str
 }
 
 #[test]
+#[serial_test::serial]
 fn doctor_ready_summary_is_consistent_in_human_and_json_output() {
     let workspace = tempdir().expect("workspace tempdir");
     let cargo_home = tempdir().expect("cargo home tempdir");
     create_workspace(workspace.path());
     initialize_clean_git_workspace(workspace.path());
+    // A ready fixture needs an existing directory whose effective access
+    // Doctor can prove; a missing path correctly remains unknown.
+    fs::create_dir(workspace.path().join(".shipper")).expect("create usable state directory");
     let registry = spawn_registry(2);
 
     configured_doctor_command(workspace.path(), cargo_home.path(), &registry.base_url)
