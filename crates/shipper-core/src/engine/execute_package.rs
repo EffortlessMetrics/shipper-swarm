@@ -155,9 +155,9 @@ pub(crate) fn run_sequential_scheduler(
             if let Err(sync_error) =
                 synchronize_sequential_state(st, event_log, &st_arc, &event_log_arc)
             {
-                Err(anyhow::anyhow!(
-                    "publish failed: {error}; additionally failed to synchronize sequential state: {sync_error}"
-                ))
+                Err(error.context(format!(
+                    "additionally failed to synchronize sequential state: {sync_error}"
+                )))
             } else {
                 Err(error)
             }
@@ -700,6 +700,9 @@ pub(crate) fn publish_package_with_timeout(
         let Ok(state) = st.lock() else {
             return poisoned_lock("execution state");
         };
+        if let Err(error) = crate::engine::publish::admission::ensure_no_cleanup_hold(&state) {
+            return PackagePublishResult { result: Err(error) };
+        }
         match state.packages.get(&key) {
             Some(progress) => progress.clone(),
             None => {
@@ -1255,6 +1258,33 @@ pub(crate) fn publish_package_with_timeout(
                     return PackagePublishResult { result: Err(e) };
                 }
             };
+            if let Some(failure) = captured.cleanup_failure {
+                let message = crate::engine::cleanup::message(failure);
+                reporter.error(&format!("{}@{}: {message}", p.name, p.version));
+                let detail = AttemptDetail {
+                    package: p.name.clone(),
+                    version: p.version.clone(),
+                    attempt,
+                    max_attempts: opts.max_attempts,
+                    started_at: attempt_started_at,
+                    ended_at: Utc::now(),
+                    error_class: Some(ErrorClass::Ambiguous),
+                    next_attempt_at: None,
+                    redacted_message: Some(message.clone()),
+                };
+                return PackagePublishResult {
+                    result: Err(crate::engine::cleanup::stop_publish(
+                        st,
+                        state_dir,
+                        event_log,
+                        events_path,
+                        &key,
+                        message,
+                        detail,
+                        &captured.output,
+                    )),
+                };
+            }
             let capture_complete = captured.capture.is_complete();
             let out = captured.output;
             if !capture_complete {

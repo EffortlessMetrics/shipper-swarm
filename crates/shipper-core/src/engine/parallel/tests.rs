@@ -34,6 +34,29 @@ fn error_class_rank(error_class: &Option<ErrorClass>) -> u8 {
     }
 }
 
+#[test]
+fn cleanup_hold_identity_survives_poisoned_parallel_synchronization() {
+    let mut state = init_state_for_package("demo", &Registry::crates_io(), "demo", "0.1.0");
+    let shared = Arc::new(Mutex::new(state.clone()));
+    let _ = std::panic::catch_unwind(|| {
+        let _guard = shared.lock().unwrap();
+        panic!("poison the synchronization boundary");
+    });
+    let error = synchronize_parallel_failure(
+        &mut state,
+        &shared,
+        crate::engine::PublishCleanupIncompleteError {
+            message: "observed cleanup hold".into(),
+        }
+        .into(),
+    );
+    assert!(matches!(
+        crate::engine::classify_publish_stop(&error),
+        Some(crate::engine::PublishStopClassification::CleanupIncomplete)
+    ));
+    assert!(format!("{error:#}").contains("synchronize parallel state"));
+}
+
 fn sort_attempt_history_by_fields(history: &mut [AttemptDetail]) {
     history.sort_by_key(|entry| {
         (

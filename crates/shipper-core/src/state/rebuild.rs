@@ -92,12 +92,36 @@ pub fn rebuild_state_from_events(
 }
 
 /// Rebuild and write `<state_dir>/state.json` from `<state_dir>/events.jsonl`.
+///
+/// This low-level writer requires an offline state directory or exclusive
+/// caller ownership of the same publication key for the whole call. It does
+/// not acquire an invocation lock: this API has no workspace/ownership input.
+/// Concurrent publication, cleanup, or arbitrary embedding writes are not
+/// supported. Under that precondition, an already-retained projection-only
+/// cleanup hold cannot be erased by rebuilding an older event prefix.
 pub fn rebuild_state_file_from_events(
     state_dir: &Path,
     options: StateRebuildOptions,
 ) -> Result<ExecutionState> {
     let events_path = events::events_path(state_dir);
     let state = rebuild_state_from_events(&events_path, options)?;
+    // A cleanup hold saved only in the projection is evidence of an incomplete
+    // persistence boundary. Rebuilding from an older event prefix must not
+    // silently erase that observed local-safety condition. The caller provides
+    // exclusion against concurrent writers as required by this API contract.
+    if let Some(retained) = execution_state::load_state(state_dir)? {
+        for (key, progress) in &retained.packages {
+            if matches!(progress.state, PackageState::CleanupIncomplete { .. })
+                && !state.packages.get(key).is_some_and(|rebuilt| {
+                    matches!(rebuilt.state, PackageState::CleanupIncomplete { .. })
+                })
+            {
+                bail!(
+                    "cannot rebuild away retained cleanup hold for {key}: its authoritative event is missing; preserve the evidence and inspect the owned processes"
+                );
+            }
+        }
+    }
     execution_state::save_state(state_dir, &state)?;
     Ok(state)
 }
@@ -109,6 +133,14 @@ fn apply_event(
     active_attempts: &mut BTreeMap<String, RebuildAttemptDetail>,
     attempt_history: &mut Vec<AttemptDetail>,
 ) {
+    let affected_key = match &event.event_type {
+        EventType::PackageStarted { name, version } => format!("{name}@{version}"),
+        _ => event.package.clone(),
+    };
+    let retained_hold = packages.get(&affected_key).and_then(|progress| {
+        matches!(progress.state, PackageState::CleanupIncomplete { .. })
+            .then(|| progress.state.clone())
+    });
     match &event.event_type {
         EventType::PlanCreated {
             plan_id: event_plan_id,
@@ -212,6 +244,21 @@ fn apply_event(
                 progress.last_updated_at = event.timestamp;
             }
         }
+        EventType::PackageCleanupIncomplete { message } => {
+            if let Some(active) = active_attempt_for_key_mut(active_attempts, &event.package) {
+                active.ended_at = event.timestamp;
+                active.error_class = Some(ErrorClass::Ambiguous);
+                active.next_attempt_at = None;
+                active.redacted_message = Some(message.clone());
+            }
+            finalize_attempt(active_attempts, attempt_history, &event.package);
+            if let Some(progress) = ensure_event_package(packages, event, event.timestamp) {
+                progress.state = PackageState::CleanupIncomplete {
+                    message: message.clone(),
+                };
+                progress.last_updated_at = event.timestamp;
+            }
+        }
         EventType::PublishReconciled { outcome } => {
             match outcome {
                 ReconciliationOutcome::StillUnknown { reason, .. } => {
@@ -285,6 +332,13 @@ fn apply_event(
             }
         }
         _ => {}
+    }
+    // Keep later observed metadata/attempts, but ordinary success, retry or
+    // registry events cannot resolve a local cleanup hold.
+    if let Some(held) = retained_hold
+        && let Some(progress) = packages.get_mut(&affected_key)
+    {
+        progress.state = held;
     }
 }
 

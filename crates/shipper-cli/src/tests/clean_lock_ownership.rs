@@ -87,6 +87,87 @@ fn clean_without_force_preserves_corrupt_metadata_and_all_artifacts() {
     );
 }
 
+#[test]
+#[serial_test::serial]
+fn clean_preserves_cleanup_incomplete_hold_even_with_force_or_corrupt_projection() {
+    for source in [
+        "event_missing_state",
+        "event_corrupt_state",
+        "state_corrupt_events",
+        "event_before_corrupt_line",
+        "event_after_corrupt_line",
+    ] {
+        for force in [false, true] {
+            for keep_receipt in [false, true] {
+                let directory = tempdir().unwrap();
+                let state_dir = directory.path().join(".shipper");
+                let paths = retained_artifacts(&state_dir);
+                let state_path = state_dir.join("state.json");
+                let event_path = state_dir.join("events.jsonl");
+                if source == "state_corrupt_events" {
+                    let now = Utc::now();
+                    let state = ExecutionState {
+                        state_version: "shipper.state.v1".into(),
+                        plan_id: "retained-cleanup-plan".into(),
+                        registry: Registry::crates_io(),
+                        created_at: now,
+                        updated_at: now,
+                        attempt_history: Vec::new(),
+                        packages: BTreeMap::from([(
+                            "demo@0.1.0".into(),
+                            PackageProgress {
+                                name: "demo".into(),
+                                version: "0.1.0".into(),
+                                attempts: 1,
+                                state: PackageState::CleanupIncomplete {
+                                    message: "cleanup could not be confirmed".into(),
+                                },
+                                last_updated_at: now,
+                            },
+                        )]),
+                    };
+                    fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+                } else {
+                    if source == "event_missing_state" {
+                        fs::remove_file(&state_path).unwrap();
+                    }
+                    let event = PublishEvent {
+                        timestamp: Utc::now(),
+                        package: "demo@0.1.0".into(),
+                        event_type: EventType::PackageCleanupIncomplete {
+                            message: "cleanup could not be confirmed".into(),
+                        },
+                    };
+                    let raw = format!("{}\n", serde_json::to_string(&event).unwrap());
+                    let raw = match source {
+                        "event_before_corrupt_line" => format!("{raw}malformed-secret-sentinel\n"),
+                        "event_after_corrupt_line" => format!("malformed-secret-sentinel\n{raw}"),
+                        _ => raw,
+                    };
+                    fs::write(&event_path, raw).unwrap();
+                }
+                let retained: Vec<_> = paths
+                    .into_iter()
+                    .filter(|(path, _)| path.exists())
+                    .map(|(path, _)| {
+                        let bytes = fs::read(&path).unwrap();
+                        (path, bytes)
+                    })
+                    .collect();
+                let error = clean_single_dir(&state_dir, directory.path(), keep_receipt, force)
+                    .unwrap_err();
+                assert_eq!(
+                    engine::classify_publish_stop(&error),
+                    Some(engine::PublishStopClassification::CleanupIncomplete)
+                );
+                assert!(!format!("{error:#}").contains("malformed-secret-sentinel"));
+                assert_preserved(&retained);
+                assert_eq!(state_path.exists(), source != "event_missing_state");
+            }
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 #[serial_test::serial]

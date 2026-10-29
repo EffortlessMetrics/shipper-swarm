@@ -45,6 +45,15 @@ invent defaults for other absent evidence. See
 [INVARIANTS.md](../INVARIANTS.md) for the full compatibility and event-first
 contract.
 
+`PackageState::CleanupIncomplete` (`cleanup_incomplete`) and
+`EventType::PackageCleanupIncomplete` (`package_cleanup_incomplete`) add a local
+process-safety hold to the 0.5 vocabulary. Exhaustive Rust consumers and JSON
+consumers must handle these variants. Existing states and events keep their
+wire shape, and the new CLI count/outcome fields are omitted when absent.
+An older binary may reject the new state, but older publish paths can ignore
+an event-only hold or supplied-state mismatch. Downgrade recovery of held runs
+is therefore unsupported; there is no universal old-consumer fail-closed claim.
+
 ## Which file for which question?
 
 | Question | File |
@@ -75,6 +84,7 @@ Common event types:
 - `plan_created` — beginning
 - `preflight_started`, `preflight_workspace_verify`, `preflight_complete`
 - `package_started`, `package_attempted`, `package_uploaded`, `package_published`, `package_failed`, `package_skipped`
+- `package_cleanup_incomplete` — local process cleanup was not confirmed; blocks new publication regardless of registry truth
 - `retry_backoff_started` — added in [#91](https://github.com/EffortlessMetrics/shipper/issues/91); carries attempt N/M, delay, reason, next-attempt time
 - `publish_reconciling`, `publish_reconciled` — added in [#99](https://github.com/EffortlessMetrics/shipper/issues/99); registry-truth resolution of ambiguous outcomes
 - `state_event_drift_detected` — added in [#93](https://github.com/EffortlessMetrics/shipper/issues/93); end-of-run consistency check
@@ -94,6 +104,32 @@ an `Unknown` observation (including corrupt, legacy, or cross-host lock
 evidence) remains fail-closed. The public raw-event API therefore includes the
 `ExecutionStopped` event variant and its `ControlledStopReason`; exhaustive
 consumers must handle that compatibility surface.
+
+`package_cleanup_incomplete` carries a `message` and a package key. It is an
+absorbing local hold for this state directory, independent of plan membership,
+registry reconciliation, attempt ceiling, or lock-holder liveness. It can also
+originate from rehearsal, which has no normal publish projection. Publish,
+resume, direct parallel dispatch, rehearsal and clean share the same retained
+hold check; durable status and watch expose false resume safety and investigation
+guidance. No automatic hold-clear operation is defined.
+
+A complete typed hold event still blocks cleanup when a different event line
+is malformed. This positive hold scan cannot authorize publication or rewrite
+history; corrupt evidence without a recognized hold still blocks publish and
+resume. If the hold record itself is unreadable or unrecognizable, explicit
+clean retains its ordinary corrupt-artifact recovery behavior.
+
+Events remain authoritative, but a held projection without its matching event
+is evidence of a failed persistence boundary, not authorization to retry.
+`rebuild_state_file_from_events` requires an offline directory or exclusive
+caller ownership of the publication key for its whole call. It has no workspace
+or ownership input and does not synchronize against concurrent publishers or
+arbitrary embedding writes. With that precondition, it refuses to overwrite an
+already-retained held projection from an older event prefix; it neither
+fabricates the missing event nor clears the hold. Within a replay, a hold event
+always survives later
+ordinary retry, success or reconciliation events. The persistence limits and
+platform scope are described in [failure modes](../failure-modes.md#retained-process-cleanup-hold).
 
 ### `state.json`
 

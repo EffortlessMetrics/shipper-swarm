@@ -69,6 +69,10 @@ pub(crate) fn commit_attempt(
         );
     }
 
+    // Admission is this critical section, not a separate earlier check. A
+    // cleanup hold observed by any peer blocks every later attempt event.
+    super::publish::admission::ensure_no_cleanup_hold(state)?;
+
     event_log.record(event);
     persist(
         state,

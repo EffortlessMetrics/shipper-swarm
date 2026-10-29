@@ -20,7 +20,7 @@ mod which;
 // original microcrate (see `tests.rs`, `snapshot_tests.rs`,
 // `cross_platform_edge_case_tests.rs`).
 pub(crate) use self::capture::{
-    CaptureLoss, CaptureStatus, CapturedCommandOutput, PUBLISH_TAIL_BYTES,
+    CaptureLoss, CaptureStatus, CapturedCommandOutput, CleanupFailure, PUBLISH_TAIL_BYTES,
 };
 #[allow(unused_imports)]
 pub(crate) use self::cargo::{cargo_dry_run, cargo_publish, run_cargo, run_cargo_in_dir};

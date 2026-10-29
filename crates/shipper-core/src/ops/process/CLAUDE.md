@@ -14,8 +14,10 @@ result types.
 - `types` — `CommandResult` and `CommandOutput` result types (serde-friendly).
 - `run` — Basic command runners: `run_command`, `run_command_in_dir`,
   `run_command_with_env`, `run_command_streaming`, `run_command_simple`.
-- `timeout` — `run_command_with_timeout` which polls the child and kills it
-  if it exceeds the deadline.
+- `timeout` — generic timed execution and bounded publish capture. On Linux and
+  macOS, nonblocking pipe reads share a polling loop with an invocation-owned
+  process group and a separate one-second cleanup allowance. Other platforms
+  retain the direct-child/blocking-reader implementation.
 - `capture` — full capture or opt-in publish diagnostic tails. Publish readers
   use 8 KiB chunks, a 64 KiB partial-line limit, a 256 KiB retained/rendered
   payload limit per stream, and at most 4096 entries. Never allocate from an
@@ -41,11 +43,25 @@ public API — it's an internal implementation detail that callers (primarily
 `run_command_with_timeout` keeps complete stdout/stderr. Only the explicit
 `run_command_with_publish_capture` entry point bounds retention, including when
 timeout is None. Timed generic execution and all bounded publish execution share
-the supervisor and owned reader joins; generic timeout=None keeps the existing
+the platform supervisor; generic timeout=None keeps the existing
 run_command_in_dir full-output route. Do not
 implement bounded capture by reading everything and truncating afterward, and
 do not route metadata or generic structured stdout through diagnostic tails.
-Inherited descendant EOF/cleanup is not bounded by this retention policy.
+Linux/macOS cleanup observes exit with `waitid(NOWAIT)` so the child pins its
+process-group identity until one group termination signal. Reap with nonblocking
+polls; after reaping, only read-only group probes are permitted. Return after the
+one-second cleanup allowance even if inherited pipe EOF or group disappearance
+cannot be established, closing owned readers without leaving blocked threads.
+`cleanup_failure` is independent of `timed_out` and capture loss. It must not
+authorize another upload. Early exit 0/42 keeps that exit and `timed_out=false`.
+Group-signal failure is provisional: confirmed reap, group absence and both EOFs
+prove cleanup complete even when an exited leader's group rejects the signal.
+
+The group contains cooperative descendants, not descendants that deliberately
+change groups/sessions. An escaped pipe holder produces incomplete cleanup; an
+escaped process that closes both pipes cannot be discovered by this mechanism.
+Windows and other legacy platforms still need their own bounded ownership/I/O
+implementation and native proof; do not imply these Unix guarantees apply there.
 
 ## History
 

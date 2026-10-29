@@ -1,0 +1,6 @@
+kind: fixed
+body: Bound Linux and macOS subprocess pipe drain and owned process-group cleanup. Retain incomplete cleanup as a distinct event and package hold that blocks later attempts, resume, rehearsal, and cleanup, with explicit unsafe-to-resume guidance and preservation during offline state rebuild.
+time: 2026-10-29T15:15:00Z
+custom:
+  Audience: Operators
+  Importance: Detailed

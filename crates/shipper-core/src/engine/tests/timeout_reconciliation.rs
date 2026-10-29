@@ -79,6 +79,10 @@ pub(super) struct ProbeRegistry {
 
 impl ProbeRegistry {
     pub(super) fn start(statuses: Vec<u16>) -> Self {
+        Self::start_for_packages(statuses, vec!["demo"])
+    }
+
+    pub(super) fn start_for_packages(statuses: Vec<u16>, packages: Vec<&'static str>) -> Self {
         let server = Server::http("127.0.0.1:0").expect("loopback registry");
         let base_url = format!("http://{}", server.server_addr());
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -94,7 +98,13 @@ impl ProbeRegistry {
                 else {
                     continue;
                 };
-                assert_eq!(request.url(), "/api/v1/crates/demo/0.1.0");
+                assert!(
+                    packages
+                        .iter()
+                        .any(|name| { request.url() == format!("/api/v1/crates/{name}/0.1.0") }),
+                    "unexpected fixture request: {}",
+                    request.url()
+                );
                 let status = statuses[next.min(statuses.len() - 1)];
                 next += 1;
                 observed.lock().expect("seen").push(status);

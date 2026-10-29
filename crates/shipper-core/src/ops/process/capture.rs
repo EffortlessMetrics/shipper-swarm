@@ -16,6 +16,8 @@ pub(crate) enum CaptureLoss {
     LineBytes,
     TailEntries,
     Read,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    Cleanup,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -30,9 +32,37 @@ impl CaptureStatus {
     }
 }
 
+/// A returned process result can be finite while cleanup remains unconfirmed.
+/// This is separate from execution timeout and diagnostic loss: it cannot grant
+/// authority to start a replacement upload.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+pub(crate) enum CleanupFailure {
+    ChildStatus,
+    GroupSignal,
+    GroupStillPresent,
+    Reap,
+    InheritedPipe,
+}
+
+impl CleanupFailure {
+    pub(crate) fn description(self) -> &'static str {
+        match self {
+            Self::ChildStatus => "the owned child status could not be established",
+            Self::GroupSignal => "termination of the owned process group was not confirmed",
+            Self::GroupStillPresent => {
+                "the process group remained present after its cleanup allowance"
+            }
+            Self::Reap => "the owned child was not reaped within the cleanup allowance",
+            Self::InheritedPipe => "an inherited output pipe remained open after group shutdown",
+        }
+    }
+}
+
 pub(crate) struct CapturedCommandOutput {
     pub(crate) output: CommandOutput,
     pub(crate) capture: CaptureStatus,
+    pub(crate) cleanup_failure: Option<CleanupFailure>,
 }
 
 #[derive(Clone, Copy)]
@@ -47,6 +77,22 @@ pub(super) enum CaptureBuffer {
 }
 
 impl CaptureBuffer {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(super) fn new(mode: CaptureMode) -> Self {
+        match mode {
+            CaptureMode::Full => Self::Full(Vec::new()),
+            CaptureMode::PublishTail(lines) => Self::Tail(TailCapture::new(lines)),
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(super) fn lose(&mut self, reason: CaptureLoss) {
+        if let Self::Tail(tail) = self {
+            tail.lose(reason);
+        }
+    }
+
+    #[allow(dead_code)] // The legacy platform runner still owns blocking readers.
     pub(super) fn read<R: Read>(stream: Option<R>, mode: CaptureMode) -> Self {
         match mode {
             CaptureMode::Full => {

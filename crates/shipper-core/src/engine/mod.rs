@@ -34,6 +34,7 @@ use crate::types::{
 #[cfg(test)]
 use crate::types::{Finishability, PreflightPackage};
 
+mod cleanup;
 pub(crate) mod execute_package;
 mod preflight;
 mod publish;
@@ -71,6 +72,21 @@ pub(crate) struct PublishRecoverableStopError {
     message: String,
     package: String,
     evidence_consistent: bool,
+}
+
+/// A local cleanup hold must survive adapter error classification and cannot
+/// be converted into registry reconciliation or a retry-ceiling suggestion.
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub(crate) struct PublishCleanupIncompleteError {
+    message: String,
+}
+
+/// Inspect retained cleanup safety before adapter convenience checks. The
+/// engine repeats this check through its owned shared admission boundary.
+#[doc(hidden)]
+pub fn validate_publish_cleanup_safety(state_dir: &Path) -> Result<()> {
+    publish::admission::validate_cleanup_safety(state_dir).context(PublishAdmissionError)
 }
 
 /// Typed context for an invocation refused before publish execution is admitted.
@@ -143,12 +159,19 @@ pub fn classify_resume_retry_budget(
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PublishStopClassification {
+    CleanupIncomplete,
     StillUnknown { reconciliation_written: bool },
     RecoverableNotPublished { evidence_consistent: bool },
 }
 
 #[doc(hidden)]
 pub fn classify_publish_stop(error: &anyhow::Error) -> Option<PublishStopClassification> {
+    if error
+        .downcast_ref::<PublishCleanupIncompleteError>()
+        .is_some()
+    {
+        return Some(PublishStopClassification::CleanupIncomplete);
+    }
     if let Some(still_unknown) = error.downcast_ref::<PublishStillUnknownError>() {
         return Some(PublishStopClassification::StillUnknown {
             reconciliation_written: still_unknown.reconciliation_written,
@@ -772,6 +795,11 @@ pub fn run_rehearsal(
 
     let workspace_root = &ws.workspace_root;
     let state_dir = resolve_state_dir(workspace_root, &opts.state_dir);
+    validate_publish_cleanup_safety(&state_dir)?;
+    let reservation = publish::admission::reserve_rehearsal(ws, opts, &state_dir)?;
+    let _lock = reservation
+        .claim(Some(&ws.plan.plan_id))
+        .context(PublishAdmissionError)?;
     std::fs::create_dir_all(&state_dir)
         .with_context(|| format!("failed to create state dir {}", state_dir.display()))?;
     let events_path = events::events_path(&state_dir);
@@ -825,6 +853,16 @@ pub fn run_rehearsal(
             opts.output_lines,
             None,
         )?;
+        if let Some(failure) = captured.cleanup_failure {
+            let message = cleanup::message(failure);
+            reporter.error(&message);
+            return Err(cleanup::stop_rehearsal(
+                &mut event_log,
+                &events_path,
+                &pkg_label,
+                message,
+            ));
+        }
         let capture_complete = captured.capture.is_complete();
         let out = captured.output;
         if !capture_complete {
@@ -1096,6 +1134,7 @@ pub(crate) fn init_state(ws: &PlannedWorkspace, state_dir: &Path) -> Result<Exec
 #[cfg(test)]
 mod tests {
     mod capture_reconciliation;
+    mod cleanup_hold;
     mod lock_ownership;
     mod per_error_refusal;
     mod retained_admission;

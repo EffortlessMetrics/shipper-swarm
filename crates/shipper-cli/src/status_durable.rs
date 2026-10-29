@@ -12,7 +12,7 @@ use shipper_core::cli_bridge::{
     unfinished_evidence_consistent,
 };
 use shipper_core::state::consistency::{verify_finalization_consistency, verify_plan_completion};
-use shipper_core::state::events::{EVENTS_FILE, events_path};
+use shipper_core::state::events::{EVENTS_FILE, EventLog, events_path};
 use shipper_core::state::execution_state::{
     RECEIPT_FILE, RECONCILIATION_FILE, STATE_FILE, load_receipt, load_receipt_encrypted,
     load_state, load_state_encrypted, reconciliation_path,
@@ -88,6 +88,7 @@ struct EvidencePacket {
     finalization_consistent: Option<bool>,
     unfinished_consistent: Option<bool>,
     controlled_stop_consistent: Option<bool>,
+    cleanup_incomplete: bool,
     evidence: Vec<String>,
 }
 
@@ -139,6 +140,10 @@ fn load_evidence(
         )
     };
     let reconciliation = load_reconciliation(resolved_state_dir)?;
+    // The hold can precede a failed projection save, and rehearsal holds have
+    // no normal publish projection. Read the entire retained event authority.
+    let retained_events = EventLog::read_from_file(&events_path(resolved_state_dir))?;
+    let cleanup_incomplete = crate::has_cleanup_hold(retained_events.all_events(), state.as_ref());
     let finalization_consistent = match (&state, &receipt) {
         (Some(state), Some(receipt)) => Some(
             verify_finalization_consistency(
@@ -152,6 +157,7 @@ fn load_evidence(
         _ => None,
     };
     let unfinished_consistent = match (&state, &receipt) {
+        _ if cleanup_incomplete => None,
         (Some(state), None) => Some(unfinished_evidence_consistent(
             &events_path(resolved_state_dir),
             state,
@@ -160,6 +166,7 @@ fn load_evidence(
         _ => None,
     };
     let controlled_stop_consistent = match (&state, &receipt) {
+        _ if cleanup_incomplete => None,
         (Some(state), None) => Some(controlled_stop_evidence_consistent(
             &events_path(resolved_state_dir),
             state,
@@ -186,6 +193,7 @@ fn load_evidence(
         finalization_consistent,
         unfinished_consistent,
         controlled_stop_consistent,
+        cleanup_incomplete,
         evidence,
     })
 }
@@ -208,6 +216,16 @@ fn classify(
     packet: EvidencePacket,
 ) -> DurableOperatorOutcome {
     let plan_id = observation_plan_id(&packet.observation).map(str::to_owned);
+    if contains_cleanup_hold(&packet) {
+        return outcome(
+            DurableStatus::Interrupted,
+            plan_id,
+            observation_result(&packet.observation).cloned(),
+            unsafe_safety(crate::CLEANUP_INCOMPLETE_REASON),
+            crate::cleanup_incomplete_action(),
+            packet.evidence,
+        );
+    }
     if is_no_evidence(&packet) {
         return outcome(
             DurableStatus::NoEvidence,
@@ -415,6 +433,7 @@ fn classify_unfinished(
 
 #[derive(Clone, Copy)]
 enum PackagePosture {
+    CleanupIncomplete,
     Ambiguous,
     PermanentBlocker,
     Resumable,
@@ -426,15 +445,17 @@ fn package_posture<'a>(states: impl Iterator<Item = &'a PackageState>) -> Packag
     let mut saw_state = false;
     let mut resumable = false;
     let mut permanent = false;
+    let mut ambiguous = false;
     for state in states {
         saw_state = true;
         match state {
+            PackageState::CleanupIncomplete { .. } => return PackagePosture::CleanupIncomplete,
             PackageState::Ambiguous { .. }
             | PackageState::Uploaded
             | PackageState::Failed {
                 class: ErrorClass::Ambiguous,
                 ..
-            } => return PackagePosture::Ambiguous,
+            } => ambiguous = true,
             PackageState::Failed {
                 class: ErrorClass::Permanent,
                 ..
@@ -447,7 +468,9 @@ fn package_posture<'a>(states: impl Iterator<Item = &'a PackageState>) -> Packag
             PackageState::Published | PackageState::Skipped { .. } => {}
         }
     }
-    if permanent {
+    if ambiguous {
+        PackagePosture::Ambiguous
+    } else if permanent {
         PackagePosture::PermanentBlocker
     } else if resumable {
         PackagePosture::Resumable
@@ -464,6 +487,10 @@ fn action_for_posture(
     terminal: bool,
 ) -> (SafeResumePosture, OperatorAction) {
     match posture {
+        PackagePosture::CleanupIncomplete => (
+            unsafe_safety(crate::CLEANUP_INCOMPLETE_REASON),
+            crate::cleanup_incomplete_action(),
+        ),
         PackagePosture::Ambiguous => (
             unsafe_safety("registry truth remains unknown for at least one package"),
             OperatorAction::posture(
@@ -502,6 +529,17 @@ fn action_for_posture(
             investigate_action(),
         ),
     }
+}
+
+fn contains_cleanup_hold(packet: &EvidencePacket) -> bool {
+    packet.cleanup_incomplete
+        || crate::has_cleanup_hold(&[], packet.state.as_ref())
+        || packet.receipt.as_ref().is_some_and(|receipt| {
+            receipt
+                .packages
+                .iter()
+                .any(|package| matches!(package.state, PackageState::CleanupIncomplete { .. }))
+        })
 }
 
 fn contains_ambiguity(packet: &EvidencePacket) -> bool {
@@ -732,7 +770,9 @@ mod tests {
     use chrono::Utc;
     use shipper_core::cli_bridge::UnknownLivenessReason;
     use shipper_core::types::{
-        EnvironmentFingerprint, PackageEvidence, PackageProgress, PackageReceipt, PlannedPackage,
+        EnvironmentFingerprint, EventType, PackageEvidence, PackageProgress, PackageReceipt,
+        PlannedPackage, PublishEvent, ReconciliationOperatorAction, ReconciliationRecord,
+        ReconciliationTrigger,
     };
 
     use super::*;
@@ -830,6 +870,7 @@ mod tests {
             finalization_consistent: None,
             unfinished_consistent: Some(true),
             controlled_stop_consistent: None,
+            cleanup_incomplete: false,
             evidence: vec![".operator-state/events.jsonl".into()],
         }
     }
@@ -1055,6 +1096,7 @@ mod tests {
                     finalization_consistent: None,
                     unfinished_consistent: None,
                     controlled_stop_consistent: None,
+                    cleanup_incomplete: false,
                     evidence: vec![".operator-state/state.json".into()],
                 },
             ),
@@ -1075,6 +1117,7 @@ mod tests {
                     finalization_consistent: None,
                     unfinished_consistent: None,
                     controlled_stop_consistent: None,
+                    cleanup_incomplete: false,
                     evidence: vec![".operator-state/state.json".into()],
                 },
             ),
@@ -1183,6 +1226,129 @@ mod tests {
             )
             .with_context(|| format!("completed demo evidence must reject {case}"))?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn cleanup_incomplete_durable_posture_overrides_historical_registry_advice() -> Result<()> {
+        let hold = PackageState::CleanupIncomplete {
+            message: "owned process cleanup could not be confirmed".into(),
+        };
+        for states in [
+            vec![PackageState::Uploaded, hold.clone()],
+            vec![hold.clone(), PackageState::Uploaded],
+        ] {
+            ensure!(matches!(
+                package_posture(states.iter()),
+                PackagePosture::CleanupIncomplete
+            ));
+        }
+        for observed in [None, Some(PackageState::Pending), Some(hold.clone())] {
+            for outcome in [
+                ReconciliationOutcome::NotPublished {
+                    attempts: 1,
+                    elapsed_ms: 1,
+                },
+                ReconciliationOutcome::StillUnknown {
+                    attempts: 1,
+                    elapsed_ms: 1,
+                    reason: "historical unknown".into(),
+                },
+            ] {
+                let mut packet = packet(
+                    RunObservation::Unfinished {
+                        plan_id: Some("plan-a".into()),
+                        liveness: RunLiveness::Unknown(UnknownLivenessReason::MissingLock),
+                    },
+                    observed.clone(),
+                );
+                // Also covers the event-first, stale or missing projection.
+                packet.cleanup_incomplete =
+                    !matches!(observed, Some(PackageState::CleanupIncomplete { .. }));
+                packet.unfinished_consistent = Some(false);
+                packet.reconciliation = Some(ReconciliationReport {
+                    schema_version: "shipper.reconciliation.v1".into(),
+                    plan_id: "plan-a".into(),
+                    registry: registry(),
+                    generated_at: Utc::now(),
+                    evidence_sources: Vec::new(),
+                    records: vec![ReconciliationRecord {
+                        package: "demo@0.1.0".into(),
+                        name: "demo".into(),
+                        version: "0.1.0".into(),
+                        trigger: ReconciliationTrigger::CargoAmbiguousExit,
+                        method: None,
+                        cargo_exit_class: Some(ErrorClass::Ambiguous),
+                        operator_action: if matches!(
+                            outcome,
+                            ReconciliationOutcome::NotPublished { .. }
+                        ) {
+                            ReconciliationOperatorAction::RetryAllowed
+                        } else {
+                            ReconciliationOperatorAction::OperatorActionRequired
+                        },
+                        outcome,
+                    }],
+                });
+                let classified = classify(&plan(), Path::new(".operator-state"), packet);
+                assert_posture(
+                    &classified,
+                    DurableStatus::Interrupted,
+                    Some(false),
+                    ActionKind::StopAndInvestigate,
+                    false,
+                )?;
+                ensure!(classified.safe_to_resume.reason.contains("cleanup"));
+                let json = serde_json::to_value(classified)?;
+                ensure!(json["safe_to_resume"]["value"] == false);
+                ensure!(json["next_action"].get("command").is_none());
+            }
+        }
+
+        let mut retained_receipt = packet(RunObservation::NoEvidence, None);
+        retained_receipt.receipt = Some(receipt(ExecutionResult::CompleteFailure, hold));
+        assert_posture(
+            &classify(&plan(), Path::new(".operator-state"), retained_receipt),
+            DurableStatus::Interrupted,
+            Some(false),
+            ActionKind::StopAndInvestigate,
+            false,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn cleanup_incomplete_rehearsal_event_without_projection_is_not_no_evidence() -> Result<()> {
+        let td = tempfile::tempdir()?;
+        let state_dir = td.path().join(".operator-state");
+        let mut log = EventLog::new();
+        log.record(PublishEvent {
+            timestamp: Utc::now(),
+            package: "retained-outside-plan@0.1.0".into(),
+            event_type: EventType::PackageCleanupIncomplete {
+                message: "rehearsal process cleanup could not be confirmed".into(),
+            },
+        });
+        log.write_to_file(&events_path(&state_dir))?;
+        let before = fs::read(events_path(&state_dir))?;
+        let evidence = load_evidence(
+            &state_dir,
+            td.path(),
+            Path::new(".operator-state"),
+            &shipper_core::encryption::EncryptionConfig::default(),
+        )?;
+        ensure!(evidence.state.is_none());
+        ensure!(evidence.cleanup_incomplete);
+        assert_posture(
+            &classify(&plan(), Path::new(".operator-state"), evidence),
+            DurableStatus::Interrupted,
+            Some(false),
+            ActionKind::StopAndInvestigate,
+            false,
+        )?;
+        ensure!(fs::read(events_path(&state_dir))? == before);
+        ensure!(!state_dir.join(STATE_FILE).exists());
         Ok(())
     }
 }
