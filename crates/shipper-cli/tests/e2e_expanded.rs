@@ -12,6 +12,9 @@ use predicates::str::contains;
 use tempfile::tempdir;
 use tiny_http::{Header, Response, Server, StatusCode};
 
+#[path = "e2e_expanded/containment_context.rs"]
+mod containment_context;
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -446,6 +449,7 @@ fn write_fake_yank_cargo(path: &Path, fail_yanks: bool) -> PathBuf {
                 r#"@echo off
 setlocal enabledelayedexpansion
 echo %*>>"%SHIPPER_FAKE_CARGO_LOG%"
+if defined SHIPPER_FAKE_CARGO_CWD_LOG cd>>"%SHIPPER_FAKE_CARGO_CWD_LOG%"
 if "%~1"=="yank" (
   {yank_exit}
 )
@@ -472,6 +476,9 @@ exit /b 64
             &format!(
                 r#"#!/usr/bin/env sh
 printf '%s\n' "$*" >> "$SHIPPER_FAKE_CARGO_LOG"
+if [ -n "${{SHIPPER_FAKE_CARGO_CWD_LOG:-}}" ]; then
+  pwd -P >> "$SHIPPER_FAKE_CARGO_CWD_LOG"
+fi
 if [ "$1" = "yank" ]; then
   {yank_exit}
 fi
@@ -519,6 +526,7 @@ fn write_remediation_dry_run_artifact(
     receipt_path: &Path,
 ) -> PathBuf {
     let output = loopback_shipper_cmd()
+        .timeout(std::time::Duration::from_secs(15))
         .arg("--manifest-path")
         .arg(root.join("Cargo.toml"))
         .arg("--state-dir")

@@ -56,6 +56,29 @@ one workspace-wide finding.
 For `publish` and `resume`, `--resume-from` must name a package in every selected
 registry's plan. Shipper validates every target before starting the first one.
 
+### Containment target and paths
+
+`yank` and `remediate` support a single registry, selected by `--registry` or
+the legacy `[registry]` configuration; the CLI flag takes precedence. Without
+either, the target is `crates-io`. These commands reject `--registries` and
+`--all-registries` before workspace discovery. A `yank --plan` or
+`remediate --execute-plan` artifact must name the same effective registry;
+a mismatch stops before Cargo mutation calls or evidence writes.
+
+Every containment call passes `cargo yank --registry <name>` explicitly,
+including `crates-io`, so Cargo's configured default cannot change the target.
+Cargo executes in the selected workspace root. Default and relative
+`--state-dir` paths resolve from that root, including when `--manifest-path`
+selects a workspace from another directory; absolute state paths retain their
+meaning. Events and `--mark-compromised` receipt amendments use that same
+effective state directory. Explicit plan-file arguments remain paths relative
+to the caller unless absolute; guarded remediation still requires the artifact
+to be the configured state directory's `remediation-plan.json`.
+
+When `--from-receipt` is omitted, `plan-yank` and `fix-forward` read
+`receipt.json` from that same workspace-resolved state directory. An explicit
+`--from-receipt` remains relative to the caller unless it is absolute.
+
 ## Commands at a glance
 
 | Command | What it does | Writes state? |

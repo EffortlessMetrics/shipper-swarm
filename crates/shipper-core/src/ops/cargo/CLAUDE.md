@@ -35,7 +35,7 @@ Re-exported at `shipper::cargo` (preserved backward compatibility with the old
   Redaction expansion is checked against the final payload limit too. Generic
   metadata, yank, install and dry-run capture retain their current semantics.
   This does not bound inherited-pipe EOF or descendant cleanup.
-- **Non-default registries only.** `--registry` is passed through only when the registry name is non-empty and not literally `crates-io`; the crates.io default is implicit.
+- **Registry identity.** Publish wrappers pass `--registry` only for non-empty non-`crates-io` names. Containment via `cargo_yank` always passes the exact non-empty registry name, including `crates-io`, so Cargo's `registry.default` cannot retarget the action; empty names are refused before spawning.
 - **`WorkspaceMetadata::is_publishable`** treats version `0.0.0` as non-publishable and `publish = []` as non-publishable, matching Cargo's own semantics.
 - **`topological_order`** is a DFS-based visitor (distinct from the Kahn/BTreeSet sort in `crate::plan`). It's still useful for diagnostics; production planning goes through `crate::plan::build_release_plan`.
 
