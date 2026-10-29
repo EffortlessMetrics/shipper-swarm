@@ -66,9 +66,47 @@ There is exactly one implementation of this loop —
 (see [#202](https://github.com/EffortlessMetrics/shipper/issues/202)). The
 engine wraps it with the `ReadinessStarted` / `ReadinessComplete` /
 `ReadinessTimeout` / `ReadinessError` envelope but does not re-implement the
-polling or the evidence. `ReadinessTimeout` means the configured wait budget
-was exhausted; `ReadinessError` means polling aborted before that budget was
-resolved and records elapsed time rather than the configured budget.
+polling or the evidence. `ReadinessTimeout` means the wait budget ended with a
+conclusive negative observation. `ReadinessError` means the result is
+inconclusive or polling aborted, and records elapsed time rather than the
+configured budget. An inconclusive final probe can therefore produce
+`ReadinessError` at budget exhaustion as well as before it.
+
+### Unknown observations cannot authorize another upload
+
+A positive API or valid sparse-index observation establishes publication.
+With readiness enabled, negative reconciliation evidence requires a successful
+final observation from every configured authority: API `404`, sparse-index `404`, or a fully readable
+index containing valid Cargo semantic versions but not the requested version. In
+`Both` mode both probes must establish absence in the same final poll;
+`prefer_index` changes query order only. Either probe may still establish
+presence while the other is unavailable. Disabled readiness retains its legacy
+single API observation, irrespective of the configured polling method.
+
+Connection errors, request timeouts, authentication/rate-limit/server errors,
+empty or malformed index responses, an unreadable local index, and a `304`
+without a sent validator and readable cached content remain unknown. A
+configured local index is an explicitly selected observation source; Shipper
+does not independently prove that an operator-managed mirror is fresh. Cached
+HTTP content is subject to the same parsing rules. A cached positive record
+can confirm presence. A `304` with no valid positive record triggers one
+unconditional refresh before absence can be claimed: cached bytes and ETags
+are stored separately and a partial cache write must not authorize a retry.
+
+The polling loop may recover from transient errors. If its final poll is
+unknown, an earlier negative poll cannot authorize `NotPublished`: the engine
+records `StillUnknown`, retains ambiguous state, and stops before another
+Cargo invocation. Failed probes are not emitted as `ReadinessPoll(false)` or
+stored as negative `ReadinessEvidence`. Conclusive evidence keeps its actual
+poll number, so gaps in attempt numbers are expected after failed probes.
+
+The public polling signatures remain `Result<(bool, Vec<ReadinessEvidence>)>`;
+the additive `shipper_registry::ReadinessObservationError` retains the total
+poll count and earlier conclusive evidence for consumers that downcast it.
+`check_index_visibility` now returns errors for unknown observations rather
+than collapsing them to `false`. No event or artifact schema changes are
+required. The permissive `shipper_sparse_index::contains_version` search helper
+retains its existing contract; registry observations use `observe_version`.
 
 Attempt details are appended to `state.json` through the same event-first
 transition boundary as the matching terminal, reconciliation, or retry event.

@@ -308,6 +308,8 @@ fn resume_scope_guidance_correction_reaches_whole_plan_completion() -> Result<()
 
                 // Apply the recommended correction: retain the workspace,
                 // registry, state and policy, and remove --resume-from.
+                let retained_state = fixture.read("state.json")?;
+                let retained_events = fs::read_to_string(fixture.state_dir.join("events.jsonl"))?;
                 let corrected = fixture.command(parallel, true).arg("resume").output()?;
                 ensure!(
                     corrected.status.success(),
@@ -333,9 +335,8 @@ fn resume_scope_guidance_correction_reaches_whole_plan_completion() -> Result<()
                     "corrected whole-plan aggregates: {aggregate}"
                 );
                 ensure!(
-                    report["published"].as_u64().context("published count")?
-                        + report["skipped"].as_u64().context("skipped count")?
-                        == 2
+                    report["published"] == 0
+                        && report["skipped"] == 2
                         && report["pending"] == 0
                         && report["failed"] == 0
                         && report["uploaded"] == 0
@@ -347,34 +348,52 @@ fn resume_scope_guidance_correction_reaches_whole_plan_completion() -> Result<()
                     .context("receipt packages")?;
                 ensure!(packages.len() == 2);
                 ensure!(
-                    packages.iter().all(|package| matches!(
-                        package["state"]["state"].as_str(),
-                        Some("published" | "skipped")
-                    )),
-                    "receipt packages must both be successfully terminal: {aggregate}"
+                    packages
+                        .iter()
+                        .all(|package| package["state"]["state"] == "skipped"),
+                    "visible receipt packages must both be skipped: {aggregate}"
                 );
-                // A retained retryable failure may invoke the rejecting fake
-                // before its registry check confirms Published. Pending work
-                // is checked first and becomes Skipped without a Cargo call.
+                // Both Pending and retained Retryable work must check registry
+                // visibility before Cargo. The rejecting fake stays armed to
+                // expose any unnecessary upload of the already-visible prefix.
                 ensure!(
-                    fake_publish_calls.len() == usize::from(retryable_prefix),
+                    fake_publish_calls.is_empty(),
                     "unexpected fake publication attempts: {aggregate}"
                 );
-                let mut evidenced_attempts = 0;
                 for package in packages {
-                    for attempt in package["evidence"]["attempts"]
-                        .as_array()
-                        .context("attempt evidence")?
-                    {
-                        ensure!(
-                            attempt["exit_code"] == 71,
-                            "the fake must reject every upload attempt"
-                        );
-                        evidenced_attempts += 1;
-                    }
+                    ensure!(
+                        package["evidence"]["attempts"]
+                            .as_array()
+                            .context("attempt evidence")?
+                            .is_empty(),
+                        "visible packages must not gain attempt evidence"
+                    );
                 }
-                ensure!(evidenced_attempts == fake_publish_calls.len());
+                let final_state = fixture.read("state.json")?;
+                ensure!(
+                    final_state["attempt_history"]
+                        .as_array()
+                        .context("final attempt history")?
+                        == retained_state["attempt_history"]
+                            .as_array()
+                            .context("retained attempt history")?,
+                    "visible scope correction must preserve cumulative attempts"
+                );
+                for key in ["alpha@0.1.0", "beta@0.1.0"] {
+                    let retained_attempts = retained_state["packages"][key]["attempts"]
+                        .as_u64()
+                        .context("retained attempt counter")?;
+                    ensure!(
+                        final_state["packages"][key]["attempts"].as_u64()
+                            == Some(retained_attempts)
+                    );
+                    ensure!(final_state["packages"][key]["state"]["state"] == "skipped");
+                }
                 let events = fs::read_to_string(fixture.state_dir.join("events.jsonl"))?;
+                ensure!(
+                    events.starts_with(&retained_events),
+                    "scope correction must preserve predecessor event history"
+                );
                 for line in events.lines() {
                     let event: serde_json::Value = serde_json::from_str(line)?;
                     ensure!(
