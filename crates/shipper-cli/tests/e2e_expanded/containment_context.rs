@@ -3,6 +3,9 @@
 use super::*;
 use std::time::Duration;
 
+#[path = "containment_evidence.rs"]
+mod containment_evidence;
+
 #[derive(Clone, Copy, Debug)]
 enum Mode {
     Single,

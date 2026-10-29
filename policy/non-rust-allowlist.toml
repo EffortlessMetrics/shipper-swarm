@@ -503,6 +503,17 @@ created = "2026-10-28"
 review_after = "2027-01-28"
 
 [[file]]
+path = "scripts/ci/test-release-resume-artifacts.py"
+kind = "ci_policy_script"
+surface = "ci"
+classification = "script"
+owner = "release/ci"
+reason = "Execute the release resume artifact selector against paginated, missing, expired, ambiguous and wrong-run metadata; verify the exact artifact-ID download contract without publication."
+covered_by = ["cargo test -p xtask --test release_resume_workflow", "python3 scripts/ci/test-release-resume-artifacts.py"]
+created = "2026-10-28"
+review_after = "2027-01-28"
+
+[[file]]
 path = ".github/CODEOWNERS"
 kind = "github_codeowners"
 surface = "tooling"

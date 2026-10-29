@@ -67,7 +67,7 @@ on:
         required: false
         default: ''
       artifact_run_id:
-        description: 'For resume mode: workflow run ID to download the .shipper artifact from.'
+        description: 'For resume mode: the prior publish or resume run containing shipper-state-final.'
         required: false
         default: ''
 
@@ -1124,8 +1124,8 @@ jobs:
   #
   # Inputs:
   #   mode            = "resume"
-  #   artifact_run_id = the workflow run ID that uploaded shipper-state-final
-  #                     or shipper-state-preflight from a failed attempt
+  #   artifact_run_id = the prior publish or resume workflow run ID that
+  #                     uploaded shipper-state-final (never a preflight artifact)
   #   ref             = the exact tag/SHA that failed (MUST match the plan ID
   #                     in state.json or shipper will refuse to resume)
   #
@@ -1178,20 +1178,42 @@ jobs:
         run: |
           shipper --version
 
+      - name: Select prior .shipper/ state artifact
+        id: prior-state
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARTIFACT_RUN_ID: ${{ inputs.artifact_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$ARTIFACT_RUN_ID" =~ ^[1-9][0-9]*$ ]] || {
+            echo "::error::resume requires a positive artifact_run_id from the prior publish or resume run"
+            exit 1
+          }
+          artifact_id="$(gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$ARTIFACT_RUN_ID/artifacts?per_page=100" | \
+            jq -er --argjson run_id "$ARTIFACT_RUN_ID" '
+              [.[].artifacts[] | select(.name == "shipper-state-final")] |
+              if length != 1 then
+                error("expected exactly one shipper-state-final artifact in the selected run; missing or ambiguous evidence")
+              elif .[0].expired != false then
+                error("selected shipper-state-final artifact is expired or has unknown expiry")
+              elif .[0].workflow_run.id != $run_id then
+                error("selected artifact does not belong to the requested run")
+              elif (.[0].id | type) != "number" or .[0].id <= 0 or .[0].id != (.[0].id | floor) then
+                error("selected artifact has an invalid ID")
+              else .[0].id end')"
+          printf 'artifact_id=%s\n' "$artifact_id" >> "$GITHUB_OUTPUT"
+          printf 'Resume predecessor: run `%s`, artifact `%s` (`shipper-state-final`).\n' \
+            "$ARTIFACT_RUN_ID" "$artifact_id" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Download prior .shipper/ state
-        if: github.event.inputs.artifact_run_id != ''
         uses: actions/download-artifact@v8
         with:
-          name: shipper-state-final
+          artifact-ids: ${{ steps.prior-state.outputs.artifact_id }}
           path: .shipper/
           run-id: ${{ github.event.inputs.artifact_run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Reject missing resume artifact input
-        if: github.event.inputs.artifact_run_id == ''
-        run: |
-          echo "::error::resume requires artifact_run_id from the approved source run"
-          exit 1
 
       - name: Inspect recovered state
         run: |
@@ -1309,7 +1331,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: shipper-state-resume-${{ github.run_id }}
+          name: shipper-state-final
           path: .shipper/
           include-hidden-files: true
           retention-days: 90

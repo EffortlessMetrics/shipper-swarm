@@ -385,6 +385,22 @@ fn validate_cli_combinations(cli: &Cli) -> std::result::Result<(), clap::Error> 
             "yank and remediate support one registry; use --registry, not --registries or --all-registries",
         ));
     }
+    let containment_execution = matches!(
+        &cli.cmd,
+        Some(
+            Commands::Yank { .. }
+                | Commands::Remediate {
+                    execute_plan: Some(_),
+                    ..
+                }
+        )
+    );
+    if containment_execution && cli.format == "json" {
+        return Err(cli_command().error(
+            clap::error::ErrorKind::ArgumentConflict,
+            "--format json is not supported for containment execution; use --format text. JSON remains available for remediate --dry-run",
+        ));
+    }
     let durable_status = matches!(&cli.cmd, Some(Commands::Status { durable: true, .. }));
     if durable_status && (cli.registries.is_some() || cli.all_registries) {
         let selector = if cli.registries.is_some() {
@@ -1314,6 +1330,11 @@ fn mark_resume_engine_error(
     evidence_state_dir: &Path,
 ) -> anyhow::Error {
     let Some(budget) = engine::classify_resume_retry_budget(&error) else {
+        if engine::is_publish_admission_error(&error) {
+            return error.context(
+                "resume was refused before changing retained evidence or dispatching a publish attempt; inspect the lock, state, events, and reconciliation evidence before retrying",
+            );
+        }
         return error.context(resume_failure_hint(configured_state_dir));
     };
     let evidence = still_unknown_evidence(evidence_state_dir, true);
@@ -2162,9 +2183,6 @@ pub fn run() -> Result<std::process::ExitCode> {
             use crate::containment::ContainmentContext;
             use shipper_core::cargo;
             use shipper_core::engine::plan_yank;
-            use shipper_core::state::events::{EventLog, events_path};
-            use shipper_core::state::execution_state::{load_receipt, receipt_path, write_receipt};
-            use shipper_core::types::{EventType, PublishEvent};
 
             let context = ContainmentContext::resolve(planned, &opts)?;
 
@@ -2181,8 +2199,7 @@ pub fn run() -> Result<std::process::ExitCode> {
                     yank_plan.plan_id
                 ));
 
-                let mut log = EventLog::new();
-                let events_file = events_path(&context.state_dir);
+                context.prepare_events()?;
 
                 let mut succeeded = 0usize;
                 let mut failed: Option<(String, i32)> = None;
@@ -2210,23 +2227,12 @@ pub fn run() -> Result<std::process::ExitCode> {
                         None,
                     )?;
 
-                    log.record(PublishEvent {
-                        timestamp: chrono::Utc::now(),
-                        event_type: EventType::PackageYanked {
-                            crate_name: entry.name.clone(),
-                            version: entry.version.clone(),
-                            reason: entry_reason.clone(),
-                            exit_code: out.exit_code,
-                        },
-                        package: format!("{}@{}", entry.name, entry.version),
-                    });
-                    if let Err(err) = log.write_to_file(&events_file) {
-                        reporter.warn(&format!(
-                            "failed to append PackageYanked event to {}: {err:#}",
-                            events_file.display()
-                        ));
-                    }
-                    log.clear();
+                    context.record_yank(
+                        &entry.name,
+                        &entry.version,
+                        &entry_reason,
+                        out.exit_code,
+                    )?;
 
                     if out.exit_code == 0 {
                         succeeded += 1;
@@ -2287,6 +2293,11 @@ pub fn run() -> Result<std::process::ExitCode> {
                 anyhow::anyhow!("--reason is required when --plan is not supplied")
             })?;
 
+            if mark_compromised {
+                context.prepare_receipt_amendment(&crate_name, &version)?;
+            }
+            context.prepare_events()?;
+
             reporter.warn(&format!(
                 "yanking {crate_name}@{version} from registry \
                  (containment, not undo) — reason: {reason}"
@@ -2301,24 +2312,7 @@ pub fn run() -> Result<std::process::ExitCode> {
                 None,
             )?;
 
-            let mut log = EventLog::new();
-            log.record(PublishEvent {
-                timestamp: chrono::Utc::now(),
-                event_type: EventType::PackageYanked {
-                    crate_name: crate_name.clone(),
-                    version: version.clone(),
-                    reason: reason.clone(),
-                    exit_code: out.exit_code,
-                },
-                package: format!("{crate_name}@{version}"),
-            });
-            let events_file = events_path(&context.state_dir);
-            if let Err(err) = log.write_to_file(&events_file) {
-                reporter.warn(&format!(
-                    "failed to append PackageYanked event to {}: {err:#}",
-                    events_file.display()
-                ));
-            }
+            context.record_yank(&crate_name, &version, &reason, out.exit_code)?;
 
             if out.exit_code == 0 {
                 if mark_compromised {
@@ -2328,54 +2322,11 @@ pub fn run() -> Result<std::process::ExitCode> {
                     // events.jsonl. The receipt is a *projection*, so
                     // mutating one field on one matching package is a
                     // legitimate amendment.
-                    let rpath = receipt_path(&context.state_dir);
-                    match load_receipt(&context.state_dir) {
-                        Ok(Some(mut receipt)) => {
-                            let matched = receipt
-                                .packages
-                                .iter_mut()
-                                .find(|p| p.name == crate_name && p.version == version);
-                            if let Some(pkg) = matched {
-                                pkg.compromised_at = Some(chrono::Utc::now());
-                                pkg.compromised_by = Some(reason.clone());
-                                if let Err(err) = write_receipt(&context.state_dir, &receipt) {
-                                    reporter.warn(&format!(
-                                        "yanked successfully but failed to mark receipt at \
-                                         {}: {err:#}",
-                                        rpath.display()
-                                    ));
-                                } else {
-                                    reporter.info(&format!(
-                                        "marked {crate_name}@{version} compromised in {}",
-                                        rpath.display()
-                                    ));
-                                }
-                            } else {
-                                reporter.warn(&format!(
-                                    "--mark-compromised: no matching package entry for \
-                                     {crate_name}@{version} in {}; yank succeeded but the \
-                                     receipt was not amended.",
-                                    rpath.display()
-                                ));
-                            }
-                        }
-                        Ok(None) => {
-                            reporter.warn(&format!(
-                                "--mark-compromised: no receipt at {}; yank succeeded but \
-                                 nothing to amend. Future plan-yank / fix-forward runs won't \
-                                 see this version as compromised unless the receipt is \
-                                 reconstructed.",
-                                rpath.display()
-                            ));
-                        }
-                        Err(err) => {
-                            reporter.warn(&format!(
-                                "--mark-compromised: failed to load receipt at {}: {err:#}. \
-                                 Yank succeeded; receipt not amended.",
-                                rpath.display()
-                            ));
-                        }
-                    }
+                    let rpath = context.mark_compromised(&crate_name, &version, &reason)?;
+                    reporter.info(&format!(
+                        "marked {crate_name}@{version} compromised in {}",
+                        rpath.display()
+                    ));
                 }
 
                 reporter.info(&format!(
@@ -2505,7 +2456,6 @@ pub fn run() -> Result<std::process::ExitCode> {
             use crate::containment::ContainmentContext;
             use shipper_core::cargo;
             use shipper_core::engine::{plan_yank, remediation};
-            use shipper_core::state::events::{EventLog, events_path};
 
             let context = ContainmentContext::resolve(planned, &opts)?;
             let state_dir = &context.state_dir;
@@ -2532,8 +2482,8 @@ pub fn run() -> Result<std::process::ExitCode> {
                 }
 
                 let plan = remediation::load_plan_from_path(&expected_plan_path)?;
-                let events_file = events_path(state_dir);
                 context.validate_plan_registry("remediation plan", &plan.registry)?;
+                context.prepare_events()?;
 
                 reporter.warn(&format!(
                     "executing reviewed remediation plan: {} containment yanks for {}@{} (plan_id {})",
@@ -2567,23 +2517,7 @@ pub fn run() -> Result<std::process::ExitCode> {
                         None,
                     )?;
 
-                    let mut log = EventLog::new();
-                    log.record(PublishEvent {
-                        timestamp: chrono::Utc::now(),
-                        event_type: EventType::PackageYanked {
-                            crate_name: step.name.clone(),
-                            version: step.version.clone(),
-                            reason: event_reason,
-                            exit_code: out.exit_code,
-                        },
-                        package: format!("{}@{}", step.name, step.version),
-                    });
-                    if let Err(err) = log.write_to_file(&events_file) {
-                        reporter.warn(&format!(
-                            "failed to append PackageYanked event to {}: {err:#}",
-                            events_file.display()
-                        ));
-                    }
+                    context.record_yank(&step.name, &step.version, &event_reason, out.exit_code)?;
 
                     if out.exit_code == 0 {
                         succeeded += 1;

@@ -79,6 +79,33 @@ When `--from-receipt` is omitted, `plan-yank` and `fix-forward` read
 `receipt.json` from that same workspace-resolved state directory. An explicit
 `--from-receipt` remains relative to the caller unless it is absolute.
 
+### Containment evidence failures
+
+Before starting a yank, Shipper prepares the event-log destination. A requested
+`--mark-compromised` amendment also requires a readable receipt for the selected
+registry with the matching package entry. A failed preparation returns nonzero
+before any Cargo yank.
+
+Preparation cannot guarantee that later writes will succeed. If Cargo runs but
+its `PackageYanked` event cannot be appended, Shipper stops the remaining plan
+and returns nonzero, including under `--quiet`. The diagnostic distinguishes
+Cargo's observed result from missing local evidence. Reconcile registry truth
+and retained evidence before any further yank; do not automatically rerun the
+command on this error.
+
+If Cargo reports success and its event is recorded but the requested receipt
+amendment fails, the command also returns nonzero. Repair the receipt using the
+retained event and registry evidence; repeating the yank does not repair the
+local marker. The receipt registry and package entry are checked again after the
+effect; a receipt replaced for another registry is preserved and not amended.
+
+`yank` and `remediate --execute-plan` support `--format text` only. They reject
+`--format json` with usage exit `2` before workspace discovery, evidence writes,
+or Cargo. The existing remediation dry-run JSON output is unchanged. The broader
+secondary-command format contract is tracked in
+[#277](https://github.com/EffortlessMetrics/shipper-swarm/issues/277); containment
+execution does not define another JSON result envelope.
+
 ## Commands at a glance
 
 | Command | What it does | Writes state? |

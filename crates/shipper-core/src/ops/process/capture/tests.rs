@@ -186,7 +186,13 @@ fn generic_complete_output_preserves_large_structured_stdout() {
     for timeout in [None, Some(Duration::from_secs(10))] {
         let result = run_command_with_timeout(
             exe.to_str().unwrap(),
-            &["--exact", STREAM_CHILD, "--ignored", "--nocapture"],
+            &[
+                "--exact",
+                STREAM_CHILD,
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ],
             directory.path(),
             timeout,
         )
@@ -196,7 +202,7 @@ fn generic_complete_output_preserves_large_structured_stdout() {
         let json = result
             .stdout
             .lines()
-            .find_map(|line| line.strip_prefix("CAPTURE_JSON="))
+            .find_map(|line| line.split_once("CAPTURE_JSON=").map(|(_, rest)| rest))
             .unwrap();
         let value: serde_json::Value = serde_json::from_str(json).unwrap();
         assert_eq!(value["payload"].as_str().unwrap().len(), 128 * READ_BYTES);
