@@ -8,9 +8,11 @@ around this constraint — every step is persisted, classified, and recoverable.
 
 ## Error classification
 
-When `cargo publish` fails, Shipper inspects the combined stdout/stderr output
-and classifies the error into one of three classes
-(see `crates/shipper-cargo-failure`):
+When the Cargo process exceeds Shipper's execution timeout, the shared package
+executor classifies it as **Ambiguous** using the typed timeout result. This
+decision is independent of output text and the configured tail length. For
+other unsuccessful Cargo exits, Shipper inspects the combined stdout/stderr
+and uses the patterns in `crates/shipper-cargo-failure`:
 
 | Class | Meaning | Action taken |
 |---|---|---|
@@ -214,8 +216,9 @@ or change permanent-error classification.
 but its output does not establish whether the registry accepted the crate.
 
 **What happens:**
-1. No retryable/permanent pattern matches the output — classified as **Ambiguous**.
-2. Shipper queries the registry API: does `macros@0.3.0` exist?
+1. Cargo exceeds Shipper's process timeout, or no retryable/permanent pattern
+   matches an ordinary unsuccessful exit — classified as **Ambiguous**.
+2. Shipper queries the configured readiness authorities: does `macros@0.3.0` exist?
 3. **If `Published`:** marks `published`, continues to the next crate.
 4. **If `NotPublished`:** the proved-absent upload may retry under policy.
 5. **If `StillUnknown`:** persists reconciliation evidence and stops before
@@ -297,27 +300,42 @@ closed; cancellation by itself does not prove that the old process is gone.
 
 ### Lock file safety
 
-Shipper writes `.shipper/lock` to prevent concurrent runs. On supported Linux
-hosts, current locks may carry `/proc`-derived process identity evidence. Other
-platforms, legacy or missing/corrupt locks, and cross-host evidence remain
-`Unknown`. Age alone — including the configured timeout — does not prove that a
-process is dead.
+Shipper holds a persistent OS-lock sidecar while publish, resume, or cleanup
+owns a workspace/state-directory key. The separate JSON record carries advisory
+PID, hostname, timestamp, plan, and optional process-identity evidence. Never
+remove the guard sidecar to break a lock: a replacement inode would allow two
+independent owners.
 
 ```bash
-# Inspect the correlated local evidence first
+# Inspect correlated local evidence before choosing a recovery action
 shipper status --durable
 
-# Configure the age threshold used by lock acquisition; this is not liveness proof
+# Set the minimum age for positively abandoned legacy-record recovery
 shipper publish --lock-timeout 30m
 ```
 
-Current publish lock acquisition can replace a lock older than
-`--lock-timeout` using age alone; it does not consult durable status's stronger
-process-liveness classification. Treat a reduced timeout as a destructive
-operational choice, not proof of interruption. `--force` sets that threshold to
-zero and is an even stronger override. Use either path only after an independent
-operational decision establishes that no concurrent publisher can still mutate
-the release.
+An actually held OS guard always refuses another invocation, including
+`--force` and `shipper clean --force`. Once the guard is available, a same-host
+record from the current ownership protocol can be recovered without inferring
+liveness from its age. Legacy automatic recovery requires a positive local
+process-absence observation in the recorded scope and age strictly greater than
+the timeout. Future timestamps, corrupt metadata, missing identity, unavailable
+probes, and foreign or mismatched process scopes remain inconclusive.
+
+Explicit `--force` can replace otherwise unknown metadata after acquiring the
+guard, under the operator's assumption that any noncooperating legacy or foreign
+publisher is quiescent. It cannot override a positively observed live legacy
+holder, reset retry counts, or authorize another upload. Retained-state and
+registry-reconciliation decisions remain separate admission requirements.
+Cleanup retains ownership across all deletions and preserves artifacts when
+ownership is refused.
+
+The ownership guarantee is for cooperating processes using the same key and a
+filesystem supporting the OS primitive. It does not cover older binaries that
+ignore the sidecar, external deletion of the sidecar, distributed/network
+filesystem semantics, path aliases, or power-loss durability. Linux process
+identity supports conservative legacy recovery; other platforms retain unknown
+liveness when they cannot provide that evidence.
 
 ---
 

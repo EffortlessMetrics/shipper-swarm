@@ -48,6 +48,17 @@ event advances the projection to `published`. `EventType::ReadinessStarted`
 continues to map to `uploaded` for backward compatibility with historical
 event logs.
 
+## Process timeout enters reconciliation
+
+The canonical package executor treats `CargoOutput::timed_out` as
+`ErrorClass::Ambiguous` before inspecting output text. Killing Cargo cannot
+establish whether the registry accepted the upload. This holds when retained
+tails contain Retryable/Permanent patterns and when the configured tail is
+empty. Both schedulers use this decision and the same three-way registry
+reconciliation. Ordinary non-timeout Cargo exits retain their output-based
+classification. This rule does not change process capture, memory limits, or
+descendant cleanup guarantees.
+
 ## Readiness evidence matches readiness events
 
 `ReadinessEvidence.delay_before` is the delay that was **actually slept**
