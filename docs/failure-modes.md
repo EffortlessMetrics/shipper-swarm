@@ -109,9 +109,9 @@ exponential backoff with jitter (the `Default` policy).
 
 With jitter of 0.5, each delay is multiplied by a random factor in `[0.5, 1.5]`.
 
-### Per-error-class overrides
+### Global retry configuration
 
-In `.shipper.toml` you can set different retry parameters for each error class:
+Configure one retry policy in `.shipper.toml`:
 
 ```toml
 [retry]
@@ -121,15 +121,28 @@ max_attempts = 8
 base_delay = "3s"
 max_delay = "90s"
 jitter = 0.4
-
-[retry.per_error.retryable]
-max_attempts = 10
-base_delay = "1s"
-
-[retry.per_error.ambiguous]
-max_attempts = 4
-base_delay = "5s"
 ```
+
+Per-error retry policies are **unsupported**. Earlier versions parsed
+`[retry.per_error.retryable]`, `[retry.per_error.ambiguous]`, and
+`[retry.per_error.permanent]` without applying them. Remove those class entries
+and use the global `[retry]` policy above. Config validation and public engine
+entry points now reject any configured class, including an empty class subtable,
+before state/event writes, registry requests, notifications, or Cargo publish,
+dry-run, or yank invocation. CLI workspace discovery may run Cargo metadata first.
+An omitted `per_error` or an empty `[retry.per_error]` table keeps global behavior.
+Unknown keys in `per_error` are rejected during decoding.
+
+The package-wide `max_attempts` ceiling remains cumulative across publish and
+resume. Permanent failures stop automatic retries. Ambiguous outcomes reconcile
+against the registry and retry only after a proved `NotPublished`; an inconclusive
+`StillUnknown` stops. This refusal does not change those rules or delay floors.
+
+For embedders inspecting old configurations, the historical
+`RetryStrategyConfig` representation remains parseable: an omitted serialized
+`max_attempts` is `0`, while `RetryStrategyConfig::default()` uses `6`. Diagnostic
+loading preserves that difference; it does not authorize execution of a class
+policy. Use the validated global policy for execution.
 
 ### CLI overrides
 
