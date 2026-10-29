@@ -4,6 +4,8 @@
 //! verification, --dry-run-like behavior, --package scoping, custom --state-dir,
 //! failed publishes, and re-running publish when everything is already published.
 
+#[path = "e2e_publish/ci_github_actions.rs"]
+mod ci_github_actions;
 #[path = "e2e_publish/lock_admission.rs"]
 mod lock_admission;
 #[path = "e2e_publish/receipt_git_context.rs"]
