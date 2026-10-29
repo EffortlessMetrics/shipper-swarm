@@ -159,10 +159,10 @@ separate.
 |--------|----------------|
 | `crates/shipper-core/src/plan/` | Publish planning and ordering |
 | `crates/shipper-core/src/engine/` | Publish/preflight/resume execution engine |
-| `crates/shipper-core/src/registry/` | Registry API interactions |
-| `crates/shipper-core/src/cargo.rs` | Cargo command wrappers |
+| `crates/shipper-registry/src/` | Registry API interactions |
+| `crates/shipper-core/src/ops/cargo/` | Cargo command wrappers |
 | `crates/shipper-core/src/state/` | State persistence |
-| `crates/shipper-core/src/events.rs` | Event logging |
+| `crates/shipper-core/src/state/events/` | Event logging |
 | `crates/shipper-config/` | Configuration handling |
 
 ---
@@ -171,18 +171,26 @@ separate.
 
 ### Running Tests
 
-```bash
-# Run all tests
-cargo test --workspace
+The [Testing Guide](docs/testing.md) explains package selection, focused tests,
+and configured CI proof. At the workspace root, plain `cargo test` selects only
+the `shipper` and `shipper-cli` default members; it does not select the engine,
+support crates, or xtask for their own tests.
 
-# Run specific test
-cargo test --package shipper --test test_name
+```bash
+# Run workspace tests and doc tests with all features
+cargo test --workspace --all-features --locked
+
+# Quick check of the two default members
+cargo test --locked
+
+# Run a specific CLI integration test binary
+cargo test --package shipper-cli --test cli_e2e --locked
 
 # Run with verbose output
-cargo test --workspace -- --nocapture
+cargo test --workspace --all-features --locked -- --nocapture
 
-# Run only unit tests (skip E2E)
-cargo test --package shipper
+# Run library unit tests only (skip integration tests and doc tests)
+cargo test --workspace --lib --all-features --locked
 ```
 
 ### Test Categories
@@ -192,7 +200,7 @@ cargo test --package shipper
 | Unit tests | `src/**/tests` modules | Test individual functions |
 | Integration tests | `tests/` directories | Test module interactions |
 | E2E tests | `crates/shipper-cli/tests/cli_e2e.rs` | Test CLI behavior |
-| BDD tests | `crates/shipper-cli/tests/implementation_plan_bdd.rs` | Behavior-driven scenarios |
+| BDD tests | `crates/shipper-cli/tests/bdd_*.rs` | Behavior-driven scenarios |
 | Property tests | Throughout using proptest | Property-based testing |
 
 ### Writing Tests

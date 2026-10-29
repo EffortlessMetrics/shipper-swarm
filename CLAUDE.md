@@ -43,7 +43,8 @@ cargo run -p shipper-cli -- <command>   # equivalent; same code path
 cargo install --path crates/shipper --locked
 
 # Tests
-cargo test                                         # all workspace tests
+cargo test --workspace --all-features --locked      # workspace tests + doc tests
+cargo test --locked                                # quick default-member tests
 cargo test -p shipper-core                         # engine crate
 cargo test -p shipper-cli                          # CLI adapter crate
 cargo test -p shipper                              # façade (integration tests)
@@ -56,6 +57,11 @@ cargo fmt --all
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
+
+At the workspace root, plain `cargo test` selects only the `shipper` and
+`shipper-cli` default members. Use `--workspace` to include the engine, support
+crates, and xtask tests. See [Testing Guide](docs/testing.md) for command scope
+and the configured CI evidence lanes.
 
 ## Architecture
 

@@ -501,6 +501,7 @@ index_base = "{base}"
     // Scenario: `shipper ci` prints a static snippet, so it must not need a
     // workspace either.
     #[test]
+    #[serial_test::serial]
     fn given_no_manifest_when_printing_ci_snippet_then_it_still_prints() {
         // Given: A directory with no workspace manifest
         let td = tempdir().expect("tempdir");
@@ -512,9 +513,14 @@ index_base = "{base}"
             .arg("ci")
             .arg("github-actions");
 
-        // Then: The snippet is printed
+        // Then: The step sequence and its placement are printed without a manifest.
         cmd.assert()
             .success()
-            .stdout(contains("GitHub Actions workflow snippet"));
+            .stdout(contains(
+                "GitHub Actions steps for a fresh, approved Shipper publication.",
+            ))
+            .stdout(contains(
+                "Insert under jobs.publish.steps; this is not a complete workflow file.",
+            ));
     }
 }

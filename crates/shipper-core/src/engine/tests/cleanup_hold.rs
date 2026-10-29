@@ -81,6 +81,50 @@ fn cleanup_admission_does_not_echo_malformed_event_payload() {
 
 #[test]
 #[serial]
+fn cleanup_admission_reports_state_parse_errors_without_echoing_retained_payloads() {
+    let td = tempdir().unwrap();
+    let ws = planned_workspace(td.path(), "http://127.0.0.1:9".into());
+    let state_dir = td.path().join(".shipper");
+    let state = init_state(&ws, &state_dir).unwrap();
+    let mut invalid_variant = serde_json::to_value(&state).unwrap();
+    invalid_variant["packages"][KEY]["state"]["state"] =
+        serde_json::json!("invalid-state-secret-sentinel");
+    let state_path = state::state_path(&state_dir);
+    for raw in [
+        "NOT JSON state-secret-sentinel".to_string(),
+        String::new(),
+        "{\"state_version\":\"shipper.state.v1\"".to_string(),
+        "[1, 2, 3]".to_string(),
+        "{\"unexpected\":\"state-secret-sentinel\"}".to_string(),
+        serde_json::to_string(&invalid_variant).unwrap(),
+    ] {
+        fs::write(&state_path, &raw).unwrap();
+        let error = validate_publish_cleanup_safety(&state_dir).unwrap_err();
+        assert!(is_publish_admission_error(&error));
+        assert!(classify_publish_stop(&error).is_none());
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("failed to parse state JSON"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("secret-sentinel"), "{rendered}");
+        assert_eq!(fs::read(&state_path).unwrap(), raw.as_bytes());
+        assert!(!events::events_path(&state_dir).exists());
+    }
+
+    // A filesystem read failure must not be mislabeled as malformed JSON.
+    fs::remove_file(&state_path).unwrap();
+    fs::create_dir(&state_path).unwrap();
+    let error = validate_publish_cleanup_safety(&state_dir).unwrap_err();
+    assert!(is_publish_admission_error(&error));
+    let rendered = format!("{error:#}");
+    assert!(rendered.contains("cannot inspect retained publication state"));
+    assert!(!rendered.contains("failed to parse state JSON"));
+    assert!(state_path.is_dir());
+}
+
+#[test]
+#[serial]
 fn cleanup_hold_rehearsal_ownership_precedes_mutation_and_rechecks_retained_hold() {
     let td = tempdir().unwrap();
     let ws = planned_workspace(td.path(), "http://127.0.0.1:9".into());

@@ -46,6 +46,7 @@ use shipper_core::types::{
     ReleasePlan, ReleaseSpec, RuntimeOptions,
 };
 
+mod ci;
 mod containment;
 mod doctor;
 mod output;
@@ -633,22 +634,26 @@ EXAMPLES:
         long_about = "\
 Print a ready-to-paste CI configuration snippet for a supported platform.
 
-The snippet covers the resumability wiring: it restores `.shipper/` from
-cache and from the previous run's artifact, runs `shipper publish`, and
-saves `.shipper/` again with `if: always()` so an interrupted run can be
-resumed from the uploaded state. It also shows where the registry token
-goes. It is printed to stdout and reads nothing from your workspace, so
-it works from any directory.
+GitHub Actions output is a YAML step sequence for a fresh, approved publish
+and an unconditional upload of hidden Shipper evidence. Insert it under
+`jobs.publish.steps` in a complete workflow. Retained execution evidence
+requires a separately selected recovery operation; the generated steps
+refuse to treat existing state as permission to publish again.
 
-It is a starting point, not a full release job. It does not include
-`shipper plan` / `shipper preflight` proof steps or the Trusted
-Publishing token-mint step — for a complete workflow, including
+Use a literal checkout-relative `--state-dir`; spaces are supported. The
+Cargo workspace must be at the checkout root. The snippet does not copy
+generator-side manifest paths, registry selections or other runtime flags.
+Other providers retain their platform-specific starting configurations.
+
+The output is printed to stdout. Install Shipper and run plan and
+`preflight --preflight-only` before the GitHub publish steps. For a complete
+workflow and the separately owned Trusted Publishing example, including
 `rust-lang/crates-io-auth-action@v1`, see
 docs/how-to/run-in-github-actions.md.
 
 EXAMPLES:
-    # Write a GitHub Actions release job to a workflow file:
-    shipper ci github-actions > .github/workflows/release.yml
+    # Save steps outside .github/workflows, then insert under jobs.publish.steps:
+    shipper ci github-actions > shipper-release-steps.yml
 
     # Preview the GitLab CI equivalent:
     shipper ci gitlab
@@ -903,7 +908,7 @@ EXAMPLES:
 
 #[derive(Subcommand, Debug)]
 enum CiCommands {
-    /// Print GitHub Actions workflow snippet.
+    /// Print fresh-publish GitHub Actions steps for jobs.publish.steps.
     #[command(name = "github-actions")]
     GitHubActions,
     /// Print GitLab CI workflow snippet.
@@ -6159,39 +6164,7 @@ fn run_ci(ci_cmd: CiCommands, state_dir: &Path, workspace_root: &Path) -> Result
 
     match ci_cmd {
         CiCommands::GitHubActions => {
-            println!("# GitHub Actions workflow snippet for Shipper");
-            println!("# Add these steps to your workflow file");
-            println!();
-            println!("# Restore Shipper State (cache for faster restores)");
-            println!("- name: Restore Shipper State");
-            println!("  uses: actions/cache@v3");
-            println!("  with:");
-            println!("    path: {}/", abs_state.display());
-            println!("    key: shipper-${{{{ github.sha }}}}");
-            println!("    restore-keys: |");
-            println!("      shipper-");
-            println!();
-            println!("# Restore Shipper State (artifact for resumability)");
-            println!("- name: Restore Shipper State Artifact");
-            println!("  uses: actions/download-artifact@v4");
-            println!("  with:");
-            println!("    name: shipper-state");
-            println!("    path: {}/", abs_state.display());
-            println!("  continue-on-error: true");
-            println!();
-            println!("# Run shipper publish (will resume if state exists)");
-            println!("- name: Publish Crates");
-            println!("  run: shipper publish --quiet");
-            println!("  env:");
-            println!("    CARGO_REGISTRY_TOKEN: ${{{{ secrets.CARGO_REGISTRY_TOKEN }}}}");
-            println!();
-            println!("# Save Shipper State (even if publish fails)");
-            println!("- name: Save Shipper State");
-            println!("  if: always()");
-            println!("  uses: actions/upload-artifact@v3");
-            println!("  with:");
-            println!("    name: shipper-state");
-            println!("    path: {}/", abs_state.display());
+            print!("{}", ci::github_actions_steps(state_dir)?);
         }
         CiCommands::GitLab => {
             println!("# GitLab CI snippet for Shipper");
@@ -6364,9 +6337,17 @@ fn run_clean(
         }
     }
 
+    // Refuse the whole selection before deleting any evidence. Keep every
+    // acquired owner alive through the entire deletion pass, so a cooperating
+    // publisher cannot add a hold after validation or enter an earlier directory
+    // while a later directory is still being cleaned.
+    let prepared = dirs_to_clean
+        .into_iter()
+        .map(|dir| PreparedCleanDirectory::acquire(dir, workspace_root, force))
+        .collect::<Result<Vec<_>>>()?;
     let mut actions = Vec::new();
-    for dir in dirs_to_clean {
-        actions.extend(clean_single_dir(&dir, workspace_root, keep_receipt, force)?);
+    for directory in &prepared {
+        actions.extend(directory.clean(keep_receipt)?);
     }
 
     if json {
@@ -6398,102 +6379,141 @@ fn print_clean_report(state_dir: &Path, existed: bool, actions: Vec<CleanAction>
     Ok(())
 }
 
+struct PreparedCleanDirectory {
+    path: PathBuf,
+    _owner: shipper_core::lock::LockFile,
+}
+
+impl PreparedCleanDirectory {
+    fn acquire(dir: PathBuf, workspace_root: &Path, force: bool) -> Result<Self> {
+        let lock_path = shipper_core::lock::lock_path(&dir, Some(workspace_root));
+
+        // Ownership spans every deletion, even if the advisory JSON is missing.
+        // Never unlink the persistent OS guard or steal it with --force.
+        let owner = if force {
+            if lock_path.exists() {
+                eprintln!(
+                    "[warn] --force assumes any legacy or foreign publisher is quiescent; acquiring ownership before cleaning {}",
+                    dir.display()
+                );
+            }
+            shipper_core::lock::LockFile::acquire_with_timeout_and_force(
+                &dir,
+                Some(workspace_root),
+                Duration::ZERO,
+                true,
+            )
+        } else {
+            shipper_core::lock::LockFile::acquire(&dir, Some(workspace_root))
+        }
+        .with_context(|| format!("cannot clean: active lock exists or ownership is unavailable in {}", dir.display()))?;
+
+        // The absence of a live publisher owner does not prove that a prior
+        // process's descendants were contained. Clean is not a hold-clearing
+        // command, even with --force. Preserve ordinary corrupt-artifact cleanup
+        // when the validator reports a read error rather than a typed hold.
+        if let Err(error) = engine::validate_publish_cleanup_safety(&dir)
+            && matches!(
+                engine::classify_publish_stop(&error),
+                Some(engine::PublishStopClassification::CleanupIncomplete)
+            )
+        {
+            return Err(error.context(
+                "cannot clean: retained process cleanup is incomplete; preserve the evidence and investigate the prior Cargo process",
+            ));
+        }
+
+        Ok(Self {
+            path: dir,
+            _owner: owner,
+        })
+    }
+
+    fn clean(&self, keep_receipt: bool) -> Result<Vec<CleanAction>> {
+        let dir = &self.path;
+        #[cfg(test)]
+        CLEAN_DELETE_OBSERVER.with(|observer| {
+            if let Some(observer) = observer.borrow().as_ref() {
+                observer(dir);
+            }
+        });
+        let mut actions = Vec::new();
+        let state_path = dir.join(shipper_core::state::execution_state::STATE_FILE);
+        let receipt_path = dir.join(shipper_core::state::execution_state::RECEIPT_FILE);
+        let reconciliation_path =
+            dir.join(shipper_core::state::execution_state::RECONCILIATION_FILE);
+
+        // Remove state file
+        if state_path.exists() {
+            std::fs::remove_file(&state_path)
+                .with_context(|| format!("failed to remove state file {}", state_path.display()))?;
+            actions.push(CleanAction::Removed(state_path.display().to_string()));
+        }
+
+        // Remove event logs (authoritative + preflight-only sidecars)
+        for events_path in discover_event_logs(dir)? {
+            if events_path.exists() {
+                std::fs::remove_file(&events_path).with_context(|| {
+                    format!("failed to remove events file {}", events_path.display())
+                })?;
+                actions.push(CleanAction::Removed(events_path.display().to_string()));
+            }
+        }
+
+        // Optionally remove receipt file
+        if !keep_receipt && receipt_path.exists() {
+            std::fs::remove_file(&receipt_path).with_context(|| {
+                format!("failed to remove receipt file {}", receipt_path.display())
+            })?;
+            actions.push(CleanAction::Removed(receipt_path.display().to_string()));
+        } else if keep_receipt && receipt_path.exists() {
+            actions.push(CleanAction::Kept(receipt_path.display().to_string()));
+        }
+
+        if !keep_receipt && reconciliation_path.exists() {
+            std::fs::remove_file(&reconciliation_path).with_context(|| {
+                format!(
+                    "failed to remove reconciliation file {}",
+                    reconciliation_path.display()
+                )
+            })?;
+            actions.push(CleanAction::Removed(
+                reconciliation_path.display().to_string(),
+            ));
+        } else if keep_receipt && reconciliation_path.exists() {
+            actions.push(CleanAction::Kept(reconciliation_path.display().to_string()));
+        }
+
+        // Remove cache directory if exists
+        let cache_dir = dir.join("cache");
+        if cache_dir.exists() {
+            std::fs::remove_dir_all(&cache_dir).with_context(|| {
+                format!("failed to remove cache directory {}", cache_dir.display())
+            })?;
+            actions.push(CleanAction::Removed(cache_dir.display().to_string()));
+        }
+
+        Ok(actions)
+    }
+}
+
+#[cfg(test)]
+type CleanDeleteObserver = Box<dyn Fn(&Path)>;
+
+#[cfg(test)]
+thread_local! {
+    static CLEAN_DELETE_OBSERVER: std::cell::RefCell<Option<CleanDeleteObserver>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
 fn clean_single_dir(
     dir: &Path,
     workspace_root: &Path,
     keep_receipt: bool,
     force: bool,
 ) -> Result<Vec<CleanAction>> {
-    let mut actions = Vec::new();
-    let state_path = dir.join(shipper_core::state::execution_state::STATE_FILE);
-    let receipt_path = dir.join(shipper_core::state::execution_state::RECEIPT_FILE);
-    let reconciliation_path = dir.join(shipper_core::state::execution_state::RECONCILIATION_FILE);
-    let lock_path = shipper_core::lock::lock_path(dir, Some(workspace_root));
-
-    // Ownership spans every deletion, even if the advisory JSON is missing.
-    // Never unlink the persistent OS guard or steal it with --force.
-    let _lock = if force {
-        if lock_path.exists() {
-            eprintln!(
-                "[warn] --force assumes any legacy or foreign publisher is quiescent; acquiring ownership before cleaning {}",
-                dir.display()
-            );
-        }
-        shipper_core::lock::LockFile::acquire_with_timeout_and_force(
-            dir,
-            Some(workspace_root),
-            Duration::ZERO,
-            true,
-        )
-    } else {
-        shipper_core::lock::LockFile::acquire(dir, Some(workspace_root))
-    }
-    .with_context(|| format!("cannot clean: active lock exists or ownership is unavailable in {}", dir.display()))?;
-
-    // The absence of a live publisher owner does not prove that a prior
-    // process's descendants were contained. Clean is not a hold-clearing
-    // command, even with --force. Preserve ordinary corrupt-artifact cleanup
-    // when the validator reports a read error rather than a typed hold.
-    if let Err(error) = engine::validate_publish_cleanup_safety(dir)
-        && matches!(
-            engine::classify_publish_stop(&error),
-            Some(engine::PublishStopClassification::CleanupIncomplete)
-        )
-    {
-        return Err(error.context(
-            "cannot clean: retained process cleanup is incomplete; preserve the evidence and investigate the prior Cargo process",
-        ));
-    }
-
-    // Remove state file
-    if state_path.exists() {
-        std::fs::remove_file(&state_path)
-            .with_context(|| format!("failed to remove state file {}", state_path.display()))?;
-        actions.push(CleanAction::Removed(state_path.display().to_string()));
-    }
-
-    // Remove event logs (authoritative + preflight-only sidecars)
-    for events_path in discover_event_logs(dir)? {
-        if events_path.exists() {
-            std::fs::remove_file(&events_path).with_context(|| {
-                format!("failed to remove events file {}", events_path.display())
-            })?;
-            actions.push(CleanAction::Removed(events_path.display().to_string()));
-        }
-    }
-
-    // Optionally remove receipt file
-    if !keep_receipt && receipt_path.exists() {
-        std::fs::remove_file(&receipt_path)
-            .with_context(|| format!("failed to remove receipt file {}", receipt_path.display()))?;
-        actions.push(CleanAction::Removed(receipt_path.display().to_string()));
-    } else if keep_receipt && receipt_path.exists() {
-        actions.push(CleanAction::Kept(receipt_path.display().to_string()));
-    }
-
-    if !keep_receipt && reconciliation_path.exists() {
-        std::fs::remove_file(&reconciliation_path).with_context(|| {
-            format!(
-                "failed to remove reconciliation file {}",
-                reconciliation_path.display()
-            )
-        })?;
-        actions.push(CleanAction::Removed(
-            reconciliation_path.display().to_string(),
-        ));
-    } else if keep_receipt && reconciliation_path.exists() {
-        actions.push(CleanAction::Kept(reconciliation_path.display().to_string()));
-    }
-
-    // Remove cache directory if exists
-    let cache_dir = dir.join("cache");
-    if cache_dir.exists() {
-        std::fs::remove_dir_all(&cache_dir)
-            .with_context(|| format!("failed to remove cache directory {}", cache_dir.display()))?;
-        actions.push(CleanAction::Removed(cache_dir.display().to_string()));
-    }
-
-    Ok(actions)
+    PreparedCleanDirectory::acquire(dir.to_path_buf(), workspace_root, force)?.clean(keep_receipt)
 }
 
 fn run_config_with_loopback(cmd: ConfigCommands, allow_loopback: bool) -> Result<()> {

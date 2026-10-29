@@ -6,4 +6,4 @@ Error: resume was refused before changing retained evidence or dispatching a pub
 
 Caused by:
     0: publish admission was refused
-    1: cannot inspect retained publication state; preserve the evidence before retrying
+    1: failed to parse state JSON; cannot inspect retained publication state; preserve the evidence before retrying
