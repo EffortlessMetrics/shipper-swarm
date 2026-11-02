@@ -17,8 +17,7 @@ fn assert_predecessor(state_dir: &Path, attempts: usize) -> Vec<u8> {
         serde_json::from_slice(&fs::read(state_dir.join("state.json")).expect("predecessor state"))
             .expect("predecessor state JSON");
     assert_eq!(
-        state["packages"]["crate-c@0.1.0"]["attempts"],
-        attempts,
+        state["packages"]["crate-c@0.1.0"]["attempts"], attempts,
         "immediate predecessor must retain the expected cumulative attempts"
     );
     assert_live_rehearsal_interrupted_state(state_dir);
