@@ -122,7 +122,7 @@ fn run_phase(root: &Path, address: &str, phase: &str) -> Output {
         .env("SHIPPER_LIVE_REHEARSAL_REGISTRY_ADDR", address)
         .env(PHASE_ENV, phase)
         .env_remove("CARGO_REGISTRY_TOKEN")
-        .timeout(Duration::from_secs(60))
+        .timeout(Duration::from_mins(1))
         .output()
         .expect("bounded fresh phase process")
 }
