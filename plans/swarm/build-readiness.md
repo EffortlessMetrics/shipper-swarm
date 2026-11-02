@@ -52,6 +52,36 @@ The existing release and adoption issues remain the live boards.
 | By December 20 | Shipper is selected for a real package-release workflow, with an operator-readable recovery path. | Shipper's own train supplies the multi-crate consumer. RIPR #455 advances through advisory parity #461 and the accepted cutover #462 after their existing dependencies. Keep preflight adoption distinct from completed transaction cutover. |
 | By December 31 | Retained evidence shows actual use and a subsequent supported inspection or rerun. | Link the real run, exact installed tool/source, selected workspace/registry, package results, receipt, and follow-up command to #251 and #455 as applicable. Close only the outcome actually observed. |
 
+### November 2 reconciliation — progress against dated checkpoints
+
+The checkpoint table above records the **original target**, not a live list of
+unmerged repairs. [#255](https://github.com/EffortlessMetrics/shipper-swarm/issues/255)
+remains the current candidate/evidence authority. On October 29,
+`shipper-swarm/main` reached `bdf266842e78580b24f8b8ff998eb31e9cac6255`
+with accepted fixes for effective registry (#409), selected workspace source
+(#413), whole-plan completion (#415), unknown observations (#402), retained
+admission (#403), and live retry narration (#414). Their original proof and
+subsequent merge subjects are recorded in #255; this plan does not re-open them.
+
+The November 22 outcome still requires the remaining native process and
+archive boundaries under #412/#417, actual publish → resume → resume across
+separate Actions runs under #418, and complete broad-current-source proof under
+#370/#255. A passed required Linux gate is not proof of the four native
+release archives or of hosted runner-group health. [#454](https://github.com/EffortlessMetrics/shipper-swarm/issues/454)
+owns the newly executed archive-verifier Git-context defect; its proposed PR
+must independently pass review and qualification before being considered
+landed. [#453](https://github.com/EffortlessMetrics/shipper-swarm/issues/453)
+owns this support/handoff projection correction.
+
+The December release and use checkpoints remain outcome-oriented: freeze and
+history-preserving promotion, exact release-authority rehearsal and recorded
+GO/NO-GO, authorized thirteen-crate publication with public/install evidence,
+then supported inspection/rerun and phased RIPR adoption. Release authority
+still resides in `EffortlessMetrics/shipper`, where `main` remains at
+`3202772160b7741fd7b01d677133374c65d0ba91` as of this audit.
+**Candidate: NOT FROZEN. Publication authorization: NO.**
+No earlier dated result, source repair, or this document grants either.
+
 The earliest useful operation is read-only assessment of a real repository.
 It can expose setup or packaging problems before the first publication. The
 2026-10-26 consumer check used Shipper `8e8cc401d02cc239d1db808ff800850118d11f39`
