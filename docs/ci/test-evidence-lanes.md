@@ -26,7 +26,7 @@ this inventory aligned when workflows are added, removed, or retargeted.
 |---|---|---|---|
 | `architecture-guard.yml` | `push` + `pull_request` | Every PR | Advisory in swarm branch protection |
 | `runner-routing-guard.yml` | `push` + path-scoped `pull_request` + `workflow_dispatch` | Workflow routing policy guard | Advisory |
-| `em-ci-routed-rust.yml` | `push` + `pull_request` + `merge_group` + `workflow_dispatch` | Required PR gate | Required via `Shipper Rust Small Result` |
+| `em-ci-routed-rust.yml` | `push` + non-draft `pull_request` / `ready_for_review` + `merge_group` + `workflow_dispatch` | Review-forward required PR gate | Required via `Shipper Rust Small Result` after PR readiness |
 | `ci.yml` | `push` + `workflow_dispatch` + weekly `schedule` | Main/manual full-CI evidence + weekly heavy proptest | Required when triggered; not the default PR gate |
 | `coverage.yml` | `push` (main) + `pull_request` + `workflow_dispatch` | Advisory / labeled | Advisory |
 | `fuzz.yml` | path-scoped `push` + `pull_request`; nightly `schedule` + `workflow_dispatch` | Compile all fuzz binaries; execute selected campaigns only nightly/manually | Advisory |
@@ -36,6 +36,16 @@ this inventory aligned when workflows are added, removed, or retargeted.
 | `ripr.yml` | `pull_request` + `workflow_dispatch` | Advisory (`continue-on-error: true`) | Advisory |
 
 ## Required PR Gate
+
+Draft pull requests are review-only: creating or updating a draft does not
+admit the routed Rust producer or its always-running normalized Result.
+Marking the same-repository PR ready for review triggers the complete required
+check on that source, including when no commit changes during the transition.
+After a subsequent ready PR update, use its new exact-head required Result;
+a prior skipped draft check is never accepted as proof. Pushes to main, merge
+groups, and approved manual dispatches remain independent of PR draft state.
+Already-running checks are not retroactively cancelled when a PR becomes draft.
+The regression is `cargo test -p xtask --test routed_draft_admission --locked`.
 
 `em-ci-routed-rust.yml` is the required PR workflow. Branch protection requires
 only the normalized `Shipper Rust Small Result` check.
