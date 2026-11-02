@@ -530,9 +530,9 @@ class SourceIdentityProof(unittest.TestCase):
         self.git(self.repo, "config", "filter.mask.clean", "sh -c 'printf \"version = 4\\\\n\"'")
         attr = self.repo / ".git" / "info" / "attributes"
         attr.parent.mkdir(exist_ok=True)
-        attr.write_text("Cargo.lock filter=mask\\n", encoding="utf-8")
+        attr.write_text("Cargo.lock filter=mask\n", encoding="utf-8")
         lock = self.repo / "Cargo.lock"
-        lock.write_text("version = 4\\n# changed raw bytes\\n", encoding="utf-8")
+        lock.write_text("version = 4\n# changed raw bytes\n", encoding="utf-8")
         self.assert_source_refused(self.source(), "Cargo.lock bytes differ from the approved blob")
 
     @unittest.skipIf(os.name != "posix", "POSIX symlink fixture")
