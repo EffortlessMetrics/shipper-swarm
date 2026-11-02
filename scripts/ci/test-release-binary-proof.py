@@ -499,6 +499,30 @@ class SourceIdentityProof(unittest.TestCase):
         env = {**self.env, "GIT_INDEX_FILE": str(self.other / ".git/index")}
         self.assert_source_refused(self.source(env=env), "staged source/Cargo.lock immutability check failed")
 
+    def test_hidden_index_flags_cannot_hide_modified_tracked_source(self):
+        # The initial helper accepted assume-unchanged and skip-worktree changes
+        # because Git intentionally hides them from both diff modes.
+        for filename in ["source.txt", "Cargo.lock"]:
+            path = self.repo / filename
+            original = path.read_bytes()
+            for flag in ["assume-unchanged", "skip-worktree"]:
+                with self.subTest(filename=filename, flag=flag):
+                    self.git(self.repo, "update-index", f"--{flag}", "--", filename)
+                    path.write_bytes(original + b"hidden source change\n")
+                    try:
+                        self.git(self.repo, "diff", "--exit-code", "HEAD", "--", filename)
+                        self.git(self.repo, "diff", "--cached", "--exit-code", "HEAD", "--", filename)
+                        tag = self.git(self.repo, "ls-files", "-v", "--", filename)
+                        self.assertNotEqual(tag[:1], "H")
+                        self.assert_source_refused(
+                            self.source(),
+                            "tracked source index flags prevent complete immutability verification",
+                        )
+                    finally:
+                        self.git(self.repo, "update-index", "--no-assume-unchanged", "--", filename)
+                        self.git(self.repo, "update-index", "--no-skip-worktree", "--", filename)
+                        path.write_bytes(original)
+
     def test_detached_worktree_ignores_foreign_git_context(self):
         worktree = self.root / "detached"
         self.git(self.repo, "worktree", "add", "--quiet", "--detach", str(worktree), self.sha)
@@ -560,6 +584,16 @@ class SourceIdentityProof(unittest.TestCase):
         result, output = self.aggregate_source(self.repo, self.env)
         self.assert_source_refused(result, "staged source/Cargo.lock immutability check failed")
         self.assertFalse(output.exists(), "a dirty index must not emit successful aggregate proof")
+
+    def test_actual_aggregate_refuses_hidden_cargo_lock_without_receipt(self):
+        self.git(self.repo, "update-index", "--skip-worktree", "--", "Cargo.lock")
+        (self.repo / "Cargo.lock").write_bytes(b"unapproved package graph\n")
+        # Real Git controls: neither existing diff check observes the change.
+        self.git(self.repo, "diff", "--exit-code", "HEAD", "--", "Cargo.lock")
+        self.git(self.repo, "diff", "--cached", "--exit-code", "HEAD", "--", "Cargo.lock")
+        result, output = self.aggregate_source(self.repo, self.env)
+        self.assert_source_refused(result, "tracked source index flags prevent complete immutability verification")
+        self.assertFalse(output.exists(), "hidden lockfile changes must not create success evidence")
 
     def test_actual_aggregate_refuses_foreign_source_without_receipt(self):
         result, output = self.aggregate_source(self.other, self.redirected(self.repo))

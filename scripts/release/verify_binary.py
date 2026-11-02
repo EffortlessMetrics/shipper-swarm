@@ -76,6 +76,15 @@ def source_identity(sha, tree):
             "checked-out source SHA differs from approval")
     require(command([*git, "rev-parse", "HEAD^{tree}"], "source tree read", cwd=root, env=env) == tree,
             "checked-out source tree differs from approval")
+    # assume-unchanged and skip-worktree index bits can hide modified
+    # tracked bytes from both diff modes. A release checkout cannot attest
+    # complete source evidence while either bit is set.
+    tracked_flags = command([*git, "ls-files", "-v", "-z", "--"],
+                            "tracked source index flags", cwd=root, env=env)
+    flags = [entry for entry in tracked_flags.split("\0") if entry]
+    require(all(entry.startswith("H ") for entry in flags),
+            "tracked source index flags prevent complete immutability verification")
+    require("H Cargo.lock" in flags, "approved source does not track Cargo.lock")
     # HEAD-to-worktree alone can hide a staged change cancelled by an
     # opposite unstaged edit. Require both index and working files to agree.
     command([*git, "diff", "--cached", "--no-ext-diff", "--no-textconv", "--exit-code", "HEAD", "--"],
