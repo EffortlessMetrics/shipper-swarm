@@ -44,25 +44,35 @@ never be used alone to advance a claim to a later lifecycle state.
 
 ## Claim Map
 
-### Current candidate limitations — 2026-10-26
+### October 26 audit and November 2 development disposition
 
-The audit of swarm source `8e8cc401d02cc239d1db808ff800850118d11f39`
-found defects in several implemented contracts. The stable rows below retain
-their named historical or focused proof; they do not establish the affected
-guarantee for this candidate. Apply these limitations when projecting claims
-into the roadmap, README, operator guidance, or a release decision:
+The audit at swarm source `8e8cc401d02cc239d1db808ff800850118d11f39`
+demonstrated the defects below. Its negative controls remain historical evidence
+for that source; they must not be presented as still-open implementation work
+after the October repair train. At November 2, development source
+`bdf266842e78580b24f8b8ff998eb31e9cac6255` passed its required routed
+Rust check, but is **NOT FROZEN** and has **no publication authorization**.
+The separate release-authority `shipper/main` has not received those fixes,
+and the latest proved public install remains the 0.4.0 line.
 
-- **Effective-registry planning:** [Swarm #409](https://github.com/EffortlessMetrics/shipper-swarm/issues/409) owns configuration being applied after graph/ID construction; target filtering and displayed identity can disagree.
-- **Selected-workspace receipt attribution:** [Swarm #413](https://github.com/EffortlessMetrics/shipper-swarm/issues/413) owns receipts describing the caller's Git repository instead of the selected workspace.
-- **Ambiguous publish reconciliation:** [Swarm #402](https://github.com/EffortlessMetrics/shipper-swarm/issues/402) owns an unknown registry observation becoming absence on an observed path; the intended stop-on-unknown guarantee needs repair and discriminating proof.
-- **Durable recovery and completion:** [Swarm #403](https://github.com/EffortlessMetrics/shipper-swarm/issues/403) owns shared retained-state admission; [#415](https://github.com/EffortlessMetrics/shipper-swarm/issues/415) owns false whole-plan success with pending predecessors; [#418](https://github.com/EffortlessMetrics/shipper-swarm/issues/418) owns repeated workflow artifact continuation. Historical two-job recovery does not cover all of these paths.
-- **Live retry narration:** [Swarm #414](https://github.com/EffortlessMetrics/shipper-swarm/issues/414) records the original late and reordered notices. The candidate repair uses one ordered queue and live host delivery in both schedulers. `engine::tests::live_retry` proves process-visible notice-before-retry ordering, slow/disconnected consumers, and retained outcomes; `live_retry_cli_preserves_human_quiet_and_json_output` proves actual CLI stream behavior. This focused source and consumer proof does not establish a public-release claim.
+| Claim / original audit issue | Landed development correction | Proof still required |
+|---|---|---|
+| Effective registry determines graph and plan ID ([#409](https://github.com/EffortlessMetrics/shipper-swarm/issues/409)) | [PR #422](https://github.com/EffortlessMetrics/shipper-swarm/pull/422) merged; original mismatch regression retained | Full candidate and selected consumer recheck |
+| Receipt attributes the selected workspace ([#413](https://github.com/EffortlessMetrics/shipper-swarm/issues/413)) | [PR #420](https://github.com/EffortlessMetrics/shipper-swarm/pull/420) merged, including conflicting inherited Git settings | Exact release-authority consumer identity |
+| Unknown registry observations cannot become upload absence ([#402](https://github.com/EffortlessMetrics/shipper-swarm/issues/402)) | [PRs #429](https://github.com/EffortlessMetrics/shipper-swarm/pull/429) and [#430](https://github.com/EffortlessMetrics/shipper-swarm/pull/430) merged the unknown/Retryable reconciliation paths | Candidate compatibility/security/recovery matrix; no blind retry |
+| Retained-state admission and full-plan completion ([#403](https://github.com/EffortlessMetrics/shipper-swarm/issues/403), [#415](https://github.com/EffortlessMetrics/shipper-swarm/issues/415)) | [PRs #436](https://github.com/EffortlessMetrics/shipper-swarm/pull/436) and [#423](https://github.com/EffortlessMetrics/shipper-swarm/pull/423) merged | Actual independent cross-run second continuation under [#418](https://github.com/EffortlessMetrics/shipper-swarm/issues/418), then source-authority consumption |
+| Ordered visible retry notices ([#414](https://github.com/EffortlessMetrics/shipper-swarm/issues/414)) | [PR #450](https://github.com/EffortlessMetrics/shipper-swarm/pull/450) merged; actual core/CLI stream and retained-outcome controls passed | Full candidate and public-release claims remain separate |
+| Process output, timeout and cleanup ([#412](https://github.com/EffortlessMetrics/shipper-swarm/issues/412)) | Draining, typed timeout, bounded capture, and Unix cleanup fixes merged through #427/#435/#438/#444 | Linux proof is retained; native macOS qualification and Windows's remaining direct-child/inherited-EOF implementation gap need disposition |
+| Archived executable verification ([#417](https://github.com/EffortlessMetrics/shipper-swarm/issues/417)) | [PR #431](https://github.com/EffortlessMetrics/shipper-swarm/pull/431) merged synthetic/verifier controls | Actual optimized archive execution on four matching native platforms; independently repair [#454](https://github.com/EffortlessMetrics/shipper-swarm/issues/454)'s observed inherited-Git-context source binding |
+| Full current candidate ([#370](https://github.com/EffortlessMetrics/shipper-swarm/issues/370), [#255](https://github.com/EffortlessMetrics/shipper-swarm/issues/255)) | The required Rust small check passed; existing full hosted alternative is implemented | Exact-source broad/semver/package/compatibility/auth/release matrix, then freeze |
 
-An open fix or a merged implementation does not by itself restore an
-exact-candidate or public-release claim. Update the applicable limitation with
-the accepted source, focused regression and consumer proof when its owner
-closes the demonstrated gap. Release disposition remains with swarm #255 and
-the separate release-authority gate.
+The statuses above describe **development implementation**, not a support-tier
+promotion. Historical `stable` and focused rows retain only their cited
+subjects. The complete #255 candidate, release-authority #475–#479
+promotion/rehearsal/explicit GO/public proof, and observed consumer adoption
+are separate lifecycle outcomes. Do not equate a merged fix, synthetic archive,
+same-run transport, scheduled/cancelled run, or checked-in README with public
+0.5.0 availability.
 
 | Claim | Tier | Proof / Source | Owner |
 |---|---|---|---|
