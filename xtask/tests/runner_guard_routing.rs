@@ -16,6 +16,15 @@ fn guard_contract(source: &str) -> bool {
     let Some((_, permission)) = global.split_once("\npermissions:\n") else {
         return false;
     };
+    let Some((_, events)) = global.split_once("\n  pull_request:\n") else {
+        return false;
+    };
+    let Some((pull_request, remaining_events)) = events.split_once("\n  push:\n") else {
+        return false;
+    };
+    let Some((push, _)) = remaining_events.split_once("\n  workflow_dispatch:") else {
+        return false;
+    };
     let Some((nano, hosted)) = jobs.split_once("\n  no-bare-self-hosted-hosted:\n") else {
         return false;
     };
@@ -32,6 +41,9 @@ fn guard_contract(source: &str) -> bool {
         || !has_line(nano, "    steps: &routing_guard_steps")
         || !has_line(hosted, "    steps: *routing_guard_steps")
         || hosted.matches("steps:").count() != 1
+        // All shared steps are unconditional. A run line alone is not proof
+        // when a step-local condition can prevent its execution.
+        || nano.lines().any(|line| line.starts_with("        if:"))
     {
         return false;
     }
@@ -48,15 +60,19 @@ fn guard_contract(source: &str) -> bool {
         "        run: scripts/ci/no-bare-self-hosted.sh",
         "        run: python3 scripts/ci/normalize-routed-rust-result.py --test",
     ];
+    let paths = [
+        ".github/workflows/**",
+        "scripts/ci/no-bare-self-hosted.sh",
+        "scripts/ci/normalize-routed-rust-result.py",
+        "xtask/tests/runner_guard_routing.rs",
+    ];
     checks.iter().all(|line| has_line(nano, line))
-        && global
-            .matches("\"scripts/ci/normalize-routed-rust-result.py\"")
-            .count()
-            == 2
-        && global
-            .matches("\"xtask/tests/runner_guard_routing.rs\"")
-            .count()
-            == 2
+        && paths.iter().all(|path| {
+            let entry = format!("      - \"{path}\"");
+            [pull_request, push].iter().all(|event| {
+                event.lines().filter(|line| *line == entry.as_str()).count() == 1
+            })
+        })
 }
 
 #[test]
@@ -94,5 +110,49 @@ fn guard_contract_rejects_lost_checks_or_weakened_routes() {
         assert!(WORKFLOW.contains(from), "mutation must change actual input");
         let changed = WORKFLOW.replacen(from, to, 1);
         assert!(!guard_contract(&changed), "missed mutation: {from}");
+    }
+}
+
+#[test]
+fn guard_contract_rejects_disabled_proof_steps() {
+    for run in [
+        "        run: actionlint -shellcheck=\"\"",
+        "        run: scripts/ci/no-bare-self-hosted.sh",
+        "        run: python3 scripts/ci/normalize-routed-rust-result.py --test",
+    ] {
+        let from = format!("{run}\n");
+        assert!(WORKFLOW.contains(from.as_str()));
+        let to = format!("{run}\n        if: false\n");
+        let changed = WORKFLOW.replacen(from.as_str(), to.as_str(), 1);
+        assert!(has_line(&changed, run), "keep the original proof command");
+        assert!(!guard_contract(&changed), "disabled proof step: {run}");
+    }
+}
+
+#[test]
+fn guard_contract_rejects_paths_moved_between_events() {
+    let (before_push, after_push) = WORKFLOW.split_once("\n  push:\n").expect("push event");
+    for path in [
+        "scripts/ci/normalize-routed-rust-result.py",
+        "xtask/tests/runner_guard_routing.rs",
+    ] {
+        let entry = format!("      - \"{path}\"");
+        let doubled = format!("{entry}\n{entry}");
+        for (remove_from, add_to, removing_from_push) in [
+            (after_push, before_push, true),
+            (before_push, after_push, false),
+        ] {
+            assert!(remove_from.contains(entry.as_str()));
+            assert!(add_to.contains(entry.as_str()));
+            let removed = remove_from.replacen(entry.as_str(), "", 1);
+            let added = add_to.replacen(entry.as_str(), doubled.as_str(), 1);
+            let changed = if removing_from_push {
+                format!("{added}\n  push:\n{removed}")
+            } else {
+                format!("{removed}\n  push:\n{added}")
+            };
+            assert_eq!(changed.matches(entry.as_str()).count(), 2);
+            assert!(!guard_contract(&changed), "misplaced path: {path}");
+        }
     }
 }
