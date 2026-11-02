@@ -7,7 +7,19 @@ const WORKFLOW: &str = include_str!("../../.github/workflows/em-ci-routed-rust.y
 fn job_section<'a>(source: &'a str, job: &str) -> Option<&'a str> {
     let marker = format!("\n  {job}:\n");
     let (_, rest) = source.split_once(&marker)?;
-    Some(rest.split("\n  ").next().unwrap_or(rest))
+    // Find only a next top-level job (exactly two-space indentation).
+    // A split on "\\n  " would also match four-space job properties.
+    let end = rest
+        .match_indices("\n  ")
+        .find_map(|(offset, _)| {
+            let header = rest[offset + 3..].lines().next().unwrap_or("");
+            let name = header.strip_suffix(':')?;
+            (!name.is_empty()
+                && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'))
+            .then_some(offset)
+        })
+        .unwrap_or(rest.len());
+    Some(&rest[..end])
 }
 
 fn job_if(section: &str) -> Option<String> {
@@ -56,7 +68,9 @@ fn admission_correct(source: &str) -> bool {
         let Some(section) = job_section(source, producer) else {
             return false;
         };
-        if !section.contains("    needs: [route]\n")
+        let depends_on_route = section.contains("    needs: [route]\n")
+            || section.contains("    needs: [route,");
+        if !depends_on_route
             || !section.contains("needs.route.outputs.target")
             || section.contains("    if: always()")
         {
