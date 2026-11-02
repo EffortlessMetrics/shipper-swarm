@@ -63,10 +63,22 @@ def validate_approval(sha, tree, version):
 
 
 def source_identity(sha, tree):
-    require(command(["git", "rev-parse", "HEAD"], "source commit read") == sha, "checked-out source SHA differs from approval")
-    require(command(["git", "rev-parse", "HEAD^{tree}"], "source tree read") == tree, "checked-out source tree differs from approval")
-    command(["git", "diff", "--exit-code", "HEAD", "--"], "tracked source/Cargo.lock immutability check")
-    lock = Path("Cargo.lock")
+    # Bind Git observations and Cargo.lock to one checkout. Inherited Git
+    # directory/index/config overrides must not attest a different repository.
+    root = Path.cwd().resolve()
+    env = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+               GIT_NO_REPLACE_OBJECTS="1", GIT_OPTIONAL_LOCKS="0")
+    git = ["git", "-C", str(root), "-c", "core.fsmonitor=false"]
+    observed_root = command([*git, "rev-parse", "--show-toplevel"], "source root read", cwd=root, env=env)
+    require(Path(observed_root).resolve() == root, "source verification must run from the checkout root")
+    require(command([*git, "rev-parse", "HEAD"], "source commit read", cwd=root, env=env) == sha,
+            "checked-out source SHA differs from approval")
+    require(command([*git, "rev-parse", "HEAD^{tree}"], "source tree read", cwd=root, env=env) == tree,
+            "checked-out source tree differs from approval")
+    command([*git, "diff", "--no-ext-diff", "--no-textconv", "--exit-code", "HEAD", "--"],
+            "tracked source/Cargo.lock immutability check", cwd=root, env=env)
+    lock = root / "Cargo.lock"
     require(lock.is_file(), "approved checkout is missing Cargo.lock")
     return sha256_file(lock)
 

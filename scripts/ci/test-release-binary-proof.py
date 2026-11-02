@@ -378,6 +378,145 @@ class BinaryProof(unittest.TestCase):
         self.assertIn("artifacts/**/shipper-*.smoke.json", text)
 
 
+class SourceIdentityProof(unittest.TestCase):
+    """Real Git/source-binding controls; no Rust toolchain or native smoke claim."""
+
+    def setUp(self):
+        storage = tempfile.TemporaryDirectory(prefix="shipper-source-identity-")
+        self.addCleanup(storage.cleanup)
+        self.root = Path(storage.name)
+        self.env = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
+        self.env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+        self.helper = ROOT / "scripts/release/verify_binary.py"
+        self.repo = self.make_repo("approved")
+        self.other = self.make_repo("other")
+        self.sha = self.git(self.repo, "rev-parse", "HEAD")
+        self.tree = self.git(self.repo, "rev-parse", "HEAD^{tree}")
+        self.lock_digest = sha256((self.repo / "Cargo.lock").read_bytes())
+        self.assertNotEqual(self.sha, self.git(self.other, "rev-parse", "HEAD"))
+
+    def git(self, cwd, *args):
+        return checked(["git", *args], cwd=cwd, env=self.env)
+
+    def make_repo(self, name):
+        repo = self.root / name
+        repo.mkdir()
+        self.git(repo, "init", "--quiet")
+        for key, value in {"user.name": "Source identity fixture", "user.email": "fixture@example.invalid",
+                           "commit.gpgsign": "false"}.items():
+            self.git(repo, "config", key, value)
+        (repo / "Cargo.lock").write_text("version = 4\n", encoding="utf-8")
+        (repo / "source.txt").write_text(name + "\n", encoding="utf-8")
+        self.git(repo, "add", "Cargo.lock", "source.txt")
+        self.git(repo, "commit", "--quiet", "-m", "source identity fixture")
+        return repo
+
+    def redirected(self, repo):
+        return {**self.env, "GIT_DIR": str(repo / ".git"), "GIT_WORK_TREE": str(repo)}
+
+    def source(self, *, cwd=None, env=None, sha=None, tree=None):
+        # Run the actual helper in a fresh process; verify it leaves its own
+        # caller environment untouched rather than masking later checks.
+        script = ('import os,runpy,sys; before=dict(os.environ); '
+                  'm=runpy.run_path(sys.argv[1]); '
+                  'result=m["source_identity"](sys.argv[2],sys.argv[3]); '
+                  'assert dict(os.environ)==before; print(result)')
+        return subprocess.run([sys.executable, "-c", script, str(self.helper), sha or self.sha, tree or self.tree],
+                              cwd=cwd or self.repo, env=env or self.env, capture_output=True, text=True, timeout=30)
+
+    def assert_source_pass(self, result):
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), self.lock_digest)
+
+    def assert_source_refused(self, result, message):
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(message, result.stderr)
+
+    def test_clean_checkout_matches_approval(self):
+        self.assert_source_pass(self.source())
+
+    def test_wrong_checkout_cannot_borrow_approved_git_context(self):
+        self.assert_source_refused(self.source(cwd=self.other, env=self.redirected(self.repo)), "source SHA differs")
+
+    def test_correct_checkout_ignores_foreign_git_context_and_config(self):
+        env = {**self.redirected(self.other), "GIT_INDEX_FILE": str(self.other / ".git/index"),
+               "GIT_COMMON_DIR": str(self.other / ".git"),
+               "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.worktree", "GIT_CONFIG_VALUE_0": str(self.other)}
+        self.assert_source_pass(self.source(env=env))
+
+    def test_wrong_sha_and_tree_are_rejected(self):
+        for args, message in [({"sha": "0" * 40}, "source SHA differs"),
+                              ({"tree": "0" * 40}, "source tree differs")]:
+            with self.subTest(args=args):
+                self.assert_source_refused(self.source(**args), message)
+
+    def test_nonrepository_cannot_borrow_approved_git_context(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        shutil.copyfile(self.repo / "Cargo.lock", outside / "Cargo.lock")
+        self.assert_source_refused(self.source(cwd=outside, env=self.redirected(self.repo)), "source root read failed")
+
+    def test_nested_lockfile_is_not_the_checkout_root(self):
+        nested = self.repo / "nested"
+        nested.mkdir()
+        shutil.copyfile(self.repo / "Cargo.lock", nested / "Cargo.lock")
+        self.assert_source_refused(self.source(cwd=nested), "checkout root")
+
+    def test_unstaged_and_staged_changes_are_rejected(self):
+        for filename in ["source.txt", "Cargo.lock"]:
+            path = self.repo / filename
+            original = path.read_bytes()
+            for staged in [False, True]:
+                with self.subTest(filename=filename, staged=staged):
+                    path.write_bytes(original + b"changed\n")
+                    if staged:
+                        self.git(self.repo, "add", filename)
+                    self.assert_source_refused(self.source(), "immutability check failed")
+                    self.git(self.repo, "restore", "--source=HEAD", "--staged", "--worktree", "--", filename)
+
+    def test_detached_worktree_ignores_foreign_git_context(self):
+        worktree = self.root / "detached"
+        self.git(self.repo, "worktree", "add", "--quiet", "--detach", str(worktree), self.sha)
+        self.assertTrue((worktree / ".git").is_file())
+        self.assert_source_pass(self.source(cwd=worktree, env=self.redirected(self.other)))
+
+    def test_replacement_objects_do_not_change_approved_tree(self):
+        (self.repo / "source.txt").write_text("replacement\n", encoding="utf-8")
+        self.git(self.repo, "add", "source.txt")
+        self.git(self.repo, "commit", "--quiet", "-m", "replacement fixture")
+        replacement = self.git(self.repo, "rev-parse", "HEAD")
+        self.git(self.repo, "reset", "--hard", self.sha)
+        self.git(self.repo, "replace", self.sha, replacement)
+        self.assert_source_pass(self.source())
+
+    def aggregate_source(self, cwd, env):
+        # Reuse the established synthetic aggregate protocol. This executes the
+        # real CLI/validator, not any target's native Shipper executable.
+        artifacts = self.root / "artifacts"
+        for target in TARGETS:
+            archive = artifacts / f"shipper-{target}" / f"shipper-{target}.{TARGETS[target][0]}"
+            data = synthetic_header(target)
+            make_archive(archive, target, data)
+            receipt = BinaryProof.receipt(self, target, archive, data)
+            BinaryProof.write_receipt(self, archive, receipt)
+        output = self.root / "aggregate.json"
+        result = subprocess.run([sys.executable, str(self.helper), "aggregate", "--artifacts", str(artifacts),
+                                 "--approved-sha", self.sha, "--approved-tree", self.tree,
+                                 "--approved-version", VERSION, "--output", str(output)],
+                                cwd=cwd, env=env, capture_output=True, text=True, timeout=30)
+        return result, output
+
+    def test_actual_aggregate_accepts_bound_source_protocol(self):
+        result, output = self.aggregate_source(self.repo, self.env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["source_sha"], self.sha)
+
+    def test_actual_aggregate_refuses_foreign_source_without_receipt(self):
+        result, output = self.aggregate_source(self.other, self.redirected(self.repo))
+        self.assert_source_refused(result, "source SHA differs")
+        self.assertFalse(output.exists(), "wrong-checkout aggregate must not emit successful proof")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workflow", type=Path, default=WORKFLOW)
