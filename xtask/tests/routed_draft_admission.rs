@@ -6,7 +6,7 @@ const WORKFLOW: &str = include_str!("../../.github/workflows/em-ci-routed-rust.y
 
 fn job_section<'a>(source: &'a str, job: &str) -> Option<&'a str> {
     let marker = format!("\n  {job}:\n");
-    let (_, rest) = source.split_once(&marker)?;
+    let (_, rest) = source.split_once(marker.as_str())?;
     // Find only a next top-level job (exactly two-space indentation).
     // A split on "\\n  " would also match four-space job properties.
     let end = rest
@@ -74,18 +74,18 @@ fn admission_correct(source: &str) -> bool {
         ("Refuse untrusted fork PR without current Rust proof", "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository"),
     ] {
         let marker = format!("      - name: {step}\n");
-        let Some((_, rest)) = result_section.split_once(&marker) else {
+        let Some((_, rest)) = result_section.split_once(marker.as_str()) else {
             return false;
         };
         let section = rest.split("\n      - ").next().unwrap_or(rest);
-        if !section.contains(&format!("        if: {condition}"))
+        if !section.contains(format!("        if: {condition}").as_str())
             || !section.contains("          exit 1")
         {
             return false;
         }
     }
-    if !result_section.contains(&format!("      - uses: actions/checkout@v7.0.1\n        if: {ready}"))
-        || !result_section.contains(&format!("      - name: Normalize routed result\n        if: {ready}"))
+    if !result_section.contains(format!("      - uses: actions/checkout@v7.0.1\n        if: {ready}").as_str())
+        || !result_section.contains(format!("      - name: Normalize routed result\n        if: {ready}").as_str())
     {
         return false;
     }
