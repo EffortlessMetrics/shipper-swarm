@@ -549,6 +549,34 @@ class SourceIdentityProof(unittest.TestCase):
         self.assert_source_refused(self.source(sha=sha, tree=tree),
                                    "approved Cargo.lock must not be a symlink")
 
+    @unittest.skipIf(os.name != "posix", "POSIX-only Git clean-filter fixture")
+    def test_raw_other_source_bytes_cannot_be_hidden_by_clean_filter(self):
+        # Git diff HEAD succeeds because the filter restores the committed
+        # source bytes. The actual working file must still be rejected.
+        cleaner = self.repo / ".git" / "clean-mask.sh"
+        cleaner.write_text('#!/bin/sh\nprintf "approved\\n"\n', encoding="utf-8")
+        cleaner.chmod(0o755)
+        self.git(self.repo, "config", "filter.mask.clean", str(cleaner))
+        (self.repo / ".git" / "info" / "attributes").write_text(
+            "source.txt filter=mask\n", encoding="utf-8"
+        )
+        (self.repo / "source.txt").write_text("UNAPPROVED_SOURCE();\n", encoding="utf-8")
+        self.git(self.repo, "diff", "--exit-code", "HEAD", "--", "source.txt")
+        self.git(self.repo, "diff", "--cached", "--exit-code", "HEAD", "--", "source.txt")
+        self.assert_source_refused(self.source(), "tracked source raw bytes differ from approved Git tree")
+
+    @unittest.skipIf(os.name != "posix", "POSIX-only Git symlink fixture")
+    def test_tracked_source_symlink_is_refused_even_if_checkout_is_clean(self):
+        original = (self.repo / "source.txt").read_bytes()
+        (self.repo / "source.txt").unlink()
+        (self.repo / "source-target.txt").write_bytes(original)
+        (self.repo / "source.txt").symlink_to("source-target.txt")
+        self.git(self.repo, "add", "source.txt", "source-target.txt")
+        self.git(self.repo, "commit", "--quiet", "-m", "symlinked tracked source")
+        sha = self.git(self.repo, "rev-parse", "HEAD")
+        tree = self.git(self.repo, "rev-parse", "HEAD^{tree}")
+        self.assert_source_refused(self.source(sha=sha, tree=tree), "unsupported tracked source file mode")
+
     def test_detached_worktree_ignores_foreign_git_context(self):
         worktree = self.root / "detached"
         self.git(self.repo, "worktree", "add", "--quiet", "--detach", str(worktree), self.sha)

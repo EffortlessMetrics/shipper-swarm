@@ -103,6 +103,41 @@ def source_identity(sha, tree):
     raw_lock = command([*git, "hash-object", "--no-filters", "--", "Cargo.lock"],
                        "raw Cargo.lock blob hash", cwd=root, env=env)
     require(raw_lock == approved_lock, "Cargo.lock bytes differ from the approved blob")
+    # Git diff may apply clean filters and normalize other tracked files,
+    # so its success does not prove that their actual bytes match HEAD.
+    # One binary tree listing plus raw streaming hashes avoids per-file Git
+    # subprocesses. Release source intentionally refuses tracked symlinks.
+    object_format = command([*git, "rev-parse", "--show-object-format"],
+                            "approved source object format", cwd=root, env=env)
+    require(object_format in ("sha1", "sha256"), "unsupported Git object format")
+    try:
+        listing = subprocess.run([*git, "ls-tree", "-rz", "HEAD"],
+                                 cwd=root, env=env, capture_output=True, timeout=20)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ValueError(f"approved source tree listing could not complete: {error}") from error
+    require(listing.returncode == 0, "approved source tree listing failed")
+    for entry in listing.stdout.split(b"\0"):
+        if not entry:
+            continue
+        header, sep, raw_path = entry.partition(b"\t")
+        require(sep == b"\t" and len(header.split()) == 3,
+                "approved source tree entry is malformed")
+        mode, kind, approved_object = header.split()
+        relative = os.fsdecode(raw_path)
+        require(kind == b"blob" and mode in (b"100644", b"100755"),
+                f"unsupported tracked source file mode: {relative!r}")
+        source_file = root / relative
+        require(not source_file.is_symlink() and source_file.is_file(),
+                f"tracked source must be a regular file: {relative!r}")
+        require(source_file.resolve().is_relative_to(root),
+                f"tracked source escapes checkout: {relative!r}")
+        source_hash = hashlib.new(object_format)
+        source_hash.update(b"blob " + str(source_file.stat().st_size).encode() + b"\0")
+        with source_file.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                source_hash.update(chunk)
+        require(source_hash.hexdigest().encode("ascii") == approved_object,
+                f"tracked source raw bytes differ from approved Git tree: {relative!r}")
     return sha256_file(lock)
 
 
