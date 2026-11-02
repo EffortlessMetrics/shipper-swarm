@@ -146,11 +146,11 @@ fn draft_admission_tests_reject_realistic_regressions() {
     // Step-local cleanup (e.g. cpx42) may use always() safely: only a
     // producer's JOB-level unconditional if: always() bypasses the router.
     let job_marker = "  rust_small_cpx42:\n";
-    let job_guard = "    if: needs.route.outputs.target == 'cpx42'";
+    let job_guard = "    if: needs.route.outputs.target == 'cpx42' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)";
     assert!(WORKFLOW.contains("        if: always()"), "real cleanup control exists");
     let unconditional_job = WORKFLOW.replacen(
         job_guard,
-        "    if: always() # bypass route: 'cpx42'",
+        "    if: always()",
         1,
     );
     assert!(unconditional_job.contains(job_marker));
