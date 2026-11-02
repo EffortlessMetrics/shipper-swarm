@@ -49,8 +49,14 @@ fn guard_contract(source: &str) -> bool {
         "        run: python3 scripts/ci/normalize-routed-rust-result.py --test",
     ];
     checks.iter().all(|line| has_line(nano, line))
-        && global.matches("\"scripts/ci/normalize-routed-rust-result.py\"").count() == 2
-        && global.matches("\"xtask/tests/runner_guard_routing.rs\"").count() == 2
+        && global
+            .matches("\"scripts/ci/normalize-routed-rust-result.py\"")
+            .count()
+            == 2
+        && global
+            .matches("\"xtask/tests/runner_guard_routing.rs\"")
+            .count()
+            == 2
 }
 
 #[test]
@@ -62,8 +68,14 @@ fn swarm_guard_shares_the_governed_checks_without_waiting_for_nano() {
 fn guard_contract_rejects_lost_checks_or_weakened_routes() {
     let mutations = [
         ("    runs-on: ubuntu-24.04", "    runs-on: self-hosted"),
-        ("github.repository == 'EffortlessMetrics/shipper-swarm'", "true"),
-        ("github.repository != 'EffortlessMetrics/shipper-swarm'", "true"),
+        (
+            "github.repository == 'EffortlessMetrics/shipper-swarm'",
+            "true",
+        ),
+        (
+            "github.repository != 'EffortlessMetrics/shipper-swarm'",
+            "true",
+        ),
         (TRUST, "true"),
         ("contents: read", "contents: write"),
         ("    steps: *routing_guard_steps", "    steps: []"),
@@ -72,7 +84,10 @@ fn guard_contract_rejects_lost_checks_or_weakened_routes() {
         ("sha256sum --check --status", "true"),
         ("run: actionlint -shellcheck=\"\"", "run: true"),
         ("run: scripts/ci/no-bare-self-hosted.sh", "run: true"),
-        ("normalize-routed-rust-result.py --test", "normalize-routed-rust-result.py"),
+        (
+            "normalize-routed-rust-result.py --test",
+            "normalize-routed-rust-result.py",
+        ),
         ("em-ci, cx23, ci-nano, trusted-pr", "em-ci, cx23, ci-nano"),
     ];
     for (from, to) in mutations {
