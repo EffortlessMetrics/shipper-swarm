@@ -27,6 +27,8 @@ make stronger claims than this file supports.
 | experimental | Behavior exists, but is not yet a user promise. |
 | planned | Roadmap intent only. |
 
+## Release Lifecycle
+
 Support maturity and release lifecycle are separate axes. A `stable` command
 claim means the named behavior has implementation and proof; it does not prove
 that an unreleased source snapshot is available from crates.io. Use these
@@ -42,7 +44,7 @@ lifecycle qualifiers when a claim depends on an artifact:
 Repository source, a README, a green swarm run, or a `stable/internal` row must
 never be used alone to advance a claim to a later lifecycle state.
 
-## Claim Map
+## Development Evidence
 
 ### October 26 audit and November 2 development disposition
 
@@ -74,6 +76,8 @@ are separate lifecycle outcomes. Do not equate a merged fix, synthetic archive,
 same-run transport, scheduled/cancelled run, or checked-in README with public
 0.5.0 availability.
 
+## Claim Map
+
 | Claim | Tier | Proof / Source | Owner |
 |---|---|---|---|
 | Facade / CLI / core crate boundary | stable/internal | `cargo xtask package-surface` fails if `shipper` stops depending on `shipper-cli`/`shipper-core`, `shipper-cli` stops depending on `shipper-core`, `shipper-core` has any normal/dev/build dependency on `shipper`/`shipper-cli`/`clap`/`indicatif`, or `xtask` is not the only private workspace package; see `docs/architecture.md` and crate manifests | architecture |
@@ -89,7 +93,7 @@ same-run transport, scheduled/cancelled run, or checked-in README with public
 | Mutation PR lane | advisory | `cargo xtask mutants-pr --changed`; maintainer-controlled opt-in on PRs labeled `mutation` or `full-ci`; `.github/workflows/mutation.yml`; `policy/ci-trigger-labels.toml` plus `cargo xtask ci-labels check`/`check-live` own taxonomy and drift proof | tests |
 | `shipper-swarm` routed PR gate | stable/internal | `docs/ci/test-evidence-lanes.md`; `docs/status/SWARM_OPERATION.md`; `.github/workflows/em-ci-routed-rust.yml`; `gh api repos/EffortlessMetrics/shipper-swarm/branches/main/protection/required_status_checks` shows only `Shipper Rust Small Result` is required; `gh api repos/EffortlessMetrics/shipper-swarm --jq '{allow_squash_merge,allow_merge_commit,allow_rebase_merge,allow_auto_merge,delete_branch_on_merge}'` shows squash-only normal PR merges with auto-merge and branch deletion; routed Rust is the meaningful required gate, while substantive review is performed through the active Codex, Claude, or human route because Factory Droid is retired; current swarm policy blocks silent GitHub-hosted fallback and must not be inferred for `EffortlessMetrics/shipper` release-authority syncs | release/ci |
 | 0.4.0 release readiness proof | stable | `docs/release/0.4.0-readiness.md` records the `0.4.0` version/commit/plan/preflight/policy/install/dry-run/rehearsal proof, tag `v0.4.0`, Release workflow run `26141754574`, final `.shipper` evidence, and public crates.io install smoke; Trusted Publishing default and the missing `x86_64-apple-darwin` binary asset remain explicit carry-over | release/ci |
-| Ambiguous publish reconciliation | stable | Historical/focused contract proof: `cargo test -p shipper-core reconcile --lib`; `cargo test -p shipper-core state --lib`; `cargo test -p shipper-cli --test bdd_publish`; `PublishReconciling` / `PublishReconciled` events. Current candidate is limited by [swarm #402](https://github.com/EffortlessMetrics/shipper-swarm/issues/402) as described above; do not project unconditional stop-on-unknown from this row. | engine |
+| Ambiguous publish reconciliation | stable | Historical/focused contract proof: `cargo test -p shipper-core reconcile --lib`; `cargo test -p shipper-core state --lib`; `cargo test -p shipper-cli --test bdd_publish`; `PublishReconciling` / `PublishReconciled` events. The [#402](https://github.com/EffortlessMetrics/shipper-swarm/issues/402) correction landed through [PR #429](https://github.com/EffortlessMetrics/shipper-swarm/pull/429) and [PR #430](https://github.com/EffortlessMetrics/shipper-swarm/pull/430); retain focused refusal controls in [#255](https://github.com/EffortlessMetrics/shipper-swarm/issues/255)'s exact-candidate proof. This row does not qualify public 0.5.0. | engine |
 | Rehearsal configured-authority isolation | stable/internal | `cargo test -p shipper-registry rehearsal_separation --locked`; `cargo test -p shipper-config rehearsal_authority_validation --locked`; `cargo test -p shipper-core run_rehearsal_rejects --locked`; `cargo test -p shipper-cli --test e2e_rehearse rehearsal_authority --locked`; rejects same names, live API/index family overlap, and crates.io-family configured hosts before rehearsal state/network/publish-smoke side effects; does not prove DNS, resolved-address, namespace, or administrative isolation and is not publication evidence | engine/cli |
 | crates.io first-publish backoff profile | stable | `cargo test -p shipper-core runtime::execution --lib`; `cargo test -p shipper-core publish --lib`; `RegistryProfile::crates_io()` | engine |
 | Retry-After retry floor | stable | `cargo test -p shipper-core retry_after --lib`; `cargo test -p shipper-core publish --lib`; raw cargo stderr/stdout retry signal path | engine |
