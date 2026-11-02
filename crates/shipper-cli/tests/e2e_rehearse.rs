@@ -1149,3 +1149,6 @@ fn live_runner_interruption_resume_downloaded_artifact_preserves_invariants() {
         "crate-c should be attempted once before interruption and once during resume"
     );
 }
+
+#[path = "recovery/cross_run.rs"]
+mod cross_run;
