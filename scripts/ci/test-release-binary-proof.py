@@ -286,7 +286,7 @@ class BinaryProof(unittest.TestCase):
         if self.native_target.endswith("linux-gnu"):
             struct.pack_into("<H", data, 18, 183)
         elif self.native_target.endswith("apple-darwin"):
-            struct.pack_into("<I", data, 4, 0)
+            struct.pack_into("<I", data, 4, 0x0100000C if self.native_target.startswith("x86_64") else 0x01000007)
         else:
             struct.pack_into("<H", data, struct.unpack_from("<I", data, 60)[0] + 4, 0xAA64)
         self.assert_refused(self.smoke(data), "wrong architecture")
@@ -488,6 +488,25 @@ class SourceIdentityProof(unittest.TestCase):
         self.git(self.repo, "reset", "--hard", self.sha)
         self.git(self.repo, "replace", self.sha, replacement)
         self.assert_source_pass(self.source())
+
+    @unittest.skipIf(os.name != "posix", "POSIX-only Git helper shell fixture")
+    def test_repository_helpers_cannot_hide_changed_source(self):
+        helper = self.repo / "helper.sh"
+        marker = self.repo / "helper.sh.marker"
+        helper.write_text('#!/bin/sh\nprintf invoked >> "$0.marker"\nprintf "constant\\n"\n', encoding="utf-8")
+        helper.chmod(0o755)
+        attributes = self.repo / ".git/info/attributes"
+        attributes.parent.mkdir(exist_ok=True)
+        attributes.write_text("source.txt diff=helper\n", encoding="utf-8")
+        for key in ["diff.external", "core.fsmonitor", "diff.helper.textconv"]:
+            self.git(self.repo, "config", key, "./helper.sh")
+        (self.repo / "source.txt").write_text("changed source\n", encoding="utf-8")
+        self.assert_source_refused(self.source(), "immutability check failed")
+        self.assertFalse(marker.exists(), "source proof must not execute repository Git helpers")
+        # A real Git control proves the configured helper is reachable; absence
+        # of a marker above must not be explained by a broken shell fixture.
+        self.git(self.repo, "diff", "--ext-diff", "HEAD", "--", "source.txt")
+        self.assertTrue(marker.exists(), "unisolated Git control must execute the helper")
 
     def aggregate_source(self, cwd, env):
         # Reuse the established synthetic aggregate protocol. This executes the
