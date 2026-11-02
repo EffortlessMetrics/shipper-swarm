@@ -59,7 +59,34 @@ fn admission_correct(source: &str) -> bool {
         None => return false,
     };
     let allowed = "github.event_name != 'pull_request' || (github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository)";
-    if route != allowed || result != format!("always() && ({allowed})") {
+    // The normalized required job must run even when the router was
+    // skipped; a skipped required job is treated as a success by GitHub.
+    if route != allowed || result != "always()" {
+        return false;
+    }
+    let result_section = match job_section(source, "result") {
+        Some(value) => value,
+        None => return false,
+    };
+    let ready = "github.event_name != 'pull_request' || (github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository)";
+    for (step, condition) in [
+        ("Refuse draft PR without current Rust proof", "github.event_name == 'pull_request' && github.event.pull_request.draft"),
+        ("Refuse untrusted fork PR without current Rust proof", "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository"),
+    ] {
+        let marker = format!("      - name: {step}\n");
+        let Some((_, rest)) = result_section.split_once(&marker) else {
+            return false;
+        };
+        let section = rest.split("\n      - ").next().unwrap_or(rest);
+        if !section.contains(&format!("        if: {condition}"))
+            || !section.contains("          exit 1")
+        {
+            return false;
+        }
+    }
+    if !result_section.contains(&format!("      - uses: actions/checkout@v7.0.1\n        if: {ready}"))
+        || !result_section.contains(&format!("      - name: Normalize routed result\n        if: {ready}"))
+    {
         return false;
     }
     // All expensive producers depend on route, which is deliberately skipped
@@ -107,12 +134,14 @@ fn draft_admission_tests_reject_realistic_regressions() {
     let missing_draft = WORKFLOW.replace("github.event.pull_request.draft == false && ", "");
     assert!(!admission_correct(&missing_draft), "missing draft guard must not pass");
 
-    let missing_result_guard = WORKFLOW.replacen(
-        "      (github.event_name != 'pull_request' || (github.event.pull_request.draft == false && ",
-        "      (github.event_name != 'pull_request' || (",
-        1,
+    let missing_draft_refusal = WORKFLOW.replacen("          exit 1", "          exit 0", 1);
+    assert!(!admission_correct(&missing_draft_refusal), "required result must actively refuse draft");
+
+    let missing_fork_refusal = WORKFLOW.replace(
+        "      - name: Refuse untrusted fork PR without current Rust proof",
+        "      - name: Dropped untrusted fork guard",
     );
-    assert!(!admission_correct(&missing_result_guard), "always() result must not run on draft");
+    assert!(!admission_correct(&missing_fork_refusal), "untrusted fork must remain refused");
 
     let missing_fork_guard = WORKFLOW.replace(
         "github.event.pull_request.head.repo.full_name == github.repository",

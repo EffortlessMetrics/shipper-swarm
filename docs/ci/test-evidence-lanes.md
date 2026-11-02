@@ -37,15 +37,20 @@ this inventory aligned when workflows are added, removed, or retargeted.
 
 ## Required PR Gate
 
-Draft pull requests are review-only: creating or updating a draft does not
-admit the routed Rust producer or its always-running normalized Result.
-Marking the same-repository PR ready for review triggers the complete required
-check on that source, including when no commit changes during the transition.
-After a subsequent ready PR update, use its new exact-head required Result;
-a prior skipped draft check is never accepted as proof. Pushes to main, merge
-groups, and approved manual dispatches remain independent of PR draft state.
-Already-running checks are not retroactively cancelled when a PR becomes draft.
-The regression is `cargo test -p xtask --test routed_draft_admission --locked`.
+Draft pull requests are review-only for the expensive Rust producer:
+creating or editing a draft skips router/producer work. The tiny hosted
+`Shipper Rust Small Result` intentionally executes and **fails closed** with
+an actionable draft/not-qualified message. GitHub treats skipped required jobs
+as successful, so the required result must not be skipped on a draft: a skipped
+result could otherwise be mistaken for mergeable proof after the PR becomes
+ready. Fork PRs without an eligible trusted producer likewise fail this result.
+Marking the same-repository PR ready for review triggers a complete new required
+producer/result on that source, including when the commit SHA is unchanged.
+After any ready-PR update, require its latest exact-head successful Result; a
+draft-time failure never qualifies the candidate. Push, merge-group and manual
+routes retain their prior behavior. Already-running jobs are not retroactively
+cancelled when a PR becomes draft. The regression is
+`cargo test -p xtask --test routed_draft_admission --locked`.
 
 `em-ci-routed-rust.yml` is the required PR workflow. Branch protection requires
 only the normalized `Shipper Rust Small Result` check.

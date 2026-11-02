@@ -536,20 +536,34 @@ jobs:
       - rust_small_cpx42
       - rust_small_cx53
       - rust_small_github
-    if: |
-      always() &&
-      (github.event_name != 'pull_request' || (github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository))
-    # A draft PR must not run an always() normalizer over a skipped route.
-    # Being marked ready triggers a new real required result on the same SHA.
+    if: always()
+    # Keep the required check actively fail-closed for draft/fork PRs.
+    # GitHub treats a skipped required job as success, so skipping this
+    # normalizer would let a draft result masquerade as ready-PR proof.
+    # Ready-for-review re-runs the genuine producer and normalization.
     # Result normalization is a small, non-secret reporting step. It must
     # remain available when every optional self-hosted execution lane is
     # offline, otherwise branch protection can never observe the fallback.
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - name: Refuse draft PR without current Rust proof
+        if: github.event_name == 'pull_request' && github.event.pull_request.draft
+        run: |
+          echo '::error::Draft PR is not qualified. Mark ready for review to run required Rust proof.'
+          exit 1
+
+      - name: Refuse untrusted fork PR without current Rust proof
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+        run: |
+          echo '::error::Untrusted fork PR has no eligible trusted Rust proof.'
+          exit 1
+
       - uses: actions/checkout@v7.0.1
+        if: github.event_name != 'pull_request' || (github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository)
 
       - name: Normalize routed result
+        if: github.event_name != 'pull_request' || (github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository)
         env:
           TARGET: ${{ needs.route.outputs.target }}
           REASON: ${{ needs.route.outputs.reason }}
