@@ -152,16 +152,18 @@ fn fresh_process_phases_require_the_immediate_incomplete_predecessor() {
     let seed = run_phase(&root, &address, "seed");
     assert!(seed.status.success(), "seed output: {seed:?}");
     let state_dir = root.join(".shipper");
-    let seed_bytes = checkpoint_bytes(&state_dir);
+    // Refusal must preserve the *whole* prepared workspace, not only
+    // .shipper/ evidence: config, manifests and fake Cargo are also immutable.
+    let seed_bytes = checkpoint_bytes(&root);
 
     // A stale seed cannot stand in for the second run's checkpoint.
     let stale = run_phase(&root, &address, "finish");
     assert!(!stale.status.success());
     assert!(String::from_utf8_lossy(&stale.stderr).contains("immediate predecessor"));
-    assert_eq!(checkpoint_bytes(&state_dir), seed_bytes);
+    assert_eq!(checkpoint_bytes(&root), seed_bytes);
     let unknown = run_phase(&root, &address, "unknown");
     assert!(!unknown.status.success());
-    assert_eq!(checkpoint_bytes(&state_dir), seed_bytes);
+    assert_eq!(checkpoint_bytes(&root), seed_bytes);
 
     let retry = run_phase(&root, &address, "retry");
     assert!(retry.status.success(), "retry output: {retry:?}");
