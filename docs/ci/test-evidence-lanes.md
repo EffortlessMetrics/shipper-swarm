@@ -377,3 +377,15 @@ Resolved follow-up:
   repos/EffortlessMetrics/shipper-swarm/branches/main/protection/required_status_checks`
   returned only `Shipper Rust Small Result`. The architecture guard still runs
   as PR/push evidence, but it is not a separate required status check.
+
+### Review-ready policy proof
+
+On non-draft same-repository PRs to main, including same-SHA
+`ready_for_review` transitions, `CI` executes only its original hosted
+`policy_steps` job. It runs seven blocking allowlist commands, advisory
+document contracts, and the retained policy report. The other eleven
+hosted jobs require deliberate twelve-job manual dispatch, and all normal
+self-hosted full-CI jobs are excluded from PR events. Skipped draft/fork
+policy jobs are **not** successful proof. The exact source checker is
+`python3 scripts/ci/check-full-ci-hosted.py --test`.
+Staged `cargo precommit` requires a real authoring index and is not claimed.

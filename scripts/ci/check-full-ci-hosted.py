@@ -16,7 +16,14 @@ HOSTED = (
     "github.event_name == 'workflow_dispatch' && "
     "inputs.runner_route == 'github-hosted'"
 )
-DEFAULT = "${{ !(" + HOSTED + ") }}"
+REVIEW = (
+    "github.repository == 'EffortlessMetrics/shipper-swarm' && "
+    "github.event_name == 'pull_request' && "
+    "github.event.pull_request.draft == false && "
+    "github.event.pull_request.head.repo.full_name == github.repository"
+)
+DEFAULT = "${{ github.event_name != 'pull_request' && !(" + HOSTED + ") }}"
+POLICY = "${{ (" + HOSTED + ") || (" + REVIEW + ") }}"
 MANUAL = "${{ " + HOSTED + " }}"
 JOBS = {
     "lint": ("cx43", 30),
@@ -80,7 +87,8 @@ def check(text):
     expected = set(JOBS) | {job + "-hosted" for job in JOBS}
     require(set(jobs) == expected, "full CI must retain exactly twelve job pairs")
     trigger = document.get("on", "")
-    require("  pull_request:" not in trigger, "full CI must not acquire a PR trigger")
+    require("  pull_request:\n" in trigger and "branches: [main]" in trigger and "types: [opened, synchronize, reopened, ready_for_review]" in trigger,
+            "review-ready PR policy trigger must be present")
     require("default: self-hosted" in trigger, "manual input must default to self-hosted")
     require("type: choice" in trigger and "- github-hosted" in trigger, "manual route must be an explicit choice")
     require(document.get("permissions", "").strip() == "contents: read", "CI must retain read-only permissions")
@@ -94,9 +102,10 @@ def check(text):
     for job, (capacity, timeout) in JOBS.items():
         original = sections(jobs.get(job, ""), 4)
         hosted = sections(jobs.get(job + "-hosted", ""), 4)
-        gate = "${{ !(" + HOSTED + ") && (" + PREDICATES[job] + ") }}" if job in PREDICATES else DEFAULT
+        gate = "${{ github.event_name != 'pull_request' && !(" + HOSTED + ") && (" + PREDICATES[job] + ") }}" if job in PREDICATES else DEFAULT
         require(scalar(original.get("if", ""), aliases) == gate, f"{job}: default route/predicate changed")
-        require(scalar(hosted.get("if", ""), aliases) == MANUAL, f"{job}: hosted route must require explicit swarm dispatch")
+        require(scalar(hosted.get("if", ""), aliases) == (POLICY if job == "policy" else MANUAL),
+                f"{job}: hosted route must retain explicit manual or trusted ready-PR policy admission")
         if job == "lint":
             require(original.get("if", "").startswith("&default_runners "), "default route anchor must exist")
             require(hosted.get("if", "").startswith("&manual_hosted "), "manual route anchor must exist")
@@ -122,6 +131,22 @@ def check(text):
         for cache in re.findall(r"^\s+(?:key|restore-keys): (.+)$", original.get("steps", ""), re.M):
             require(cache.startswith(CACHE_PREFIX), f"{job}: hosted cache must have its own namespace")
 
+    # The ready-PR lane must use the original policy-step authority.
+    required_policy = [
+        "run: cargo xtask check-file-policy --mode blocking-allowlist",
+        "run: cargo xtask check-generated --mode blocking-allowlist",
+        "run: cargo xtask check-executable-files --mode blocking-allowlist",
+        "run: cargo xtask check-dependency-surfaces --mode blocking-allowlist",
+        "run: cargo xtask check-workflow-surfaces --mode blocking-allowlist",
+        "run: cargo xtask check-process-policy --mode blocking-allowlist",
+        "run: cargo xtask check-network-policy --mode blocking-allowlist",
+        "run: cargo xtask check-doc-contracts --mode advisory",
+        "run: cargo xtask policy-report",
+    ]
+    policy_steps = sections(jobs.get("policy", ""), 4).get("steps", "")
+    for command in required_policy:
+        require(policy_steps.count(command) == 1, f"required policy command lost: {command}")
+
     # Pin the high-cost/deep proof that a nominally equivalent fallback might omit.
     for witness in [
         "cargo nextest run --workspace --all-features --profile ci",
@@ -136,7 +161,15 @@ def check(text):
 
 
 def test_mutations(text):
+    # These mutations change the actual workflow, not a mock expression.
+    D1_REMOVED = DEFAULT.replace("github.event_name != 'pull_request' && ", "")
     mutants = [
+        ("readiness event removed", "ready_for_review", "converted_to_draft"),
+        ("default PR route leaked", DEFAULT, D1_REMOVED),
+        ("draft policy allowed", "github.event.pull_request.draft == false", "true"),
+        ("fork policy allowed", "github.event.pull_request.head.repo.full_name == github.repository", "true"),
+        ("policy check removed", "run: cargo xtask check-process-policy --mode blocking-allowlist", "run: true"),
+        ("review policy disabled", POLICY, MANUAL),
         ("default route", "default: self-hosted", "default: github-hosted"),
         ("automatic hosted", MANUAL, MANUAL.replace("'workflow_dispatch'", "'push'")),
         ("unscoped hosted", "runs-on: ubuntu-24.04", "runs-on: self-hosted"),
