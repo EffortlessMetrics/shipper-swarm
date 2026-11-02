@@ -27,7 +27,7 @@ this inventory aligned when workflows are added, removed, or retargeted.
 | `architecture-guard.yml` | `push` + `pull_request` | Every PR | Advisory in swarm branch protection |
 | `runner-routing-guard.yml` | `push` + path-scoped `pull_request` + `workflow_dispatch` | Workflow routing policy guard | Advisory |
 | `em-ci-routed-rust.yml` | `push` + `pull_request` + `merge_group` + `workflow_dispatch` | Required PR gate | Required via `Shipper Rust Small Result` |
-| `ci.yml` | `push` + `workflow_dispatch` + weekly `schedule` | Main/manual full-CI evidence + weekly heavy proptest | Required when triggered; not the default PR gate |
+| `ci.yml` | `push` + `workflow_dispatch` + weekly `schedule` + trusted review-ready `pull_request` | Main/manual full CI + scoped hosted PR policy | Full CI on main/manual; PR policy evidence is not the default required Rust gate |
 | `coverage.yml` | `push` (main) + `pull_request` + `workflow_dispatch` | Advisory / labeled | Advisory |
 | `fuzz.yml` | path-scoped `push` + `pull_request`; nightly `schedule` + `workflow_dispatch` | Compile all fuzz binaries; execute selected campaigns only nightly/manually | Advisory |
 | `live-runner-interruption-rehearsal.yml` | `workflow_dispatch` + path-scoped same-repository `pull_request` | Safe two-job artifact interruption/resume proof; automatic GitHub-hosted route in swarm | Both selected jobs required when triggered |
@@ -103,8 +103,9 @@ path dependencies resolved through version requirements — the check the
 resolves path deps directly.
 
 `cargo fmt --check` and `cargo clippy` run here — not only in `ci.yml`'s
-`lint` job — because `ci.yml` has no `pull_request` trigger. Without them
-on this lane, lint regressions are only caught after merge.
+`lint` job — because its narrow PR trigger now runs **only the hosted policy**
+job, not full-CI lint. Without these commands in Rust-small, lint regressions
+would reach main before full CI catches them.
 
 The GitHub-hosted fallback lane runs the same command list. It used to
 prove less (`cargo check` + `--help` only); that was reverted after a
@@ -113,10 +114,12 @@ gate. Only the runner differs.
 
 ## `ci.yml` — Full-CI Lane Map
 
-`ci.yml` is the broad full-CI workflow. It no longer runs on every PR. It runs
-on pushes to `main`, manual `workflow_dispatch`, and Sunday at 03:00 UTC
-(`0 3 * * 0`). The [workflow source](../../.github/workflows/ci.yml) owns the
-predicates and commands. The table names its default Linux self-hosted jobs;
+`ci.yml` runs broad full CI on pushes to `main`, manual `workflow_dispatch`,
+and Sunday at 03:00 UTC (`0 3 * * 0`). It also has a **narrow** non-draft,
+trusted PR event solely for the existing hosted policy job; none of the twelve
+full-CI default/manual suites becomes a PR-triggered job. The
+[workflow source](../../.github/workflows/ci.yml) owns these predicates and
+commands. The table names its default Linux self-hosted jobs;
 explicit manual hosted selection substitutes the counterparts described below.
 Every selected job must complete successfully before its configured scope can
 be claimed as passing evidence.
