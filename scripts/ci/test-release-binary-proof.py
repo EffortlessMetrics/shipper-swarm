@@ -523,6 +523,32 @@ class SourceIdentityProof(unittest.TestCase):
                         self.git(self.repo, "update-index", "--no-skip-worktree", "--", filename)
                         path.write_bytes(original)
 
+    @unittest.skipIf(os.name != "posix", "POSIX shell clean-filter fixture")
+    def test_raw_lock_bytes_refuse_clean_filter_masking(self):
+        # HEAD and the index contain the original lock; the local clean
+        # filter falsely normalizes modified bytes back to the approved text.
+        self.git(self.repo, "config", "filter.mask.clean", "sh -c 'printf \"version = 4\\\\n\"'")
+        attr = self.repo / ".git" / "info" / "attributes"
+        attr.parent.mkdir(exist_ok=True)
+        attr.write_text("Cargo.lock filter=mask\\n", encoding="utf-8")
+        lock = self.repo / "Cargo.lock"
+        lock.write_text("version = 4\\n# changed raw bytes\\n", encoding="utf-8")
+        self.assert_source_refused(self.source(), "Cargo.lock bytes differ from the approved blob")
+
+    @unittest.skipIf(os.name != "posix", "POSIX symlink fixture")
+    def test_approved_symlink_lockfile_is_refused(self):
+        lock = self.repo / "Cargo.lock"
+        target = self.repo / "real-lockfile"
+        target.write_bytes(lock.read_bytes())
+        lock.unlink()
+        lock.symlink_to(target.name)
+        self.git(self.repo, "add", "Cargo.lock", "real-lockfile")
+        self.git(self.repo, "commit", "--quiet", "-m", "symlink lockfile witness")
+        sha = self.git(self.repo, "rev-parse", "HEAD")
+        tree = self.git(self.repo, "rev-parse", "HEAD^{tree}")
+        self.assert_source_refused(self.source(sha=sha, tree=tree),
+                                   "approved Cargo.lock must not be a symlink")
+
     def test_detached_worktree_ignores_foreign_git_context(self):
         worktree = self.root / "detached"
         self.git(self.repo, "worktree", "add", "--quiet", "--detach", str(worktree), self.sha)

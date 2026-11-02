@@ -92,7 +92,17 @@ def source_identity(sha, tree):
     command([*git, "diff", "--no-ext-diff", "--no-textconv", "--exit-code", "HEAD", "--"],
             "tracked source/Cargo.lock immutability check", cwd=root, env=env)
     lock = root / "Cargo.lock"
+    # A tracked symlink stores its link text, not the referenced lock bytes.
+    # Refuse dereferencing an unapproved target even if the Git tree is clean.
+    require(not lock.is_symlink(), "approved Cargo.lock must not be a symlink")
     require(lock.is_file(), "approved checkout is missing Cargo.lock")
+    approved_lock = command([*git, "rev-parse", "HEAD:Cargo.lock"],
+                            "approved Cargo.lock blob read", cwd=root, env=env)
+    # Git diff may normalize through .gitattributes clean/EOL filters.
+    # Bind the exact bytes used for this release to the approved Git blob.
+    raw_lock = command([*git, "hash-object", "--no-filters", "--", "Cargo.lock"],
+                       "raw Cargo.lock blob hash", cwd=root, env=env)
+    require(raw_lock == approved_lock, "Cargo.lock bytes differ from the approved blob")
     return sha256_file(lock)
 
 
