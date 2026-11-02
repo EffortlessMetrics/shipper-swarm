@@ -99,7 +99,7 @@ fn admission_correct(source: &str) -> bool {
             || section.contains("    needs: [route,");
         if !depends_on_route
             || !section.contains("needs.route.outputs.target")
-            || section.contains("    if: always()")
+            || section.lines().any(|line| line == "    if: always()")
         {
             return false;
         }
@@ -142,6 +142,19 @@ fn draft_admission_tests_reject_realistic_regressions() {
         "      - name: Dropped untrusted fork guard",
     );
     assert!(!admission_correct(&missing_fork_refusal), "untrusted fork must remain refused");
+
+    // Step-local cleanup (e.g. cpx42) may use always() safely: only a
+    // producer's JOB-level unconditional if: always() bypasses the router.
+    let job_marker = "  rust_small_cpx42:\n";
+    let job_guard = "    if: needs.route.outputs.target == 'cpx42'";
+    assert!(WORKFLOW.contains("        if: always()"), "real cleanup control exists");
+    let unconditional_job = WORKFLOW.replacen(
+        job_guard,
+        "    if: always() # bypass route: 'cpx42'",
+        1,
+    );
+    assert!(unconditional_job.contains(job_marker));
+    assert!(!admission_correct(&unconditional_job), "unconditional producer job must be refused");
 
     let missing_fork_guard = WORKFLOW.replace(
         "github.event.pull_request.head.repo.full_name == github.repository",
