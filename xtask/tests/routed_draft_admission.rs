@@ -131,20 +131,6 @@ fn draft_admission_matches_review_forward_contract() {
         admission_correct(WORKFLOW),
         "ready event, both guards and route dependencies must agree"
     );
-    // These are the intended results of the exact expression checked above:
-    // draft edits cost no Rust jobs; ready transitions and merges still run.
-    for event in ["push", "merge_group", "workflow_dispatch"] {
-        assert!(event != "pull_request");
-    }
-    for (draft, same_repo, admitted) in [
-        (true, true, false),
-        (true, false, false),
-        (false, true, true),
-        (false, false, false),
-    ] {
-        let actual = !draft && same_repo;
-        assert_eq!(actual, admitted);
-    }
 }
 
 #[test]
