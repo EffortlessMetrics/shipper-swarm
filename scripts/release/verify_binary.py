@@ -76,6 +76,10 @@ def source_identity(sha, tree):
             "checked-out source SHA differs from approval")
     require(command([*git, "rev-parse", "HEAD^{tree}"], "source tree read", cwd=root, env=env) == tree,
             "checked-out source tree differs from approval")
+    # HEAD-to-worktree alone can hide a staged change cancelled by an
+    # opposite unstaged edit. Require both index and working files to agree.
+    command([*git, "diff", "--cached", "--no-ext-diff", "--no-textconv", "--exit-code", "HEAD", "--"],
+            "staged source/Cargo.lock immutability check", cwd=root, env=env)
     command([*git, "diff", "--no-ext-diff", "--no-textconv", "--exit-code", "HEAD", "--"],
             "tracked source/Cargo.lock immutability check", cwd=root, env=env)
     lock = root / "Cargo.lock"

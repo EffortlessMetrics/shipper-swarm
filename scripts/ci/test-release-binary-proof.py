@@ -474,6 +474,31 @@ class SourceIdentityProof(unittest.TestCase):
                     self.assert_source_refused(self.source(), "immutability check failed")
                     self.git(self.repo, "restore", "--source=HEAD", "--staged", "--worktree", "--", filename)
 
+    def stage_change_then_restore_worktree(self, filename):
+        """Leave a real dirty index whose change cancels in HEAD-to-worktree diff."""
+        path = self.repo / filename
+        original = path.read_bytes()
+        path.write_bytes(original + b"staged-only difference\n")
+        self.git(self.repo, "add", "--", filename)
+        path.write_bytes(original)
+        # The old check genuinely sees no final difference; the index does.
+        self.git(self.repo, "diff", "--exit-code", "HEAD", "--", filename)
+        self.assertIn(filename, self.git(self.repo, "diff", "--cached", "--name-only", "HEAD", "--"))
+
+    def test_staged_changes_cannot_hide_behind_restored_worktree(self):
+        for filename in ["source.txt", "Cargo.lock"]:
+            with self.subTest(filename=filename):
+                self.stage_change_then_restore_worktree(filename)
+                try:
+                    self.assert_source_refused(self.source(), "staged source/Cargo.lock immutability check failed")
+                finally:
+                    self.git(self.repo, "restore", "--source=HEAD", "--staged", "--worktree", "--", filename)
+
+    def test_staged_refusal_ignores_foreign_clean_index(self):
+        self.stage_change_then_restore_worktree("source.txt")
+        env = {**self.env, "GIT_INDEX_FILE": str(self.other / ".git/index")}
+        self.assert_source_refused(self.source(env=env), "staged source/Cargo.lock immutability check failed")
+
     def test_detached_worktree_ignores_foreign_git_context(self):
         worktree = self.root / "detached"
         self.git(self.repo, "worktree", "add", "--quiet", "--detach", str(worktree), self.sha)
@@ -529,6 +554,12 @@ class SourceIdentityProof(unittest.TestCase):
         result, output = self.aggregate_source(self.repo, self.env)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["source_sha"], self.sha)
+
+    def test_actual_aggregate_refuses_dirty_index_without_receipt(self):
+        self.stage_change_then_restore_worktree("Cargo.lock")
+        result, output = self.aggregate_source(self.repo, self.env)
+        self.assert_source_refused(result, "staged source/Cargo.lock immutability check failed")
+        self.assertFalse(output.exists(), "a dirty index must not emit successful aggregate proof")
 
     def test_actual_aggregate_refuses_foreign_source_without_receipt(self):
         result, output = self.aggregate_source(self.other, self.redirected(self.repo))
