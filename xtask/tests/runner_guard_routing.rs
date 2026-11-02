@@ -69,9 +69,9 @@ fn guard_contract(source: &str) -> bool {
     checks.iter().all(|line| has_line(nano, line))
         && paths.iter().all(|path| {
             let entry = format!("      - \"{path}\"");
-            [pull_request, push].iter().all(|event| {
-                event.lines().filter(|line| *line == entry.as_str()).count() == 1
-            })
+            [pull_request, push]
+                .iter()
+                .all(|event| event.lines().filter(|line| *line == entry.as_str()).count() == 1)
         })
 }
 
