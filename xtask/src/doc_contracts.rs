@@ -1216,8 +1216,7 @@ Proof commands: cargo xtask policy-report
         // make its prose values invalid, while collapsing lifecycle into Tier
         // Model must not be accepted as maturity vocabulary.
         assert!(checked.contains("## Development Evidence\n"));
-        let misplaced_claims =
-            checked.replacen("## Development Evidence", "## Claim Map", 1);
+        let misplaced_claims = checked.replacen("## Development Evidence", "## Claim Map", 1);
         assert!(
             support_tier_claim_tier_findings(&misplaced_claims)
                 .iter()
