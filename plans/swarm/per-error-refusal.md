@@ -1,10 +1,37 @@
 # Refuse unsupported per-error retry configuration
 
+Status: implemented
+Owner: EffortlessMetrics
+Created: 2026-10-29
+Milestone: 0.5 release candidate preparation
+Linked proposal:
+Linked specs: docs/specs/SHIPPER-SPEC-0007-idempotent-workspace-publish.md
+Linked ADRs:
+Linked plan: plans/swarm/build-readiness.md
+Linked issues: #362; #255
+Linked PRs: #439
+Support-tier impact: no promotion; selected per-error configuration refusal implemented in development source, not public 0.5 availability
+Policy impact: metadata contract repair only; no workflow, authority or exception changes
+Proof commands: cargo xtask check-doc-contracts --mode advisory; cargo xtask check-file-policy --mode blocking-allowlist; git diff --check
+
+## Current disposition — 2026-11-02
+
+PR [#439](https://github.com/EffortlessMetrics/shipper-swarm/pull/439)
+landed the selected fail-closed refusal for unsupported nonempty
+`retry.per_error` settings; issue #362 is closed. The richer per-error
+execution design in draft #367 was **not** adopted. The sections below
+preserve the original October 29 investigation and proposed implementation
+sequence as **historical plan evidence**, not as an outstanding development
+work queue or a claim of a newly qualified public release.
+
+Remaining release acceptance belongs to #255 and the distinct
+release-authority process. **Candidate: NOT FROZEN.
+Publication authorization: NO.**
 Issue: [#362](https://github.com/EffortlessMetrics/shipper-swarm/issues/362)
 Contract: [SPEC-0007 retry admission](../../docs/specs/SHIPPER-SPEC-0007-idempotent-workspace-publish.md#retry-configuration-admission-362)
 Development target: `EffortlessMetrics/shipper-swarm/main`
 
-## Selected release slice and recovered work
+## October 29 selected release slice and recovered work (historical)
 
 The 2026-10-29 development task selects the issue's recommended minimal refusal
 correction for this release. The candidate records that selection for independent
