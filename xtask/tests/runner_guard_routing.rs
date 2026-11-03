@@ -19,10 +19,10 @@ fn guard_contract(source: &str) -> bool {
     let Some((_, events)) = global.split_once("\n  pull_request:\n") else {
         return false;
     };
-    let Some((pull_request, remaining_events)) = events.split_once("\n  push:\n") else {
+    let Some((push, _)) = remaining_events.split_once("\n  workflow_dispatch:") else {
         return false;
     };
-    let Some((push, _)) = remaining_events.split_once("\n  workflow_dispatch:") else {
+    let Some((pull_request, remaining_events)) = events.split_once("\n  push:\n") else {
         return false;
     };
     let Some((nano, hosted)) = jobs.split_once("\n  no-bare-self-hosted-hosted:\n") else {
@@ -67,6 +67,9 @@ fn guard_contract(source: &str) -> bool {
         "xtask/tests/runner_guard_routing.rs",
     ];
     checks.iter().all(|line| has_line(nano, line))
+        && [pull_request, push].iter().all(|event| {
+            has_line(event, "    branches: [main]") && has_line(event, "    paths:")
+        })
         && paths.iter().all(|path| {
             let entry = format!("      - \"{path}\"");
             [pull_request, push]
@@ -153,6 +156,21 @@ fn guard_contract_rejects_paths_moved_between_events() {
             };
             assert_eq!(changed.matches(entry.as_str()).count(), 2);
             assert!(!guard_contract(&changed), "misplaced path: {path}");
+        }
+    }
+}
+
+#[test]
+fn guard_contract_rejects_changed_event_filters() {
+    for event in ["pull_request", "push"] {
+        let header = format!("  {event}:\n    branches: [main]\n    paths:\n");
+        assert!(WORKFLOW.contains(header.as_str()));
+        for replacement in [
+            format!("  {event}:\n    branches: [never-guard-target]\n    paths:\n"),
+            format!("  {event}:\n    branches: [main]\n    paths-ignore:\n"),
+        ] {
+            let changed = WORKFLOW.replacen(header.as_str(), replacement.as_str(), 1);
+            assert!(!guard_contract(&changed), "changed event filter: {event}");
         }
     }
 }
