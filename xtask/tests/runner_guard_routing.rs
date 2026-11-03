@@ -67,9 +67,9 @@ fn guard_contract(source: &str) -> bool {
         "xtask/tests/runner_guard_routing.rs",
     ];
     checks.iter().all(|line| has_line(nano, line))
-        && [pull_request, push].iter().all(|event| {
-            has_line(event, "    branches: [main]") && has_line(event, "    paths:")
-        })
+        && [pull_request, push]
+            .iter()
+            .all(|event| has_line(event, "    branches: [main]") && has_line(event, "    paths:"))
         && paths.iter().all(|path| {
             let entry = format!("      - \"{path}\"");
             [pull_request, push]
