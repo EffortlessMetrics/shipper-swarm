@@ -19,10 +19,10 @@ fn guard_contract(source: &str) -> bool {
     let Some((_, events)) = global.split_once("\n  pull_request:\n") else {
         return false;
     };
-    let Some((push, _)) = remaining_events.split_once("\n  workflow_dispatch:") else {
+    let Some((pull_request, remaining_events)) = events.split_once("\n  push:\n") else {
         return false;
     };
-    let Some((pull_request, remaining_events)) = events.split_once("\n  push:\n") else {
+    let Some((push, _)) = remaining_events.split_once("\n  workflow_dispatch:") else {
         return false;
     };
     let Some((nano, hosted)) = jobs.split_once("\n  no-bare-self-hosted-hosted:\n") else {
@@ -33,9 +33,9 @@ fn guard_contract(source: &str) -> bool {
     if permission.trim() != "contents: read"
         || jobs.contains("\n    permissions:")
         || !has_line(nano, &nano_if)
+        || !has_line(hosted, "    runs-on: ubuntu-24.04")
         || !has_line(hosted, &hosted_if)
         || !has_line(nano, "      group: em-ci-nano")
-        || !has_line(hosted, "    runs-on: ubuntu-24.04")
         || !has_line(nano, "    timeout-minutes: 5")
         || !has_line(hosted, "    timeout-minutes: 5")
         || !has_line(nano, "    steps: &routing_guard_steps")
