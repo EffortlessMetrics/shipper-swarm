@@ -17,8 +17,9 @@ Proof commands: cargo xtask check-doc-contracts --mode advisory; cargo xtask che
 ## Current disposition — 2026-11-02
 
 PR [#439](https://github.com/EffortlessMetrics/shipper-swarm/pull/439)
-landed the selected fail-closed refusal for unsupported nonempty
-`retry.per_error` settings; issue #362 is closed. The richer per-error
+landed the selected fail-closed refusal for configured `retry.per_error`
+class entries, including empty class subtables; issue #362 is closed.
+Omitted settings and an empty parent table remain valid. The richer per-error
 execution design in draft #367 was **not** adopted. The sections below
 preserve the original October 29 investigation and proposed implementation
 sequence as **historical plan evidence**, not as an outstanding development
