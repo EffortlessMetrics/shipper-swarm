@@ -286,7 +286,7 @@ class BinaryProof(unittest.TestCase):
         if self.native_target.endswith("linux-gnu"):
             struct.pack_into("<H", data, 18, 183)
         elif self.native_target.endswith("apple-darwin"):
-            struct.pack_into("<I", data, 4, 0)
+            struct.pack_into("<I", data, 4, 0x0100000C if self.native_target.startswith("x86_64") else 0x01000007)
         else:
             struct.pack_into("<H", data, struct.unpack_from("<I", data, 60)[0] + 4, 0xAA64)
         self.assert_refused(self.smoke(data), "wrong architecture")
@@ -376,6 +376,283 @@ class BinaryProof(unittest.TestCase):
         self.assertLess(build.index("name: Smoke packaged release executable"), build.index("name: Upload artifact"))
         self.assertNotIn("continue-on-error", build)
         self.assertIn("artifacts/**/shipper-*.smoke.json", text)
+
+
+class SourceIdentityProof(unittest.TestCase):
+    """Real Git/source-binding controls; no Rust toolchain or native smoke claim."""
+
+    def setUp(self):
+        storage = tempfile.TemporaryDirectory(prefix="shipper-source-identity-")
+        self.addCleanup(storage.cleanup)
+        self.root = Path(storage.name)
+        self.env = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
+        self.env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+        self.helper = ROOT / "scripts/release/verify_binary.py"
+        self.repo = self.make_repo("approved")
+        self.other = self.make_repo("other")
+        self.sha = self.git(self.repo, "rev-parse", "HEAD")
+        self.tree = self.git(self.repo, "rev-parse", "HEAD^{tree}")
+        self.lock_digest = sha256((self.repo / "Cargo.lock").read_bytes())
+        self.assertNotEqual(self.sha, self.git(self.other, "rev-parse", "HEAD"))
+
+    def git(self, cwd, *args):
+        return checked(["git", *args], cwd=cwd, env=self.env)
+
+    def make_repo(self, name):
+        repo = self.root / name
+        repo.mkdir()
+        self.git(repo, "init", "--quiet")
+        for key, value in {"user.name": "Source identity fixture", "user.email": "fixture@example.invalid",
+                           "commit.gpgsign": "false"}.items():
+            self.git(repo, "config", key, value)
+        (repo / "Cargo.lock").write_text("version = 4\n", encoding="utf-8")
+        (repo / "source.txt").write_text(name + "\n", encoding="utf-8")
+        self.git(repo, "add", "Cargo.lock", "source.txt")
+        self.git(repo, "commit", "--quiet", "-m", "source identity fixture")
+        return repo
+
+    def redirected(self, repo):
+        return {**self.env, "GIT_DIR": str(repo / ".git"), "GIT_WORK_TREE": str(repo)}
+
+    def source(self, *, cwd=None, env=None, sha=None, tree=None):
+        # Run the actual helper in a fresh process; verify it leaves its own
+        # caller environment untouched rather than masking later checks.
+        script = ('import os,runpy,sys; before=dict(os.environ); '
+                  'm=runpy.run_path(sys.argv[1]); '
+                  'result=m["source_identity"](sys.argv[2],sys.argv[3]); '
+                  'assert dict(os.environ)==before; print(result)')
+        return subprocess.run([sys.executable, "-c", script, str(self.helper), sha or self.sha, tree or self.tree],
+                              cwd=cwd or self.repo, env=env or self.env, capture_output=True, text=True, timeout=30)
+
+    def assert_source_pass(self, result):
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), self.lock_digest)
+
+    def assert_source_refused(self, result, message):
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(message, result.stderr)
+
+    def test_clean_checkout_matches_approval(self):
+        self.assert_source_pass(self.source())
+
+    def test_wrong_checkout_cannot_borrow_approved_git_context(self):
+        self.assert_source_refused(self.source(cwd=self.other, env=self.redirected(self.repo)), "source SHA differs")
+
+    def test_correct_checkout_ignores_foreign_git_context_and_config(self):
+        env = {**self.redirected(self.other), "GIT_INDEX_FILE": str(self.other / ".git/index"),
+               "GIT_COMMON_DIR": str(self.other / ".git"),
+               "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.worktree", "GIT_CONFIG_VALUE_0": str(self.other)}
+        self.assert_source_pass(self.source(env=env))
+
+    def test_wrong_sha_and_tree_are_rejected(self):
+        for args, message in [({"sha": "0" * 40}, "source SHA differs"),
+                              ({"tree": "0" * 40}, "source tree differs")]:
+            with self.subTest(args=args):
+                self.assert_source_refused(self.source(**args), message)
+
+    def test_nonrepository_cannot_borrow_approved_git_context(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        shutil.copyfile(self.repo / "Cargo.lock", outside / "Cargo.lock")
+        self.assert_source_refused(self.source(cwd=outside, env=self.redirected(self.repo)), "source root read failed")
+
+    def test_nested_lockfile_is_not_the_checkout_root(self):
+        nested = self.repo / "nested"
+        nested.mkdir()
+        shutil.copyfile(self.repo / "Cargo.lock", nested / "Cargo.lock")
+        self.assert_source_refused(self.source(cwd=nested), "checkout root")
+
+    def test_unstaged_and_staged_changes_are_rejected(self):
+        for filename in ["source.txt", "Cargo.lock"]:
+            path = self.repo / filename
+            original = path.read_bytes()
+            for staged in [False, True]:
+                with self.subTest(filename=filename, staged=staged):
+                    path.write_bytes(original + b"changed\n")
+                    if staged:
+                        self.git(self.repo, "add", filename)
+                    self.assert_source_refused(self.source(), "immutability check failed")
+                    self.git(self.repo, "restore", "--source=HEAD", "--staged", "--worktree", "--", filename)
+
+    def stage_change_then_restore_worktree(self, filename):
+        """Leave a real dirty index whose change cancels in HEAD-to-worktree diff."""
+        path = self.repo / filename
+        original = path.read_bytes()
+        path.write_bytes(original + b"staged-only difference\n")
+        self.git(self.repo, "add", "--", filename)
+        path.write_bytes(original)
+        # The old check genuinely sees no final difference; the index does.
+        self.git(self.repo, "diff", "--exit-code", "HEAD", "--", filename)
+        self.assertIn(filename, self.git(self.repo, "diff", "--cached", "--name-only", "HEAD", "--"))
+
+    def test_staged_changes_cannot_hide_behind_restored_worktree(self):
+        for filename in ["source.txt", "Cargo.lock"]:
+            with self.subTest(filename=filename):
+                self.stage_change_then_restore_worktree(filename)
+                try:
+                    self.assert_source_refused(self.source(), "staged source/Cargo.lock immutability check failed")
+                finally:
+                    self.git(self.repo, "restore", "--source=HEAD", "--staged", "--worktree", "--", filename)
+
+    def test_staged_refusal_ignores_foreign_clean_index(self):
+        self.stage_change_then_restore_worktree("source.txt")
+        env = {**self.env, "GIT_INDEX_FILE": str(self.other / ".git/index")}
+        self.assert_source_refused(self.source(env=env), "staged source/Cargo.lock immutability check failed")
+
+    def test_hidden_index_flags_cannot_hide_modified_tracked_source(self):
+        # The initial helper accepted assume-unchanged and skip-worktree changes
+        # because Git intentionally hides them from both diff modes.
+        for filename in ["source.txt", "Cargo.lock"]:
+            path = self.repo / filename
+            original = path.read_bytes()
+            for flag in ["assume-unchanged", "skip-worktree"]:
+                with self.subTest(filename=filename, flag=flag):
+                    self.git(self.repo, "update-index", f"--{flag}", "--", filename)
+                    path.write_bytes(original + b"hidden source change\n")
+                    try:
+                        self.git(self.repo, "diff", "--exit-code", "HEAD", "--", filename)
+                        self.git(self.repo, "diff", "--cached", "--exit-code", "HEAD", "--", filename)
+                        tag = self.git(self.repo, "ls-files", "-v", "--", filename)
+                        self.assertNotEqual(tag[:1], "H")
+                        self.assert_source_refused(
+                            self.source(),
+                            "tracked source index flags prevent complete immutability verification",
+                        )
+                    finally:
+                        self.git(self.repo, "update-index", "--no-assume-unchanged", "--", filename)
+                        self.git(self.repo, "update-index", "--no-skip-worktree", "--", filename)
+                        path.write_bytes(original)
+
+    @unittest.skipIf(os.name != "posix", "POSIX shell clean-filter fixture")
+    def test_raw_lock_bytes_refuse_clean_filter_masking(self):
+        # HEAD and the index contain the original lock; the local clean
+        # filter falsely normalizes modified bytes back to the approved text.
+        self.git(self.repo, "config", "filter.mask.clean", "sh -c 'printf \"version = 4\\\\n\"'")
+        attr = self.repo / ".git" / "info" / "attributes"
+        attr.parent.mkdir(exist_ok=True)
+        attr.write_text("Cargo.lock filter=mask\n", encoding="utf-8")
+        lock = self.repo / "Cargo.lock"
+        lock.write_text("version = 4\n# changed raw bytes\n", encoding="utf-8")
+        self.assert_source_refused(self.source(), "Cargo.lock bytes differ from the approved blob")
+
+    @unittest.skipIf(os.name != "posix", "POSIX symlink fixture")
+    def test_approved_symlink_lockfile_is_refused(self):
+        lock = self.repo / "Cargo.lock"
+        target = self.repo / "real-lockfile"
+        target.write_bytes(lock.read_bytes())
+        lock.unlink()
+        lock.symlink_to(target.name)
+        self.git(self.repo, "add", "Cargo.lock", "real-lockfile")
+        self.git(self.repo, "commit", "--quiet", "-m", "symlink lockfile witness")
+        sha = self.git(self.repo, "rev-parse", "HEAD")
+        tree = self.git(self.repo, "rev-parse", "HEAD^{tree}")
+        self.assert_source_refused(self.source(sha=sha, tree=tree),
+                                   "approved Cargo.lock must not be a symlink")
+
+    @unittest.skipIf(os.name != "posix", "POSIX-only Git clean-filter fixture")
+    def test_raw_other_source_bytes_cannot_be_hidden_by_clean_filter(self):
+        # Git diff HEAD succeeds because the filter restores the committed
+        # source bytes. The actual working file must still be rejected.
+        cleaner = self.repo / ".git" / "clean-mask.sh"
+        cleaner.write_text('#!/bin/sh\nprintf "approved\\n"\n', encoding="utf-8")
+        cleaner.chmod(0o755)
+        self.git(self.repo, "config", "filter.mask.clean", str(cleaner))
+        (self.repo / ".git" / "info" / "attributes").write_text(
+            "source.txt filter=mask\n", encoding="utf-8"
+        )
+        (self.repo / "source.txt").write_text("UNAPPROVED_SOURCE();\n", encoding="utf-8")
+        self.git(self.repo, "diff", "--exit-code", "HEAD", "--", "source.txt")
+        self.git(self.repo, "diff", "--cached", "--exit-code", "HEAD", "--", "source.txt")
+        self.assert_source_refused(self.source(), "tracked source raw bytes differ from approved Git tree")
+
+    @unittest.skipIf(os.name != "posix", "POSIX-only Git symlink fixture")
+    def test_tracked_source_symlink_is_refused_even_if_checkout_is_clean(self):
+        original = (self.repo / "source.txt").read_bytes()
+        (self.repo / "source.txt").unlink()
+        (self.repo / "source-target.txt").write_bytes(original)
+        (self.repo / "source.txt").symlink_to("source-target.txt")
+        self.git(self.repo, "add", "source.txt", "source-target.txt")
+        self.git(self.repo, "commit", "--quiet", "-m", "symlinked tracked source")
+        sha = self.git(self.repo, "rev-parse", "HEAD")
+        tree = self.git(self.repo, "rev-parse", "HEAD^{tree}")
+        self.assert_source_refused(self.source(sha=sha, tree=tree), "unsupported tracked source file mode")
+
+    def test_detached_worktree_ignores_foreign_git_context(self):
+        worktree = self.root / "detached"
+        self.git(self.repo, "worktree", "add", "--quiet", "--detach", str(worktree), self.sha)
+        self.assertTrue((worktree / ".git").is_file())
+        self.assert_source_pass(self.source(cwd=worktree, env=self.redirected(self.other)))
+
+    def test_replacement_objects_do_not_change_approved_tree(self):
+        (self.repo / "source.txt").write_text("replacement\n", encoding="utf-8")
+        self.git(self.repo, "add", "source.txt")
+        self.git(self.repo, "commit", "--quiet", "-m", "replacement fixture")
+        replacement = self.git(self.repo, "rev-parse", "HEAD")
+        self.git(self.repo, "reset", "--hard", self.sha)
+        self.git(self.repo, "replace", self.sha, replacement)
+        self.assert_source_pass(self.source())
+
+    @unittest.skipIf(os.name != "posix", "POSIX-only Git helper shell fixture")
+    def test_repository_helpers_cannot_hide_changed_source(self):
+        helper = self.repo / "helper.sh"
+        marker = self.repo / "helper.sh.marker"
+        helper.write_text('#!/bin/sh\nprintf invoked >> "$0.marker"\nprintf "constant\\n"\n', encoding="utf-8")
+        helper.chmod(0o755)
+        attributes = self.repo / ".git/info/attributes"
+        attributes.parent.mkdir(exist_ok=True)
+        attributes.write_text("source.txt diff=helper\n", encoding="utf-8")
+        for key in ["diff.external", "core.fsmonitor", "diff.helper.textconv"]:
+            self.git(self.repo, "config", key, "./helper.sh")
+        (self.repo / "source.txt").write_text("changed source\n", encoding="utf-8")
+        self.assert_source_refused(self.source(), "immutability check failed")
+        self.assertFalse(marker.exists(), "source proof must not execute repository Git helpers")
+        # A real Git control proves the configured helper is reachable; absence
+        # of a marker above must not be explained by a broken shell fixture.
+        self.git(self.repo, "diff", "--ext-diff", "HEAD", "--", "source.txt")
+        self.assertTrue(marker.exists(), "unisolated Git control must execute the helper")
+
+    def aggregate_source(self, cwd, env):
+        # Reuse the established synthetic aggregate protocol. This executes the
+        # real CLI/validator, not any target's native Shipper executable.
+        artifacts = self.root / "artifacts"
+        for target in TARGETS:
+            archive = artifacts / f"shipper-{target}" / f"shipper-{target}.{TARGETS[target][0]}"
+            data = synthetic_header(target)
+            make_archive(archive, target, data)
+            receipt = BinaryProof.receipt(self, target, archive, data)
+            BinaryProof.write_receipt(self, archive, receipt)
+        output = self.root / "aggregate.json"
+        result = subprocess.run([sys.executable, str(self.helper), "aggregate", "--artifacts", str(artifacts),
+                                 "--approved-sha", self.sha, "--approved-tree", self.tree,
+                                 "--approved-version", VERSION, "--output", str(output)],
+                                cwd=cwd, env=env, capture_output=True, text=True, timeout=30)
+        return result, output
+
+    def test_actual_aggregate_accepts_bound_source_protocol(self):
+        result, output = self.aggregate_source(self.repo, self.env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["source_sha"], self.sha)
+
+    def test_actual_aggregate_refuses_dirty_index_without_receipt(self):
+        self.stage_change_then_restore_worktree("Cargo.lock")
+        result, output = self.aggregate_source(self.repo, self.env)
+        self.assert_source_refused(result, "staged source/Cargo.lock immutability check failed")
+        self.assertFalse(output.exists(), "a dirty index must not emit successful aggregate proof")
+
+    def test_actual_aggregate_refuses_hidden_cargo_lock_without_receipt(self):
+        self.git(self.repo, "update-index", "--skip-worktree", "--", "Cargo.lock")
+        (self.repo / "Cargo.lock").write_bytes(b"unapproved package graph\n")
+        # Real Git controls: neither existing diff check observes the change.
+        self.git(self.repo, "diff", "--exit-code", "HEAD", "--", "Cargo.lock")
+        self.git(self.repo, "diff", "--cached", "--exit-code", "HEAD", "--", "Cargo.lock")
+        result, output = self.aggregate_source(self.repo, self.env)
+        self.assert_source_refused(result, "tracked source index flags prevent complete immutability verification")
+        self.assertFalse(output.exists(), "hidden lockfile changes must not create success evidence")
+
+    def test_actual_aggregate_refuses_foreign_source_without_receipt(self):
+        result, output = self.aggregate_source(self.other, self.redirected(self.repo))
+        self.assert_source_refused(result, "source SHA differs")
+        self.assertFalse(output.exists(), "wrong-checkout aggregate must not emit successful proof")
 
 
 if __name__ == "__main__":
