@@ -26,7 +26,7 @@ this inventory aligned when workflows are added, removed, or retargeted.
 |---|---|---|---|
 | `architecture-guard.yml` | `push` + `pull_request` | Every PR | Advisory in swarm branch protection |
 | `runner-routing-guard.yml` | `push` + path-scoped `pull_request` + `workflow_dispatch` | Workflow routing policy guard | Advisory |
-| `em-ci-routed-rust.yml` | `push` + `pull_request` + `merge_group` + `workflow_dispatch` | Required PR gate | Required via `Shipper Rust Small Result` |
+| `em-ci-routed-rust.yml` | `push` + non-draft `pull_request` / `ready_for_review` + `merge_group` + `workflow_dispatch` | Review-forward required PR gate | Required via `Shipper Rust Small Result` after PR readiness |
 | `ci.yml` | `push` + `workflow_dispatch` + weekly `schedule` + trusted review-ready `pull_request` | Main/manual full CI + scoped hosted PR policy | Full CI on main/manual; PR policy evidence is not the default required Rust gate |
 | `coverage.yml` | `push` (main) + `pull_request` + `workflow_dispatch` | Advisory / labeled | Advisory |
 | `fuzz.yml` | path-scoped `push` + `pull_request`; nightly `schedule` + `workflow_dispatch` | Compile all fuzz binaries; execute selected campaigns only nightly/manually | Advisory |
@@ -37,6 +37,21 @@ this inventory aligned when workflows are added, removed, or retargeted.
 | `ripr.yml` | `pull_request` + `workflow_dispatch` | Advisory (`continue-on-error: true`) | Advisory |
 
 ## Required PR Gate
+
+Draft pull requests are review-only for the expensive Rust producer:
+creating or editing a draft skips router/producer work. The tiny hosted
+`Shipper Rust Small Result` intentionally executes and **fails closed** with
+an actionable draft/not-qualified message. GitHub treats skipped required jobs
+as successful, so the required result must not be skipped on a draft: a skipped
+result could otherwise be mistaken for mergeable proof after the PR becomes
+ready. Fork PRs without an eligible trusted producer likewise fail this result.
+Marking the same-repository PR ready for review triggers a complete new required
+producer/result on that source, including when the commit SHA is unchanged.
+After any ready-PR update, require its latest exact-head successful Result; a
+draft-time failure never qualifies the candidate. Push, merge-group and manual
+routes retain their prior behavior. Already-running jobs are not retroactively
+cancelled when a PR becomes draft. The regression is
+`cargo test -p xtask --test routed_draft_admission --locked`.
 
 `em-ci-routed-rust.yml` is the required PR workflow. Branch protection requires
 only the normalized `Shipper Rust Small Result` check.
