@@ -1,4 +1,4 @@
-"""Check ci.yml's bounded manual hosted route; actionlint owns YAML syntax.
+"""Check ci.yml's bounded hosted routes; actionlint owns YAML syntax.
 
 This dependency-free checker deliberately accepts the repository's explicit job
 and anchor layout. It checks routing, dependency and shared-command ownership,
@@ -16,7 +16,14 @@ HOSTED = (
     "github.event_name == 'workflow_dispatch' && "
     "inputs.runner_route == 'github-hosted'"
 )
-DEFAULT = "${{ !(" + HOSTED + ") }}"
+REVIEW = (
+    "github.repository == 'EffortlessMetrics/shipper-swarm' && "
+    "github.event_name == 'pull_request' && "
+    "github.event.pull_request.draft == false && "
+    "github.event.pull_request.head.repo.full_name == github.repository"
+)
+DEFAULT = "${{ github.event_name != 'pull_request' && !(" + HOSTED + ") }}"
+POLICY = "${{ (" + HOSTED + ") || (" + REVIEW + ") }}"
 MANUAL = "${{ " + HOSTED + " }}"
 JOBS = {
     "lint": ("cx43", 30),
@@ -43,6 +50,17 @@ PREDICATES = {
     "release-build": "github.event_name == 'push' || github.event_name == 'workflow_dispatch'",
 }
 CACHE_PREFIX = "${{ runner.environment == 'github-hosted' && 'manual-hosted-' || '' }}"
+POLICY_CHECKS = (
+    "python3 scripts/ci/check-full-ci-hosted.py --test",
+    "cargo xtask check-file-policy --mode blocking-allowlist",
+    "cargo xtask check-generated --mode blocking-allowlist",
+    "cargo xtask check-executable-files --mode blocking-allowlist",
+    "cargo xtask check-dependency-surfaces --mode blocking-allowlist",
+    "cargo xtask check-workflow-surfaces --mode blocking-allowlist",
+    "cargo xtask check-process-policy --mode blocking-allowlist",
+    "cargo xtask check-network-policy --mode blocking-allowlist",
+    "cargo xtask check-doc-contracts --mode advisory",
+)
 
 
 def sections(text, indentation):
@@ -80,7 +98,12 @@ def check(text):
     expected = set(JOBS) | {job + "-hosted" for job in JOBS}
     require(set(jobs) == expected, "full CI must retain exactly twelve job pairs")
     trigger = document.get("on", "")
-    require("  pull_request:" not in trigger, "full CI must not acquire a PR trigger")
+    events = sections(trigger, 2)
+    pull_request = sections(events.get("pull_request", ""), 4)
+    require(pull_request == {
+        "branches": "[main]",
+        "types": "[opened, synchronize, reopened, ready_for_review]",
+    }, "review-ready policy filters must belong to pull_request without narrowing paths")
     require("default: self-hosted" in trigger, "manual input must default to self-hosted")
     require("type: choice" in trigger and "- github-hosted" in trigger, "manual route must be an explicit choice")
     require(document.get("permissions", "").strip() == "contents: read", "CI must retain read-only permissions")
@@ -94,9 +117,10 @@ def check(text):
     for job, (capacity, timeout) in JOBS.items():
         original = sections(jobs.get(job, ""), 4)
         hosted = sections(jobs.get(job + "-hosted", ""), 4)
-        gate = "${{ !(" + HOSTED + ") && (" + PREDICATES[job] + ") }}" if job in PREDICATES else DEFAULT
+        gate = "${{ github.event_name != 'pull_request' && !(" + HOSTED + ") && (" + PREDICATES[job] + ") }}" if job in PREDICATES else DEFAULT
         require(scalar(original.get("if", ""), aliases) == gate, f"{job}: default route/predicate changed")
-        require(scalar(hosted.get("if", ""), aliases) == MANUAL, f"{job}: hosted route must require explicit swarm dispatch")
+        require(scalar(hosted.get("if", ""), aliases) == (POLICY if job == "policy" else MANUAL),
+                f"{job}: hosted route must retain explicit manual or trusted ready-PR policy admission")
         if job == "lint":
             require(original.get("if", "").startswith("&default_runners "), "default route anchor must exist")
             require(hosted.get("if", "").startswith("&manual_hosted "), "manual route anchor must exist")
@@ -122,6 +146,34 @@ def check(text):
         for cache in re.findall(r"^\s+(?:key|restore-keys): (.+)$", original.get("steps", ""), re.M):
             require(cache.startswith(CACHE_PREFIX), f"{job}: hosted cache must have its own namespace")
 
+    # Inspect actual step fields, not strings that may occur in a disabled
+    # step, an echo, or a command whose failure is swallowed. This remains a
+    # bounded source-layout oracle; actionlint owns general YAML validation.
+    policy_steps = sections(jobs.get("policy", ""), 4).get("steps", "")
+    steps = [
+        sections("        " + body, 8)
+        for body in re.split(r"^      - ", policy_steps, flags=re.M)[1:]
+    ]
+    for command in POLICY_CHECKS:
+        matching = [step for step in steps if step.get("run") == command]
+        require(len(matching) == 1 and set(matching[0]) == {"name", "run"},
+                f"policy check must be one unconditional exact command: {command}")
+
+    reports = [step for step in steps if step.get("run") == "cargo xtask policy-report"]
+    require(len(reports) == 1 and set(reports[0]) == {"name", "if", "run"}
+            and reports[0].get("if") == "always()",
+            "unified policy report must retain its exact command and always condition")
+    uploads = [step for step in steps if step.get("uses", "").startswith("actions/upload-artifact@")]
+    require(len(uploads) == 1 and set(uploads[0]) == {"name", "if", "uses", "with"}
+            and uploads[0].get("uses") == "actions/upload-artifact@v7"
+            and uploads[0].get("if") == "always()"
+            and sections(uploads[0].get("with", ""), 10) == {
+                "name": "policy-reports",
+                "path": "target/policy/",
+                "if-no-files-found": "error",
+                "retention-days": "30",
+            }, "policy artifact must always retain the canonical report directory without missing-file waivers")
+
     # Pin the high-cost/deep proof that a nominally equivalent fallback might omit.
     for witness in [
         "cargo nextest run --workspace --all-features --profile ci",
@@ -136,7 +188,15 @@ def check(text):
 
 
 def test_mutations(text):
+    # These mutations change the actual workflow, not a mock expression.
+    D1_REMOVED = DEFAULT.replace("github.event_name != 'pull_request' && ", "")
     mutants = [
+        ("readiness event removed", "ready_for_review", "converted_to_draft"),
+        ("default PR route leaked", DEFAULT, D1_REMOVED),
+        ("draft policy allowed", "github.event.pull_request.draft == false", "true"),
+        ("fork policy allowed", "github.event.pull_request.head.repo.full_name == github.repository", "true"),
+        ("policy check removed", "run: cargo xtask check-process-policy --mode blocking-allowlist", "run: true"),
+        ("review policy disabled", POLICY, MANUAL),
         ("default route", "default: self-hosted", "default: github-hosted"),
         ("automatic hosted", MANUAL, MANUAL.replace("'workflow_dispatch'", "'push'")),
         ("unscoped hosted", "runs-on: ubuntu-24.04", "runs-on: self-hosted"),
@@ -152,6 +212,27 @@ def test_mutations(text):
         ("concurrency collision", " && '-manual-hosted' || ''", " && '' || ''"),
         ("waived failure", "steps: *lint_steps", "continue-on-error: true\n    steps: *lint_steps"),
     ]
+    mutants.extend([
+        ("wrong PR target", "  pull_request:\n    branches: [main]", "  pull_request:\n    branches: [never-policy-target]"),
+        ("missing PR target", "  pull_request:\n    branches: [main]", "  pull_request:"),
+        ("narrowed PR paths", "  pull_request:\n    branches: [main]", "  pull_request:\n    paths: [only-this-path]\n    branches: [main]"),
+        ("disabled report", "name: Unified policy report\n        if: always()", "name: Unified policy report\n        if: false"),
+        ("success-only report", "name: Unified policy report\n        if: always()", "name: Unified policy report\n        if: success()"),
+        ("masked report failure", "run: cargo xtask policy-report", "run: cargo xtask policy-report || true"),
+        ("disabled upload", "name: Upload policy reports\n        if: always()", "name: Upload policy reports\n        if: false"),
+        ("success-only upload", "name: Upload policy reports\n        if: always()", "name: Upload policy reports\n        if: success()"),
+        ("wrong report name", "name: policy-reports", "name: unrelated-reports"),
+        ("wrong report path", "path: target/policy/", "path: target/other/"),
+        ("waived missing reports", "if-no-files-found: error", "if-no-files-found: warn"),
+        ("changed report retention", "retention-days: 30", "retention-days: 1"),
+    ])
+    for command in POLICY_CHECKS:
+        run = "run: " + command
+        mutants.extend([
+            ("disabled " + command, run, "if: false\n        " + run),
+            ("masked " + command, run, run + " || true"),
+            ("echoed " + command, run, 'run: |\n          echo "' + run + '"'),
+        ])
     for name, old, new in mutants:
         if old not in text:
             raise ValueError(f"mutation fixture no longer reaches {name}")
@@ -171,7 +252,7 @@ def main():
         for failure in failures:
             print(f"ERROR: {failure}", file=sys.stderr)
         return 1
-    print("Manual full-CI route, twelve job pairs, shared proof and hosted isolation verified.")
+    print("Hosted routes, twelve job pairs, executable policy proof and report retention verified.")
     if args.test:
         test_mutations(text)
     return 0
