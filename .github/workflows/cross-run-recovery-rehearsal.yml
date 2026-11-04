@@ -29,7 +29,6 @@ jobs:
       PHASE: ${{ inputs.phase }}
       PREDECESSOR: ${{ inputs.predecessor_run_id }}
       SHIPPER_CROSS_RUN_PHASE: ${{ inputs.phase }}
-      SHIPPER_LIVE_REHEARSAL_ROOT: ${{ runner.temp }}/shipper-cross-run-recovery
       SHIPPER_LIVE_REHEARSAL_REGISTRY_ADDR: 127.0.0.1:39197
     steps:
       - uses: actions/checkout@v7.0.1
@@ -40,6 +39,7 @@ jobs:
       - name: Verify source and restore exact predecessor
         env:
           GH_TOKEN: ${{ github.token }}
+          SHIPPER_LIVE_REHEARSAL_ROOT: ${{ runner.temp }}/shipper-cross-run-recovery
         run: python3 scripts/ci/test-release-resume-artifacts.py --mode prepare --phase "$PHASE" --predecessor-run-id "$PREDECESSOR"
 
       - name: Install Rust
@@ -56,9 +56,13 @@ jobs:
           restore-keys: hosted-cross-run-${{ runner.os }}-
 
       - name: Execute one controlled recovery phase
+        env:
+          SHIPPER_LIVE_REHEARSAL_ROOT: ${{ runner.temp }}/shipper-cross-run-recovery
         run: cargo test -p shipper-cli --test e2e_rehearse cross_run::hosted_recovery_phase --locked -- --ignored --exact --nocapture
 
       - name: Verify and record continuation evidence
+        env:
+          SHIPPER_LIVE_REHEARSAL_ROOT: ${{ runner.temp }}/shipper-cross-run-recovery
         run: python3 scripts/ci/test-release-resume-artifacts.py --mode record --phase "$PHASE" --predecessor-run-id "$PREDECESSOR"
 
       - name: Upload latest checkpoint even after failure

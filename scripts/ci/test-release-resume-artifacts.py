@@ -534,7 +534,6 @@ def workflow_contract(text):
     require(sections(job["env"], 6) == {
         "PHASE": "${{ inputs.phase }}", "PREDECESSOR": "${{ inputs.predecessor_run_id }}",
         "SHIPPER_CROSS_RUN_PHASE": "${{ inputs.phase }}",
-        "SHIPPER_LIVE_REHEARSAL_ROOT": "${{ runner.temp }}/shipper-cross-run-recovery",
         "SHIPPER_LIVE_REHEARSAL_REGISTRY_ADDR": REGISTRY}, "fixture context changed")
     steps = [sections("        " + part, 8) for part in re.split(r"(?m)^      - ", job["steps"])[1:]]
     require(len(steps) == 7, "unexpected phase step count")
@@ -542,11 +541,17 @@ def workflow_contract(text):
                         "          ref: ${{ github.sha }}\n          persist-credentials: false"}, "checkout not pinned")
     for index, mode in [(1, "prepare"), (5, "record")]:
         step_data = steps[index]
-        require(set(step_data) == ({"name", "run", "env"} if mode == "prepare" else {"name", "run"}),
+        require(set(step_data) == {"name", "run", "env"},
                 "phase proof skipped or waived")
         require(step_data["run"] == 'python3 scripts/ci/test-release-resume-artifacts.py --mode '
                 + mode + ' --phase "$PHASE" --predecessor-run-id "$PREDECESSOR"', "phase proof command changed")
-    require(sections(steps[1]["env"], 10) == {"GH_TOKEN": "${{ github.token }}"}, "unexpected token context")
+    # runner.temp exists at step evaluation, not in job-level env.
+    fixture_env = {"SHIPPER_LIVE_REHEARSAL_ROOT": "${{ runner.temp }}/shipper-cross-run-recovery"}
+    require(sections(steps[1]["env"], 10) == {**fixture_env, "GH_TOKEN": "${{ github.token }}"},
+            "unexpected prepare environment")
+    for index in (4, 5):
+        require(sections(steps[index].get("env", ""), 10) == fixture_env,
+                "phase step must retain the runner-local fixture root")
     require(steps[2] == {"name": "Install Rust", "uses": "dtolnay/rust-toolchain@stable"}, "toolchain step changed")
     require(set(steps[3]) == {"name", "uses", "with"} and steps[3]["uses"] == "actions/cache@v6", "cache step changed")
     cache = sections(steps[3]["with"], 10)
@@ -554,7 +559,7 @@ def workflow_contract(text):
             and cache["path"].removeprefix("|").split() == ["~/.cargo/registry", "~/.cargo/git", "target"]
             and cache["key"] == "hosted-cross-run-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}"
             and cache["restore-keys"] == "hosted-cross-run-${{ runner.os }}-", "cache isolation changed")
-    require(set(steps[4]) == {"name", "run"} and steps[4]["run"] ==
+    require(set(steps[4]) == {"name", "run", "env"} and steps[4]["run"] ==
             "cargo test -p shipper-cli --test e2e_rehearse cross_run::hosted_recovery_phase --locked -- --ignored --exact --nocapture",
             "actual phase execution changed")
     require(set(steps[6]) == {"name", "if", "uses", "with"} and steps[6]["if"] == "always()"
@@ -579,7 +584,10 @@ def workflow_tests():
                  ("if: always()", "if: success()"),
                  ("name: shipper-state-final", "name: unrelated"),
                  ("127.0.0.1:39197", "crates.io:443"),
-                 ("timeout-minutes: 30", "timeout-minutes: 360")]
+                 ("timeout-minutes: 30", "timeout-minutes: 360"),
+                 ("      PHASE: ${{ inputs.phase }}\n",
+                  "      SHIPPER_LIVE_REHEARSAL_ROOT: ${{ runner.temp }}/shipper-cross-run-recovery\n      PHASE: ${{ inputs.phase }}\n"),
+                 ("          SHIPPER_LIVE_REHEARSAL_ROOT: ${{ runner.temp }}/shipper-cross-run-recovery\n", "")]
     for old, new in mutations:
         assert old in text
         try:
