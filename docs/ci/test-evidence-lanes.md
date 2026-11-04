@@ -31,6 +31,7 @@ this inventory aligned when workflows are added, removed, or retargeted.
 | `coverage.yml` | `push` (main) + `pull_request` + `workflow_dispatch` | Advisory / labeled | Advisory |
 | `fuzz.yml` | path-scoped `push` + `pull_request`; nightly `schedule` + `workflow_dispatch` | Compile all fuzz binaries; execute selected campaigns only nightly/manually | Advisory |
 | `live-runner-interruption-rehearsal.yml` | `workflow_dispatch` + path-scoped same-repository `pull_request` | Safe two-job artifact interruption/resume proof; automatic GitHub-hosted route in swarm | Both selected jobs required when triggered |
+| `cross-run-recovery-rehearsal.yml` | Explicit swarm-only `workflow_dispatch` | Three separate seed/retry/finish runs with immediate-predecessor artifact provenance | Manual candidate evidence; not automatic PR proof |
 | `mutation.yml` | `schedule` + `workflow_dispatch` + `pull_request` (label-gated) | Weekly + label-gated PR | Advisory |
 | `release.yml` | `push` (tags `v*.*.*`) + `workflow_dispatch` | Tag-triggered | Required (when triggered) |
 | `ripr.yml` | `pull_request` + `workflow_dispatch` | Advisory (`continue-on-error: true`) | Advisory |
@@ -407,3 +408,34 @@ self-hosted full-CI jobs are excluded from PR events. Skipped draft/fork
 policy jobs are **not** successful proof. The exact source checker is
 `python3 scripts/ci/check-full-ci-hosted.py --test`.
 Staged `cargo precommit` requires a real authoring index and is not claimed.
+
+### Three independent recovery runs
+
+`cross-run-recovery-rehearsal.yml` is an opt-in companion, not a replacement for
+the automatic two-job rehearsal. Dispatch `seed` with no predecessor, then
+`retry` with that successful harness run ID, then `finish` with the successful
+retry run ID. Keep the selected source SHA identical across all three runs.
+A controlled incomplete publish is a successful fixture phase, not whole-plan
+completion; the middle stage must have no final receipt.
+
+The helper in `scripts/ci/test-release-resume-artifacts.py` defaults to offline
+regressions. Its explicit `prepare` mode validates the checkout using the existing
+release source verifier and executes the unchanged production release selector.
+Read-only Actions metadata, artifact ID/digest, exact source/tree, run attempt,
+phase, fixture registry/version/root, and every checkpoint-file digest must agree
+before restoration. `record` checks actual upload counts, cumulative attempts,
+execution segments and the exact predecessor event prefix. Harness provenance is
+retained separately as `cross-run-harness.json`; it is not a public product schema
+or release authorization. The canonical `shipper-state-final` upload includes
+hidden files and runs even after failure; a failed harness run cannot authorize
+continuation. No recursive dispatch, release environment, OIDC or publishing
+credentials are used. The existing release and CI process profiles are unchanged.
+
+After reviewed implementation lands, one purposeful three-run chain must retain
+three distinct run IDs, the selected artifact IDs/digests, and the second run as
+the final run's predecessor. Add an actual stale-seed final-stage refusal and
+retain unchanged-input evidence. Local synthetic transport tests, green source
+checks and configured workflow YAML do not establish that hosted proof. The
+release-authority consumption and public-finalization obligations remain under
+#418 and the separate release process. This rehearsal uses fake Cargo and the
+fixed loopback registry, never a real registry publication.
