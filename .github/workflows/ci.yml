@@ -3,6 +3,9 @@ name: CI
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
     inputs:
       runner_route:
@@ -33,7 +36,7 @@ jobs:
   lint:
     name: Lint (fmt + clippy)
     if: &default_runners >-
-      ${{ !(github.repository == 'EffortlessMetrics/shipper-swarm' && github.event_name == 'workflow_dispatch' && inputs.runner_route == 'github-hosted') }}
+      ${{ github.event_name != 'pull_request' && !(github.repository == 'EffortlessMetrics/shipper-swarm' && github.event_name == 'workflow_dispatch' && inputs.runner_route == 'github-hosted') }}
     runs-on:
       group: em-ci-small
       labels: [self-hosted, linux, x64, em-ci, cx43, rust-medium, trusted-pr]
@@ -248,7 +251,7 @@ jobs:
     # feedback fast; if you want a specific PR to exercise it, use the
     # workflow_dispatch trigger on the PR's branch.
     if: >-
-      ${{ !(github.repository == 'EffortlessMetrics/shipper-swarm' && github.event_name == 'workflow_dispatch' && inputs.runner_route == 'github-hosted') && (github.event_name == 'schedule' || github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+      ${{ github.event_name != 'pull_request' && !(github.repository == 'EffortlessMetrics/shipper-swarm' && github.event_name == 'workflow_dispatch' && inputs.runner_route == 'github-hosted') && (github.event_name == 'schedule' || github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
     runs-on:
       group: em-ci-small
       labels: [self-hosted, linux, x64, em-ci, cx53, rust-large, trusted-pr]
@@ -402,7 +405,7 @@ jobs:
   fuzz-smoke:
     name: Fuzz Smoke (PR)
     if: >-
-      ${{ !(github.repository == 'EffortlessMetrics/shipper-swarm' && github.event_name == 'workflow_dispatch' && inputs.runner_route == 'github-hosted') && (github.event_name != 'schedule') }}
+      ${{ github.event_name != 'pull_request' && !(github.repository == 'EffortlessMetrics/shipper-swarm' && github.event_name == 'workflow_dispatch' && inputs.runner_route == 'github-hosted') && (github.event_name != 'schedule') }}
     runs-on:
       group: em-ci-small
       labels: [self-hosted, linux, x64, em-ci, cx53, rust-large, trusted-pr]
@@ -483,7 +486,7 @@ jobs:
     # but out of the default PR and nightly critical paths. Tag-time release
     # binaries are built by release.yml.
     if: >-
-      ${{ !(github.repository == 'EffortlessMetrics/shipper-swarm' && github.event_name == 'workflow_dispatch' && inputs.runner_route == 'github-hosted') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+      ${{ github.event_name != 'pull_request' && !(github.repository == 'EffortlessMetrics/shipper-swarm' && github.event_name == 'workflow_dispatch' && inputs.runner_route == 'github-hosted') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
     runs-on:
       group: em-ci-small
       labels: [self-hosted, linux, x64, em-ci, cx53, rust-large, trusted-pr]
@@ -525,9 +528,11 @@ jobs:
     timeout-minutes: 30
     steps: *lint_steps
 
+  # Reuse the canonical policy steps, without admitting other full-CI jobs on PRs.
   policy-hosted:
-    name: Policy (manual hosted)
-    if: *manual_hosted
+    name: Policy (review-ready or manual hosted)
+    if: >-
+      ${{ (github.repository == 'EffortlessMetrics/shipper-swarm' && github.event_name == 'workflow_dispatch' && inputs.runner_route == 'github-hosted') || (github.repository == 'EffortlessMetrics/shipper-swarm' && github.event_name == 'pull_request' && github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps: *policy_steps
