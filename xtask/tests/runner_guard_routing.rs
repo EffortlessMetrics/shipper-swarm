@@ -53,15 +53,21 @@ fn guard_contract(source: &str) -> bool {
     }
     let checks = [
         "      - uses: actions/checkout@v7.0.1",
-        "          ACTIONLINT_VERSION: 1.7.12",
-        "          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8",
-        "          echo \"$ACTIONLINT_SHA256  $install_dir/$archive\" | sha256sum --check --status",
-        "        run: actionlint -shellcheck=\"\"",
+        "          JACTIONLINT_VERSION: 2.5.0",
+        "          JACTIONLINT_SHA256: 5ac307b0499bb0eab45ae99c23e8e0790874fbc667c75224410954e0e3c6e0f5",
+        "          echo \"$JACTIONLINT_SHA256  $install_dir/$archive\" | sha256sum --check --status",
+        "        run: jactionlint --profile correctness --no-online --shellcheck=\"\"",
         "        run: scripts/ci/no-bare-self-hosted.sh",
         "        run: python3 scripts/ci/normalize-routed-rust-result.py --test",
     ];
     let paths = [
         ".github/workflows/**",
+        ".github/actionlint.yaml",
+        ".github/actionlint.yml",
+        ".github/jactionlint.*",
+        ".github/dependabot.*",
+        "**/action.yml",
+        "**/action.yaml",
         "scripts/ci/no-bare-self-hosted.sh",
         "scripts/ci/normalize-routed-rust-result.py",
         "xtask/tests/runner_guard_routing.rs",
@@ -99,9 +105,14 @@ fn guard_contract_rejects_lost_checks_or_weakened_routes() {
         ("contents: read", "contents: write"),
         ("    steps: *routing_guard_steps", "    steps: []"),
         ("    timeout-minutes: 5", "    timeout-minutes: 360"),
-        ("ACTIONLINT_VERSION: 1.7.12", "ACTIONLINT_VERSION: latest"),
+        ("JACTIONLINT_VERSION: 2.5.0", "JACTIONLINT_VERSION: latest"),
         ("sha256sum --check --status", "true"),
-        ("run: actionlint -shellcheck=\"\"", "run: true"),
+        (
+            "run: jactionlint --profile correctness --no-online --shellcheck=\"\"",
+            "run: true",
+        ),
+        ("--profile correctness", "--profile default"),
+        ("--no-online", "--online"),
         ("run: scripts/ci/no-bare-self-hosted.sh", "run: true"),
         (
             "normalize-routed-rust-result.py --test",
@@ -119,7 +130,7 @@ fn guard_contract_rejects_lost_checks_or_weakened_routes() {
 #[test]
 fn guard_contract_rejects_disabled_proof_steps() {
     for run in [
-        "        run: actionlint -shellcheck=\"\"",
+        "        run: jactionlint --profile correctness --no-online --shellcheck=\"\"",
         "        run: scripts/ci/no-bare-self-hosted.sh",
         "        run: python3 scripts/ci/normalize-routed-rust-result.py --test",
     ] {
@@ -136,6 +147,7 @@ fn guard_contract_rejects_disabled_proof_steps() {
 fn guard_contract_rejects_paths_moved_between_events() {
     let (before_push, after_push) = WORKFLOW.split_once("\n  push:\n").expect("push event");
     for path in [
+        ".github/actionlint.yaml",
         "scripts/ci/normalize-routed-rust-result.py",
         "xtask/tests/runner_guard_routing.rs",
     ] {

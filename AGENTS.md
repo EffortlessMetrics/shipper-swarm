@@ -72,6 +72,12 @@ At the workspace root, plain `cargo test` selects only the `shipper` and
 crates, and xtask tests. See [Testing Guide](docs/testing.md) for command scope
 and the configured CI evidence lanes.
 
+For GitHub Actions edits, run `jactionlint --profile correctness --no-online --shellcheck=""`
+from the repo root. If the uv-installed command is not on PATH, use
+`uvx --from jactionlint==2.5.0 jactionlint` with the same arguments; do not replace
+workflow linting with a YAML parse. This matches the existing routing guard's
+explicitly disabled ShellCheck integration. See [CONTRIBUTING.md](CONTRIBUTING.md#github-actions-validation).
+
 ## Architecture
 
 Three-crate product shape (#95):
