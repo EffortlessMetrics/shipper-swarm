@@ -2,11 +2,79 @@
 //! Recognize the deliberately bounded workflow shape, not arbitrary Actions YAML.
 
 const WORKFLOW: &str = include_str!("../../.github/workflows/runner-routing-guard.yml");
+const RUNNER_CONFIG: &str = include_str!("../../.github/actionlint.yaml");
 const SWARM: &str = "EffortlessMetrics/shipper-swarm";
 const TRUST: &str = "github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository";
 
 fn has_line(text: &str, expected: &str) -> bool {
     text.lines().any(|line| line == expected)
+}
+
+fn approved_runner_labels_contract(config: &str) -> bool {
+    use std::collections::BTreeSet;
+
+    let expected: BTreeSet<_> = [
+        "self-hosted",
+        "linux",
+        "macos",
+        "windows",
+        "x64",
+        "arm",
+        "arm64",
+        "ubuntu-latest",
+        "ubuntu-24.04",
+        "macos-15-intel",
+        "macos-15",
+        "windows-2025",
+        "em-ci",
+        "trusted-pr",
+        "cx23",
+        "cx33",
+        "cx43",
+        "cpx42",
+        "cx53",
+        "ci-nano",
+        "rust-tiny",
+        "rust-medium",
+        "rust-large",
+        "rust-16gb",
+    ]
+    .into_iter()
+    .collect();
+    let actual: BTreeSet<_> = config
+        .lines()
+        .filter_map(|line| line.strip_prefix("    - "))
+        .collect();
+    config
+        .lines()
+        .filter(|line| line.trim_start().starts_with("strict-labels:"))
+        .count()
+        == 1
+        && has_line(config, "  strict-labels: true")
+        && actual == expected
+}
+
+#[test]
+fn approved_runner_labels_remain_strict_with_current_hosted_and_preset_labels() {
+    assert!(approved_runner_labels_contract(RUNNER_CONFIG));
+    for (from, to) in [
+        ("strict-labels: true", "strict-labels: false"),
+        ("  strict-labels: true\n", ""),
+        ("    - ubuntu-24.04\n", ""),
+        ("    - self-hosted\n", ""),
+        ("    - em-ci", "    - unapproved-label"),
+        ("    - em-ci", "    - em-ci\n    - '*'"),
+    ] {
+        assert!(
+            RUNNER_CONFIG.contains(from),
+            "mutation must change actual input"
+        );
+        let changed = RUNNER_CONFIG.replacen(from, to, 1);
+        assert!(
+            !approved_runner_labels_contract(&changed),
+            "missed mutation: {from}"
+        );
+    }
 }
 
 fn guard_contract(source: &str) -> bool {
@@ -53,15 +121,21 @@ fn guard_contract(source: &str) -> bool {
     }
     let checks = [
         "      - uses: actions/checkout@v7.0.1",
-        "          ACTIONLINT_VERSION: 1.7.12",
-        "          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8",
-        "          echo \"$ACTIONLINT_SHA256  $install_dir/$archive\" | sha256sum --check --status",
-        "        run: actionlint -shellcheck=\"\"",
+        "          JACTIONLINT_VERSION: 2.5.0",
+        "          JACTIONLINT_SHA256: 5ac307b0499bb0eab45ae99c23e8e0790874fbc667c75224410954e0e3c6e0f5",
+        "          echo \"$JACTIONLINT_SHA256  $install_dir/$archive\" | sha256sum --check --status",
+        "        run: jactionlint --profile correctness --no-online --shellcheck=\"\"",
         "        run: scripts/ci/no-bare-self-hosted.sh",
         "        run: python3 scripts/ci/normalize-routed-rust-result.py --test",
     ];
     let paths = [
         ".github/workflows/**",
+        ".github/actionlint.yaml",
+        ".github/actionlint.yml",
+        ".github/jactionlint.*",
+        ".github/dependabot.*",
+        "**/action.yml",
+        "**/action.yaml",
         "scripts/ci/no-bare-self-hosted.sh",
         "scripts/ci/normalize-routed-rust-result.py",
         "xtask/tests/runner_guard_routing.rs",
@@ -99,9 +173,14 @@ fn guard_contract_rejects_lost_checks_or_weakened_routes() {
         ("contents: read", "contents: write"),
         ("    steps: *routing_guard_steps", "    steps: []"),
         ("    timeout-minutes: 5", "    timeout-minutes: 360"),
-        ("ACTIONLINT_VERSION: 1.7.12", "ACTIONLINT_VERSION: latest"),
+        ("JACTIONLINT_VERSION: 2.5.0", "JACTIONLINT_VERSION: latest"),
         ("sha256sum --check --status", "true"),
-        ("run: actionlint -shellcheck=\"\"", "run: true"),
+        (
+            "run: jactionlint --profile correctness --no-online --shellcheck=\"\"",
+            "run: true",
+        ),
+        ("--profile correctness", "--profile default"),
+        ("--no-online", "--online"),
         ("run: scripts/ci/no-bare-self-hosted.sh", "run: true"),
         (
             "normalize-routed-rust-result.py --test",
@@ -119,7 +198,7 @@ fn guard_contract_rejects_lost_checks_or_weakened_routes() {
 #[test]
 fn guard_contract_rejects_disabled_proof_steps() {
     for run in [
-        "        run: actionlint -shellcheck=\"\"",
+        "        run: jactionlint --profile correctness --no-online --shellcheck=\"\"",
         "        run: scripts/ci/no-bare-self-hosted.sh",
         "        run: python3 scripts/ci/normalize-routed-rust-result.py --test",
     ] {
@@ -136,6 +215,7 @@ fn guard_contract_rejects_disabled_proof_steps() {
 fn guard_contract_rejects_paths_moved_between_events() {
     let (before_push, after_push) = WORKFLOW.split_once("\n  push:\n").expect("push event");
     for path in [
+        ".github/actionlint.yaml",
         "scripts/ci/normalize-routed-rust-result.py",
         "xtask/tests/runner_guard_routing.rs",
     ] {
