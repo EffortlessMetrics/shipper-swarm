@@ -2,11 +2,79 @@
 //! Recognize the deliberately bounded workflow shape, not arbitrary Actions YAML.
 
 const WORKFLOW: &str = include_str!("../../.github/workflows/runner-routing-guard.yml");
+const RUNNER_CONFIG: &str = include_str!("../../.github/actionlint.yaml");
 const SWARM: &str = "EffortlessMetrics/shipper-swarm";
 const TRUST: &str = "github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository";
 
 fn has_line(text: &str, expected: &str) -> bool {
     text.lines().any(|line| line == expected)
+}
+
+fn approved_runner_labels_contract(config: &str) -> bool {
+    use std::collections::BTreeSet;
+
+    let expected: BTreeSet<_> = [
+        "self-hosted",
+        "linux",
+        "macos",
+        "windows",
+        "x64",
+        "arm",
+        "arm64",
+        "ubuntu-latest",
+        "ubuntu-24.04",
+        "macos-15-intel",
+        "macos-15",
+        "windows-2025",
+        "em-ci",
+        "trusted-pr",
+        "cx23",
+        "cx33",
+        "cx43",
+        "cpx42",
+        "cx53",
+        "ci-nano",
+        "rust-tiny",
+        "rust-medium",
+        "rust-large",
+        "rust-16gb",
+    ]
+    .into_iter()
+    .collect();
+    let actual: BTreeSet<_> = config
+        .lines()
+        .filter_map(|line| line.strip_prefix("    - "))
+        .collect();
+    config
+        .lines()
+        .filter(|line| line.trim_start().starts_with("strict-labels:"))
+        .count()
+        == 1
+        && has_line(config, "  strict-labels: true")
+        && actual == expected
+}
+
+#[test]
+fn approved_runner_labels_remain_strict_with_current_hosted_and_preset_labels() {
+    assert!(approved_runner_labels_contract(RUNNER_CONFIG));
+    for (from, to) in [
+        ("strict-labels: true", "strict-labels: false"),
+        ("  strict-labels: true\n", ""),
+        ("    - ubuntu-24.04\n", ""),
+        ("    - self-hosted\n", ""),
+        ("    - em-ci", "    - unapproved-label"),
+        ("    - em-ci", "    - em-ci\n    - '*'"),
+    ] {
+        assert!(
+            RUNNER_CONFIG.contains(from),
+            "mutation must change actual input"
+        );
+        let changed = RUNNER_CONFIG.replacen(from, to, 1);
+        assert!(
+            !approved_runner_labels_contract(&changed),
+            "missed mutation: {from}"
+        );
+    }
 }
 
 fn guard_contract(source: &str) -> bool {
