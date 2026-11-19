@@ -12,12 +12,11 @@ Error: failed to load release plan for `publish` - next steps:
   * Cargo metadata failure: run the printed `cargo metadata` command directly
 
 Caused by:
-    0: failed to execute cargo metadata
-    1: `cargo metadata` exited with an error: error: key with no value, expected `=`
-        --> <TMPDIR>/Cargo.toml:1:6
-         |
-       1 | this is not valid toml {{{{
-         |      ^
+    cargo workspace discovery failed before cargo metadata: error: key with no value, expected `=`
+     --> <TMPDIR>/Cargo.toml:1:6
+      |
+    1 | this is not valid toml {{{{
+      |      ^
 
 Result: failed — the publish plan could not be built
 Safe to rerun: unknown — no completed receipt exists to prove a safe rerun

@@ -217,7 +217,13 @@ On Windows, use `target/install-smoke/bin/shipper.exe`.
 
 ### Compatibility and retained proof
 
-- [ ] 0.4 state, event, receipt, and encrypted fixtures still load and resume safely.
+- [ ] Published 0.4 terminal plaintext evidence replays without upload; a
+  separate tagged-writer interruption resumes initially and repeatedly in a
+  mock registry with verifiable historical timing preserved.
+- [ ] Durable status reads tagged-writer encrypted v1 state/receipt fixtures
+  and rejects wrong passphrases and tampering; this is not encrypted resume.
+- [ ] Execution with requested encryption refuses before changing evidence
+  or doing registry work; the ordinary plaintext control succeeds.
 - [ ] New artifacts rebuild every field claimed by the current event vocabulary.
 - [ ] Sequential/parallel scheduler conformance evidence is current.
 - [ ] Registry trust, redirect, resolved-address, and credential-authority evidence is current.

@@ -23,6 +23,15 @@ sync remains best effort, and neither host/power-loss durability nor the separat
 encrypted helper path is covered by this replacement claim. See the precise
 [persistence boundary](../INVARIANTS.md#persistence-boundary-and-failure-model).
 
+## Encryption scope
+
+Ordinary execution writes plaintext evidence. When `--encrypt` or
+configuration enables encryption, `publish`, `resume`, `preflight`,
+`rehearse`, `yank`, and `remediate` refuse before changing execution
+evidence. `status --durable` can inspect encrypted state and receipts using
+the SDK loaders; this does not establish encrypted journal or resume support.
+An older run's encryption setting alone does not identify its artifact format.
+
 ## Per-file summary
 
 | File | Authority | Purpose | When written | Format |

@@ -20,7 +20,7 @@ pub(in crate::doctor) fn check(opts: &RuntimeOptions) -> EncryptionCheck {
     let check = inspect(opts);
     if check.enabled {
         println!();
-        println!("encryption: enabled");
+        println!("encryption: requested; unsupported for execution evidence");
         if let Some(key_source) = &check.key_source {
             match key_source.as_str() {
                 "config" => println!("encryption_key_source: config"),
@@ -51,6 +51,21 @@ pub(in crate::doctor) fn inspect(opts: &RuntimeOptions) -> EncryptionCheck {
         };
     }
 
+    findings.push(Finding {
+        id: "encryption-execution-unsupported",
+        severity: FindingLevel::Blocked,
+        status: FindingLevel::Blocked,
+        title: "execution evidence cannot be encrypted",
+        why_it_matters:
+            "commands that would write plaintext execution evidence refuse to run when encryption is enabled",
+        evidence: "encryption was requested".to_string(),
+        try_next: vec![
+            "preserve existing evidence and use a release workflow that meets your encryption requirements",
+            "use `shipper status --durable` to inspect existing encrypted state and receipts",
+        ],
+        docs: Some("docs/configuration.md"),
+    });
+
     if opts.encryption.passphrase.is_some() {
         return EncryptionCheck {
             enabled: true,
@@ -68,12 +83,11 @@ pub(in crate::doctor) fn inspect(opts: &RuntimeOptions) -> EncryptionCheck {
                 status: FindingLevel::Blocked,
                 title: "state encryption key is missing",
                 why_it_matters:
-                    "encrypted state cannot be written or resumed unless the configured key source is present",
+                    "durable status requires the configured key to read encrypted state and receipts",
                 evidence: format!("encryption_key_present: false ({env_var})"),
                 try_next: vec![
                     "set the configured encryption environment variable",
-                    "or disable state encryption for this run",
-                    "rerun `shipper doctor`",
+
                 ],
                 docs: Some("docs/configuration.md"),
             });

@@ -191,11 +191,7 @@ fn summarize_report(
 
     statuses.push((
         "encryption",
-        if encryption.enabled && encryption.key_source.is_none() {
-            summary::DoctorCheckStatus::Unknown
-        } else {
-            summary::status_from_findings(&encryption.findings)
-        },
+        summary::status_from_findings(&encryption.findings),
     ));
 
     if let Some(target_plan) = target_plan {

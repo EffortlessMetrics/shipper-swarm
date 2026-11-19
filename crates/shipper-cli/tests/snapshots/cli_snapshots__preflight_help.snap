@@ -130,10 +130,10 @@ Options:
           Optional secret for signing webhook payloads
 
       --encrypt
-          Enable encryption for state files
+          Read encrypted state and receipt with status --durable; execution does not support encryption
 
       --encrypt-passphrase <ENCRYPT_PASSPHRASE>
-          Passphrase for state file encryption (or use SHIPPER_ENCRYPT_KEY env var)
+          Passphrase for encrypted durable status (prefer the SHIPPER_ENCRYPT_KEY environment variable)
 
       --registries <REGISTRIES>
           Target registries for multi-registry publishing (comma-separated list) Example: --registries crates-io,my-registry

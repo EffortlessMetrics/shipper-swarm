@@ -359,6 +359,43 @@ fn cargo_program() -> String {
 // Workspace metadata (absorbed from shipper-cargo)
 // ──────────────────────────────────────────────────────────────────────────
 
+/// Resolve the workspace root without dependency resolution or network access.
+pub(crate) fn discover_workspace_root(manifest_path: &Path) -> Result<PathBuf> {
+    // Match cargo_metadata's executable and working-directory selection, not
+    // the separate SHIPPER_CARGO_BIN override for publishing workers.
+    let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let manifest = manifest_path
+        .to_str()
+        .context("non-UTF-8 workspace manifest path")?;
+    let output = process::run_command(
+        &cargo,
+        &[
+            "locate-project",
+            "--workspace",
+            "--offline",
+            "--message-format",
+            "plain",
+            "--manifest-path",
+            manifest,
+        ],
+    )
+    .context("failed to invoke cargo locate-project before cargo metadata")?;
+    anyhow::ensure!(
+        output.success,
+        "cargo workspace discovery failed before cargo metadata: {}",
+        output.stderr.trim_end()
+    );
+    let path = Path::new(output.stdout.trim_end_matches(['\r', '\n']));
+    anyhow::ensure!(
+        path.is_absolute(),
+        "cargo locate-project did not return an absolute workspace manifest path"
+    );
+    Ok(path
+        .parent()
+        .context("workspace manifest has no parent")?
+        .to_path_buf())
+}
+
 /// Load workspace metadata using `cargo metadata`.
 ///
 /// Centralized here so plan-building (and any other consumer) share the

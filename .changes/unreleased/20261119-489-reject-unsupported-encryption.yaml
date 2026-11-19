@@ -1,0 +1,6 @@
+kind: fixed
+body: Refuse commands that would write plaintext execution evidence when encryption is requested, while preserving encrypted state and receipt inspection through durable status.
+time: 2026-11-19T14:00:00Z
+custom:
+  Audience: Operators
+  Importance: Detailed
