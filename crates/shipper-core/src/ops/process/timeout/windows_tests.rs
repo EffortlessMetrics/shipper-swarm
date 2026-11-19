@@ -138,7 +138,9 @@ fn windows_fixture() {
             if mode == "timeout" {
                 thread::sleep(Duration::from_secs(12));
             }
-            if mode == "descendant42" { 42 } else { 0 }
+            // Exit the fixture here so the supervisor must finish cleanup
+            // while the descendant still owns the inherited pipes.
+            process::exit(if mode == "descendant42" { 42 } else { 0 });
         }
         _ => panic!("unexpected fixture {mode}"),
     };

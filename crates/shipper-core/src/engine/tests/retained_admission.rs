@@ -841,7 +841,10 @@ fn retry_backoff_checkpoint_replays_the_live_projection() -> Result<()> {
                     PackageState::Pending
                 );
                 assert_eq!(rebuilt.packages["demo@0.1.0"].state, PackageState::Pending);
-                assert_eq!(rebuilt.attempt_history.as_slice(), [detail.clone()]);
+                assert_eq!(
+                    rebuilt.attempt_history.as_slice(),
+                    std::slice::from_ref(detail)
+                );
                 assert_eq!(detail.error_class, Some(ErrorClass::Retryable));
 
                 // A journal written before the upload checkpoint existed

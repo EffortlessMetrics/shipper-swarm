@@ -528,8 +528,8 @@ fn unresolved_upload_replays_through_repeated_resume_before_registry_outcome() -
             ensure!(persisted.packages[key].state == expected);
             ensure!(rebuilt.packages[key].state == expected);
             ensure!(rebuilt.packages[key].attempts == 1);
-            ensure!(persisted.attempt_history == [detail.clone()]);
-            ensure!(rebuilt.attempt_history == [detail.clone()]);
+            ensure!(persisted.attempt_history.as_slice() == std::slice::from_ref(&detail));
+            ensure!(rebuilt.attempt_history.as_slice() == std::slice::from_ref(&detail));
         }
     }
     Ok(())

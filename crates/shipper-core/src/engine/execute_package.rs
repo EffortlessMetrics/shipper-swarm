@@ -2193,8 +2193,8 @@ pub(crate) fn publish_package_with_timeout(
                     let error_class_str = format!("{:?}", class);
                     // Keep the accepted upload checkpoint when readiness
                     // fails. Subsequent runs can still verify visibility.
-                    if !cargo_succeeded {
-                        if let Err(e) = commit_transition(
+                    if !cargo_succeeded
+                        && let Err(e) = commit_transition(
                             st,
                             state_dir,
                             event_log,
@@ -2212,9 +2212,9 @@ pub(crate) fn publish_package_with_timeout(
                                 },
                                 package: pkg_label.clone(),
                             },
-                        ) {
-                            return PackagePublishResult { result: Err(e) };
-                        }
+                        )
+                    {
+                        return PackagePublishResult { result: Err(e) };
                     }
 
                     // Send webhook notification: publication did not finish

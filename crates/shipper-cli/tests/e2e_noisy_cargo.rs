@@ -41,7 +41,7 @@ fn noisy_cargo_child() {
     if std::env::var_os(TIMEOUT_ENV).is_some() {
         let fixture = std::env::current_exe().unwrap();
         let args = ["--ignored", "--exact", "inherited_pipe_holder"];
-        let escaped = if let Ok(parent) = std::env::var(EXTERNAL_PARENT_ENV) {
+        let contained_child = if let Ok(parent) = std::env::var(EXTERNAL_PARENT_ENV) {
             // Deliberately put the test pipe holder outside Shipper's job,
             // using our own test harness as its logical parent.
             let parent = windows_spawn::ParentProcess::open(parent.parse().unwrap()).unwrap();
@@ -52,13 +52,14 @@ fn noisy_cargo_child() {
                 .stderr(windows_spawn::Stdio::from_borrowed(&std::io::stderr()).unwrap())
                 .spawn_with(windows_spawn::SpawnOptions::new().parent_process(&parent))
                 .unwrap();
-            true
+            None
         } else {
-            std::process::Command::new(fixture)
-                .args(args)
-                .spawn()
-                .unwrap();
-            false
+            Some(
+                std::process::Command::new(fixture)
+                    .args(args)
+                    .spawn()
+                    .unwrap(),
+            )
         };
         let deadline = std::time::Instant::now() + Duration::from_secs(4);
         while !root.join("pipe-holder-ready").exists() {
@@ -66,11 +67,13 @@ fn noisy_cargo_child() {
             thread::sleep(Duration::from_millis(10));
         }
         eprintln!("Token={STDERR_SECRET}");
-        if escaped {
+        let Some(mut contained_child) = contained_child else {
             std::process::exit(0);
-        }
+        };
         fs::write(root.join("unknown-registry"), "").unwrap();
-        thread::sleep(Duration::from_secs(15));
+        // The contained child keeps the pipes open while the parent waits.
+        // The fixture watchdog still bounds a broken supervision run.
+        contained_child.wait().unwrap();
         std::process::exit(98);
     }
     let mut stdout = std::io::stdout().lock();
