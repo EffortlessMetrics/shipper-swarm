@@ -7347,24 +7347,25 @@ mod tests {
     }
 
     #[test]
-    fn status_help_omits_publish_controls_but_keeps_compatibility_parsing() {
+    fn status_help_exposes_durable_inspection_without_advertising_publish_controls() {
         let mut status_command = cli_command()
             .find_subcommand("status")
             .expect("status command")
             .clone();
         let help = status_command.render_help().to_string();
 
-        assert!(
-            help.contains("--watch"),
-            "status help lost its read-only watch option"
-        );
+        for flag in ["--watch", "--durable", "--encrypt", "--encrypt-passphrase"] {
+            assert!(
+                help.split_whitespace().any(|word| word == flag),
+                "status help lost its inspection option {flag}"
+            );
+        }
         for flag in [
             "--allow-dirty",
             "--no-verify",
             "--max-attempts",
             "--parallel",
             "--webhook-secret",
-            "--encrypt-passphrase",
         ] {
             assert!(
                 !help.contains(flag),
