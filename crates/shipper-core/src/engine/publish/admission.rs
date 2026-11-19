@@ -1,5 +1,6 @@
 //! Read retained publication authority before any new execution effects.
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
@@ -13,7 +14,8 @@ use crate::lock::{LockContents, LockReservation};
 use crate::plan::PlannedWorkspace;
 use crate::state::{consistency, events, execution_state as state, run_observation};
 use crate::types::{
-    EventType, ExecutionState, PackageState, PublishEvent, ReconciliationReport, RuntimeOptions,
+    ErrorClass, EventType, ExecutionState, PackageState, PublishEvent, ReconciliationOutcome,
+    ReconciliationReport, RuntimeOptions,
 };
 
 /// This is an early diagnostic only. Its result makes the state requirement
@@ -67,19 +69,25 @@ fn load_retained_state(
     require_existing: bool,
     prior: Option<&LockContents>,
 ) -> Result<Option<ExecutionState>> {
-    let Some(existing) = load_cleanup_checked_state(state_dir)? else {
+    let (existing, log) = load_cleanup_checked_evidence(state_dir)?;
+    let Some(existing) = existing else {
         if require_existing {
             bail!(
                 "no existing state found in {}; retained state is required, so preserve and inspect the evidence before retrying",
                 state_dir.display()
             );
         }
-        ensure_no_retained_execution(state_dir)?;
+        ensure_no_retained_execution(state_dir, &log)?;
         return Ok(None);
     };
     super::bootstrap::validate_existing_plan_id(&existing, ws, opts)?;
     let observation = match prior {
-        Some(prior) => run_observation::observe_run_with_prior_lock(state_dir, prior)?,
+        Some(prior) => {
+            // During precheck another publisher can still be between writes.
+            // Judge its retained attempt only once we own the reservation.
+            ensure_upload_checkpoint_is_safe(ws, &existing, &log)?;
+            run_observation::observe_run_with_prior_lock(state_dir, prior)?
+        }
         None => run_observation::observe_run(state_dir, Some(&ws.workspace_root))?,
     };
     let reconciliation_path = state::reconciliation_path(state_dir);
@@ -145,8 +153,87 @@ fn load_retained_state(
     Ok(Some(existing))
 }
 
-fn ensure_no_retained_execution(state_dir: &Path) -> Result<()> {
-    let log = events::EventLog::read_from_file(&events::events_path(state_dir))?;
+#[derive(Default)]
+struct UnresolvedUpload {
+    attempt: Option<u32>,
+    ambiguity_recorded: bool,
+}
+
+/// A split write can leave a readable snapshot behind its latest Cargo
+/// attempt. Refuse incompatible evidence before any scheduler can use that
+/// snapshot. Only retire a witness on a package outcome, in append order.
+fn ensure_upload_checkpoint_is_safe(
+    ws: &PlannedWorkspace,
+    state: &ExecutionState,
+    log: &events::EventLog,
+) -> Result<()> {
+    let mut unresolved = BTreeMap::<&str, UnresolvedUpload>::new();
+    for event in log.all_events() {
+        let key = event.package.as_str();
+        match event.event_type {
+            EventType::PackageAttempted { attempt, .. } => {
+                unresolved.insert(
+                    key,
+                    UnresolvedUpload {
+                        attempt: Some(attempt),
+                        ambiguity_recorded: false,
+                    },
+                );
+            }
+            EventType::PackageUploadUnconfirmed { .. }
+            | EventType::PackageFailed {
+                class: ErrorClass::Ambiguous,
+                ..
+            }
+            | EventType::PublishReconciled {
+                outcome: ReconciliationOutcome::StillUnknown { .. },
+            } => {
+                unresolved.entry(key).or_default().ambiguity_recorded = true;
+            }
+            EventType::PackageFailed { .. }
+            | EventType::PackageUploaded
+            | EventType::PackagePublished { .. }
+            | EventType::PackageSkipped { .. }
+            | EventType::PublishReconciled { .. } => {
+                unresolved.remove(key);
+            }
+            _ => {}
+        }
+    }
+
+    for package in &ws.plan.packages {
+        let key = crate::runtime::execution::pkg_key(&package.name, &package.version);
+        let Some(witness) = unresolved.get(key.as_str()) else {
+            continue;
+        };
+        let safe = state.packages.get(&key).is_some_and(|progress| {
+            // Published and skipped projections already prevent uploads, even
+            // when old logs lack their corresponding terminal event.
+            matches!(
+                progress.state,
+                PackageState::Published | PackageState::Skipped { .. }
+            ) || (witness.ambiguity_recorded
+                && witness
+                    .attempt
+                    .is_none_or(|attempt| attempt == progress.attempts)
+                && matches!(
+                    progress.state,
+                    PackageState::Ambiguous { .. }
+                        | PackageState::Failed {
+                            class: ErrorClass::Ambiguous,
+                            ..
+                        }
+                ))
+        });
+        ensure!(
+            safe,
+            "{key}: retained events show an unresolved Cargo upload that state.json cannot safely resume; preserve both files and reconcile the prior upload before retrying"
+        );
+    }
+    Ok(())
+}
+
+fn ensure_no_retained_execution(state_dir: &Path, log: &events::EventLog) -> Result<()> {
     let has_execution = log.all_events().iter().any(|event| {
         !matches!(
             event.event_type,
@@ -214,7 +301,7 @@ pub(in crate::engine) fn validate_fresh_parallel_state(
 /// Keep this inside the retained-admission owner so all public entry points
 /// inspect the same state and authoritative event evidence before mutation.
 pub(in crate::engine) fn validate_cleanup_safety(state_dir: &Path) -> Result<()> {
-    load_cleanup_checked_state(state_dir).map(|_| ())
+    load_cleanup_checked_evidence(state_dir).map(|_| ())
 }
 
 /// Rehearsal uses the same ownership key, but has no normal publish projection
@@ -252,7 +339,9 @@ pub(in crate::engine) fn ensure_no_cleanup_hold(state: &ExecutionState) -> Resul
     Ok(())
 }
 
-fn load_cleanup_checked_state(state_dir: &Path) -> Result<Option<ExecutionState>> {
+fn load_cleanup_checked_evidence(
+    state_dir: &Path,
+) -> Result<(Option<ExecutionState>, events::EventLog)> {
     // The underlying event reader includes malformed line content in its
     // context. Do not echo arbitrary retained payloads through this admission
     // boundary, including when the projection is missing or unreadable.
@@ -294,14 +383,14 @@ fn load_cleanup_checked_state(state_dir: &Path) -> Result<Option<ExecutionState>
             message: format!("{package}: retained process-cleanup event blocks publication, including with missing or stale state; preserve the evidence and inspect the owned processes before any new publication"),
         }.into());
     }
-    log.map_err(|_| {
+    let log = log.map_err(|_| {
         anyhow::anyhow!(
             "cannot inspect retained publication events; preserve the evidence before retrying"
         )
     })?;
     // A readable hold event takes precedence over a malformed projection;
     // otherwise any unreadable artifact still refuses admission.
-    retained
+    Ok((retained?, log))
 }
 
 /// A positive, fully typed hold record still refuses cleanup when a different

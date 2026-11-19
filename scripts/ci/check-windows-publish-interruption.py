@@ -36,11 +36,16 @@ def cargo_fixture(root):
 def cli_fixture(sh, root, stage, parallel):
     entered = threading.Event()
     release = threading.Event()
+    version_visible = threading.Event()
 
     class Registry(BaseHTTPRequestHandler):
         def do_GET(self):
             assert self.path == "/api/v1/crates/demo/0.1.0", self.path
-            status = 503 if (root / "unknown-registry").exists() else 404
+            status = 404
+            if version_visible.is_set():
+                status = 200
+            elif stage != "backoff" and (root / "unknown-registry").exists():
+                status = 503
             if status == 503:
                 entered.set()
                 assert release.wait(12), "registry handler watchdog expired"
@@ -84,6 +89,9 @@ def cli_fixture(sh, root, stage, parallel):
             "--per-package-timeout", "2s", "--format", "json",
             "--readiness-method", "api", "--readiness-poll", "0ms",
             "--readiness-timeout", "1s"]
+    if stage == "backoff":
+        args[args.index("--format") + 1] = "text"
+        args += ["--base-delay", "20s", "--max-delay", "20s", "--retry-jitter", "0"]
     if parallel:
         args += ["--parallel", "--max-concurrent", "2"]
     event_path = root / "state/events.jsonl"
@@ -92,7 +100,17 @@ def cli_fixture(sh, root, stage, parallel):
             proc = subprocess.Popen(args + ["publish"], cwd=root, env=env, stdin=subprocess.DEVNULL,
                                     stdout=out, stderr=err, creationflags=NEW_GROUP)
             try:
-                assert entered.wait(10), "CLI never reached the post-Cargo registry check"
+                if stage == "backoff":
+                    # The executor notifies the reporter after both files are
+                    # committed. Wait for that notification before Ctrl+Break.
+                    deadline = time.monotonic() + 10
+                    while b"next attempt in" not in (root / "cli.stderr").read_bytes():
+                        assert proc.poll() is None and time.monotonic() < deadline, (
+                            "CLI never entered retry backoff", proc.poll()
+                        )
+                        time.sleep(0.02)
+                else:
+                    assert entered.wait(10), "CLI never reached the post-Cargo registry check"
                 members = (wintypes.DWORD * 64)()
                 count = KERNEL.GetConsoleProcessList(members, len(members))
                 assert 1 < count <= len(members)
@@ -115,6 +133,8 @@ def cli_fixture(sh, root, stage, parallel):
         state = json.loads((root / "state/state.json").read_bytes())
         checkpoint = [event for event in events if event["type"] == "package_upload_unconfirmed"]
 
+        if stage == "backoff":
+            version_visible.set()
         resumed = subprocess.run(args + ["resume"], env=env, cwd=root,
                                  stdin=subprocess.DEVNULL, capture_output=True, timeout=12)
         following = event_path.read_bytes()
@@ -123,6 +143,20 @@ def cli_fixture(sh, root, stage, parallel):
         print(json.dumps(dict(stage=stage, parallel=parallel, exit=proc.returncode,
                               live_state=live_state, checkpoint=bool(checkpoint),
                               upload_attempts=len(uploads), resume=resumed.returncode)), flush=True)
+        if stage == "backoff":
+            projection = state["packages"]["demo@0.1.0"]["state"]
+            failures = [event for event in events if event["type"] == "package_failed"]
+            waits = [event for event in events if event["type"] == "retry_backoff_started"]
+            assert projection["state"] == "pending", projection
+            assert len(failures) == len(waits) == len(state["attempt_history"]) == 1
+            assert failures[0]["message"] == waits[0]["message"]
+            attempt = state["attempt_history"][0]
+            assert attempt["attempt"] == waits[0]["attempt"] == 1
+            assert attempt["error_class"] == failures[0]["class"] == "retryable"
+            assert attempt["next_attempt_at"] == waits[0]["next_attempt_at"]
+            assert resumed.returncode == 0 and len(uploads) == 1, resumed.stderr
+            assert following.startswith(initial)
+            return
         assert live_state == "ambiguous"
         assert [event["class"] for event in checkpoint] == [
             "ambiguous" if stage == "timeout" else "retryable"
@@ -143,7 +177,7 @@ def main():
         cli_fixture(Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4], sys.argv[5] == "1")
     else:
         parser = argparse.ArgumentParser()
-        parser.add_argument("stage", choices=["nonzero", "timeout"])
+        parser.add_argument("stage", choices=["nonzero", "timeout", "backoff"])
         parser.add_argument("binary", type=Path)
         options = parser.parse_args()
         startup = subprocess.STARTUPINFO()

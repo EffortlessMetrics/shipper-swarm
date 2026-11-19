@@ -206,10 +206,9 @@ fn apply_event(
             }
             // The new invocation may reconcile an old upload. Its result
             // must not rewrite the earlier Cargo attempt's durable outcome.
-            if active_attempts
-                .get(&key)
-                .is_some_and(|active| active.upload_unconfirmed)
-            {
+            if active_attempts.get(&key).is_some_and(|active| {
+                active.upload_checkpoint == Some(UploadCheckpoint::Provisional)
+            }) {
                 active_attempts.remove(&key);
             }
             progress.last_updated_at = event.timestamp;
@@ -283,7 +282,7 @@ fn apply_event(
                 active.ended_at = event.timestamp;
                 active.error_class = Some(class.clone());
                 active.redacted_message = Some(message.clone());
-                active.upload_unconfirmed = true;
+                active.upload_checkpoint = Some(UploadCheckpoint::Provisional);
                 attempt_history.push(rebuild_attempt_to_detail(active.clone()));
             }
             if let Some(progress) = ensure_event_package(packages, event, event.timestamp) {
@@ -369,22 +368,8 @@ fn apply_event(
             reason,
             message,
             ..
-        } => {
-            if let Some(active) = active_attempt_for_key_mut(active_attempts, &event.package)
-                && active.attempt == *attempt
-            {
-                apply_retry_wait(
-                    active,
-                    *max_attempts,
-                    *next_attempt_at,
-                    reason,
-                    message,
-                    event.timestamp,
-                );
-                finalize_attempt(active_attempts, attempt_history, &event.package);
-            }
         }
-        EventType::RetryScheduled {
+        | EventType::RetryScheduled {
             attempt,
             max_attempts,
             next_attempt_at,
@@ -403,6 +388,23 @@ fn apply_event(
                     message,
                     event.timestamp,
                 );
+                // A checkpointed ordinary failure commits Pending and the
+                // retry schedule together after confirming registry absence.
+                // Keep the older journal projection for pre-checkpoint logs.
+                if active.upload_checkpoint == Some(UploadCheckpoint::Classified)
+                    && matches!(reason, ErrorClass::Retryable)
+                    && let Some(progress) = packages.get_mut(&event.package)
+                    && matches!(
+                        progress.state,
+                        PackageState::Failed {
+                            class: ErrorClass::Retryable,
+                            ..
+                        }
+                    )
+                {
+                    progress.state = PackageState::Pending;
+                    progress.last_updated_at = event.timestamp;
+                }
                 finalize_attempt(active_attempts, attempt_history, &event.package);
             }
         }
@@ -429,7 +431,13 @@ struct RebuildAttemptDetail {
     next_attempt_at: Option<DateTime<Utc>>,
     redacted_message: Option<String>,
     saw_failure: bool,
-    upload_unconfirmed: bool,
+    upload_checkpoint: Option<UploadCheckpoint>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UploadCheckpoint {
+    Provisional,
+    Classified,
 }
 
 fn start_rebuild_attempt(
@@ -463,7 +471,7 @@ fn start_rebuild_attempt(
             next_attempt_at: None,
             redacted_message: None,
             saw_failure: false,
-            upload_unconfirmed: false,
+            upload_checkpoint: None,
         },
     );
 }
@@ -481,13 +489,13 @@ fn apply_package_failed(
     let Some(active) = active_attempt_for_key_mut(active_attempts, package_key) else {
         return;
     };
-    if active.upload_unconfirmed {
+    if active.upload_checkpoint == Some(UploadCheckpoint::Provisional) {
         attempt_history.retain(|detail| {
             detail.package != active.package
                 || detail.version != active.version
                 || detail.attempt != active.attempt
         });
-        active.upload_unconfirmed = false;
+        active.upload_checkpoint = Some(UploadCheckpoint::Classified);
     }
     // Live attempt details capture the first failure's timestamp/message when the
     // attempt is recorded (retry schedule or exhaustion). A later terminal
@@ -528,7 +536,7 @@ fn finalize_attempt(
     package_key: &str,
 ) {
     if let Some(active) = active_attempts.remove(package_key)
-        && !active.upload_unconfirmed
+        && active.upload_checkpoint != Some(UploadCheckpoint::Provisional)
     {
         let mut attempt = rebuild_attempt_to_detail(active);
         if attempt.max_attempts < attempt.attempt {
@@ -544,7 +552,7 @@ fn finalize_active_attempts(
 ) {
     let mut active = Vec::with_capacity(active_attempts.len());
     while let Some((_, active_attempt)) = active_attempts.pop_first() {
-        if !active_attempt.upload_unconfirmed {
+        if active_attempt.upload_checkpoint != Some(UploadCheckpoint::Provisional) {
             active.push(active_attempt);
         }
     }

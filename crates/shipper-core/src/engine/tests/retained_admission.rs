@@ -492,3 +492,219 @@ fn preflight_and_rehearsal_history_do_not_prevent_a_fresh_publish() -> Result<()
     }
     Ok(())
 }
+
+#[derive(Clone, Copy, Debug)]
+enum UploadCheckpointFault {
+    EventAppend,
+    ProjectionSync,
+}
+
+fn assert_upload_checkpoint_split_write_refuses_resume(fault: UploadCheckpointFault) -> Result<()> {
+    use crate::state::file_sync_test_support::{observe, observe_event_append};
+
+    const INJECTED: &str = "injected unresolved upload persistence failure";
+    let mut failures = Vec::new();
+    for parallel in [false, true] {
+        let result = (|| -> Result<()> {
+            let fixture = Fixture::new(parallel, false);
+            let mut opts = fixture.opts.clone();
+            opts.max_attempts = 3;
+            // The initial precheck finds no version. Any later registry
+            // query fails, so an unsafe Pending resume would call Cargo.
+            fixture.registry.respond_with(&[404, 503]);
+            let injected = match fault {
+                UploadCheckpointFault::EventAppend => {
+                    observe_event_append(&fixture.state_dir, |path| {
+                        let log = events::EventLog::read_from_file(path)
+                            .map_err(std::io::Error::other)?;
+                        if log.all_events().last().is_some_and(|event| {
+                            matches!(event.event_type, EventType::PackageOutput { .. })
+                        }) {
+                            return Err(std::io::Error::other(INJECTED));
+                        }
+                        Ok(())
+                    })
+                }
+                UploadCheckpointFault::ProjectionSync => observe(&fixture.state_dir, |path| {
+                    if path.file_name().and_then(|name| name.to_str()) == Some("state.tmp") {
+                        let projection: ExecutionState = serde_json::from_slice(&fs::read(path)?)
+                            .map_err(std::io::Error::other)?;
+                        if matches!(
+                            projection.packages["demo@0.1.0"].state,
+                            PackageState::Ambiguous { .. }
+                        ) {
+                            return Err(std::io::Error::other(INJECTED));
+                        }
+                    }
+                    Ok(())
+                }),
+            };
+            let first = fixture.with_cargo("42", || {
+                run_publish(&fixture.ws, &opts, &mut CollectingReporter::default())
+            });
+            let error = first.expect_err("persisting upload uncertainty must fail");
+            ensure!(
+                error.chain().any(|cause| cause.to_string() == INJECTED),
+                "{error:#}"
+            );
+            drop(injected);
+            ensure!(fixture.cargo_calls() == 1 && fixture.registry.hits() == 1);
+
+            let retained = fixture.retained()?;
+            let progress = &retained.packages["demo@0.1.0"];
+            ensure!(progress.state == PackageState::Pending && progress.attempts == 1);
+            let events =
+                events::EventLog::read_from_file(&events::events_path(&fixture.state_dir))?;
+            ensure!(events.all_events().iter().any(|event| matches!(
+                event.event_type,
+                EventType::PackageAttempted { attempt: 1, .. }
+            )));
+            ensure!(
+                events
+                    .all_events()
+                    .iter()
+                    .any(|event| matches!(event.event_type, EventType::PackageOutput { .. }))
+            );
+            ensure!(
+                events.all_events().iter().any(|event| matches!(
+                    event.event_type,
+                    EventType::PackageUploadUnconfirmed { .. }
+                )) == matches!(fault, UploadCheckpointFault::ProjectionSync)
+            );
+
+            let before = fixture.snapshot()?;
+            for entry in [Entry::Resume, Entry::Publish, Entry::DirectParallel] {
+                let error = invoke(&fixture, entry, &opts, &mut retained.clone())
+                    .expect_err("retained uncertainty must refuse admission");
+                ensure!(
+                    fixture.cargo_calls() == 1,
+                    "{entry:?} started another upload after {fault:?}"
+                );
+                ensure!(
+                    fixture.registry.hits() == 1,
+                    "{entry:?} reached the registry after {fault:?}"
+                );
+                ensure!(is_publish_admission_error(&error), "{error:#}");
+                ensure!(
+                    format!("{error:#}").contains("unresolved Cargo upload"),
+                    "{error:#}"
+                );
+                ensure!(fixture.snapshot()? == before, "{entry:?} changed evidence");
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            failures.push(format!("parallel={parallel}: {error:#}"));
+        }
+    }
+    ensure!(failures.is_empty(), "{}", failures.join("\n"));
+    Ok(())
+}
+
+#[test]
+#[serial]
+fn failed_upload_checkpoint_append_must_refuse_resume() -> Result<()> {
+    assert_upload_checkpoint_split_write_refuses_resume(UploadCheckpointFault::EventAppend)
+}
+
+#[test]
+#[serial]
+fn failed_upload_checkpoint_projection_must_refuse_resume() -> Result<()> {
+    assert_upload_checkpoint_split_write_refuses_resume(UploadCheckpointFault::ProjectionSync)
+}
+
+#[test]
+#[serial]
+fn retry_backoff_checkpoint_replays_the_live_projection() -> Result<()> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    for parallel in [false, true] {
+        let fixture = Fixture::new(parallel, false);
+        fixture.registry.respond_with(&[404, 404]);
+        let mut opts = fixture.opts.clone();
+        opts.max_attempts = 2;
+        let inspected = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&inspected);
+        let event_path = events::events_path(&fixture.state_dir);
+        let _fault =
+            crate::state::file_sync_test_support::observe(&fixture.state_dir, move |path| {
+                if path.file_name().and_then(|name| name.to_str()) != Some("state.tmp") {
+                    return Ok(());
+                }
+                let projection: ExecutionState =
+                    serde_json::from_slice(&fs::read(path)?).map_err(std::io::Error::other)?;
+                let Some(detail) = projection
+                    .attempt_history
+                    .last()
+                    .filter(|detail| detail.next_attempt_at.is_some())
+                else {
+                    return Ok(());
+                };
+                let rebuilt = crate::state::rebuild::rebuild_state_from_events(
+                    &event_path,
+                    crate::state::rebuild::StateRebuildOptions::new(projection.registry.clone()),
+                )
+                .map_err(std::io::Error::other)?;
+                assert_eq!(
+                    projection.packages["demo@0.1.0"].state,
+                    PackageState::Pending
+                );
+                assert_eq!(rebuilt.packages["demo@0.1.0"].state, PackageState::Pending);
+                assert_eq!(rebuilt.attempt_history.as_slice(), [detail.clone()]);
+                assert_eq!(detail.error_class, Some(ErrorClass::Retryable));
+
+                // A journal written before the upload checkpoint existed
+                // retains its historical projection and retry metadata.
+                let log =
+                    events::EventLog::read_from_file(&event_path).map_err(std::io::Error::other)?;
+                let mut legacy_log = events::EventLog::new();
+                for event in log.all_events() {
+                    if !matches!(event.event_type, EventType::PackageUploadUnconfirmed { .. }) {
+                        legacy_log.record(event.clone());
+                    }
+                }
+                let legacy_path = path.with_file_name("legacy-backoff.jsonl");
+                legacy_log
+                    .write_to_file(&legacy_path)
+                    .map_err(std::io::Error::other)?;
+                let legacy = crate::state::rebuild::rebuild_state_from_events(
+                    &legacy_path,
+                    crate::state::rebuild::StateRebuildOptions::new(projection.registry.clone()),
+                )
+                .map_err(std::io::Error::other)?;
+                assert!(matches!(
+                    legacy.packages["demo@0.1.0"].state,
+                    PackageState::Failed {
+                        class: ErrorClass::Retryable,
+                        ..
+                    }
+                ));
+                assert_eq!(legacy.attempt_history, rebuilt.attempt_history);
+                observed.store(true, Ordering::Release);
+                Err(std::io::Error::other(
+                    "stop at the witnessed backoff boundary",
+                ))
+            });
+        let result = with_test_env(
+            &fixture.bin,
+            vec![
+                ("SHIPPER_CARGO_EXIT", Some("42".into())),
+                ("SHIPPER_CARGO_STDOUT", Some(String::new())),
+                (
+                    "SHIPPER_CARGO_STDERR",
+                    Some("connection reset by peer".into()),
+                ),
+                (
+                    "SHIPPER_CARGO_ARGS_LOG",
+                    Some(fixture.cargo_log.to_string_lossy().into_owned()),
+                ),
+            ],
+            || run_publish(&fixture.ws, &opts, &mut CollectingReporter::default()),
+        );
+        let error = result.expect_err("the checkpoint observer must stop the run");
+        ensure!(format!("{error:#}").contains("stop at the witnessed backoff boundary"));
+        ensure!(inspected.load(Ordering::Acquire));
+        ensure!(fixture.cargo_calls() == 1 && fixture.registry.hits() == 2);
+    }
+    Ok(())
+}
