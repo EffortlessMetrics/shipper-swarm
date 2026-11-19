@@ -169,6 +169,23 @@ separate.
 
 ## Testing
 
+### GitHub Actions validation
+
+Run the pinned workflow linter from the repository root before handing off
+workflow changes:
+
+```bash
+uvx --from jactionlint==2.5.0 jactionlint --profile correctness --no-online --shellcheck=""
+```
+
+If installed with `uv tool install jactionlint==2.5.0`, the equivalent command is
+`jactionlint --profile correctness --no-online --shellcheck=""`; `jactionlint --version`
+shows the selected version. The `Runner Routing Guard` uses the same correctness
+profile and checks a SHA256-pinned release binary. It keeps the pre-existing
+ShellCheck-disabled scope and reads `.github/actionlint.yaml` for runner labels.
+The gate is static workflow proof, not evidence of runner availability, release
+success, or cold/warm-cache timings. YAML parsing alone does not replace it.
+
 ### Running Tests
 
 The [Testing Guide](docs/testing.md) explains package selection, focused tests,

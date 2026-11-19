@@ -15,6 +15,7 @@ use super::events::EventLog;
 use super::execution_state;
 
 #[cfg(test)]
+#[path = "reconciliation/test_hooks_tests.rs"]
 pub(crate) mod test_hooks;
 
 pub const RECONCILIATION_SCHEMA_VERSION: &str = "shipper.reconciliation.v1";

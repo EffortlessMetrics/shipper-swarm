@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, ready_for_review]
   merge_group:
   workflow_dispatch:
     inputs:
@@ -37,7 +37,9 @@ permissions:
 jobs:
   route:
     name: Route Shipper Rust Small
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name != 'pull_request' || (github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository)
+    # Draft PRs are review-only. Ready-for-review dispatches the current
+    # required gate; push, merge-group and manual runs remain unchanged.
     # The router must be able to observe an empty self-hosted pool. Keeping
     # this bootstrap job on GitHub-hosted infrastructure prevents the exact
     # no-runner condition it is responsible for detecting from deadlocking
@@ -534,18 +536,34 @@ jobs:
       - rust_small_cpx42
       - rust_small_cx53
       - rust_small_github
-    if: |
-      always() &&
-      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    if: always()
+    # Keep the required check actively fail-closed for draft/fork PRs.
+    # GitHub treats a skipped required job as success, so skipping this
+    # normalizer would let a draft result masquerade as ready-PR proof.
+    # Ready-for-review re-runs the genuine producer and normalization.
     # Result normalization is a small, non-secret reporting step. It must
     # remain available when every optional self-hosted execution lane is
     # offline, otherwise branch protection can never observe the fallback.
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - name: Refuse draft PR without current Rust proof
+        if: github.event_name == 'pull_request' && github.event.pull_request.draft
+        run: |
+          echo '::error::Draft PR is not qualified. Mark ready for review to run required Rust proof.'
+          exit 1
+
+      - name: Refuse untrusted fork PR without current Rust proof
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+        run: |
+          echo '::error::Untrusted fork PR has no eligible trusted Rust proof.'
+          exit 1
+
       - uses: actions/checkout@v7.0.1
+        if: github.event_name != 'pull_request' || (github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository)
 
       - name: Normalize routed result
+        if: github.event_name != 'pull_request' || (github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository)
         env:
           TARGET: ${{ needs.route.outputs.target }}
           REASON: ${{ needs.route.outputs.reason }}

@@ -420,8 +420,8 @@ kind = "workflow_lint_config"
 surface = "ci"
 classification = "config"
 owner = "release/ci"
-reason = "Actionlint configuration constraining approved self-hosted runner labels and workflow policy variables."
-covered_by = ["runner-routing-guard.yml", "actionlint"]
+reason = "Compatible actionlint configuration used by jactionlint to constrain approved self-hosted runner labels and workflow policy variables."
+covered_by = ["runner-routing-guard.yml", "jactionlint --profile correctness --no-online --shellcheck=\"\""]
 created = "2026-07-12"
 review_after = "2026-10-12"
 
