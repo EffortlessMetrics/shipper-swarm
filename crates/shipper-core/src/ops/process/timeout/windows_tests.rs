@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use super::super::capture::CaptureMode;
 use super::super::interruption::PublishInterruption;
 use super::super::{CaptureLoss, CapturedCommandOutput, CleanupFailure};
-use super::windows::{CLEANUP_ALLOWANCE, Fault, run_supervised, with_fault};
+use super::windows::{CLEANUP_ALLOWANCE, Fault, run_supervised, spawn_in_job, with_fault};
 
 const FIXTURE: &str = "ops::process::timeout::windows_tests::windows_fixture";
 const PROBE: &str = "ops::process::timeout::windows_tests::windows_probe";
@@ -264,11 +264,16 @@ fn windows_probe() {
         )
     });
     assert!(setup.is_err());
-    let output = with_fault(Fault::Spawn, || {
-        fixture(root.path(), "quiet0", TEST_TIMEOUT, tail)
-    });
-    assert_eq!(output.cleanup_failure, Some(CleanupFailure::JobSpawn));
-    assert_eq!(output.output.exit_code, -1);
+    for (fault, stage) in [
+        (Fault::Assign, CleanupFailure::JobAssignment),
+        (Fault::Resume, CleanupFailure::JobResume),
+    ] {
+        let output = with_fault(fault, || fixture(root.path(), "quiet0", TEST_TIMEOUT, tail));
+        assert_eq!(output.cleanup_failure, Some(stage));
+        assert_eq!(output.output.exit_code, -1);
+        assert_eq!(output.capture.stdout, Some(CaptureLoss::Cleanup));
+        assert_eq!(output.capture.stderr, Some(CaptureLoss::Cleanup));
+    }
     assert!(sibling.0.try_wait().unwrap().is_none());
 
     // Interruption is sticky in this process, so this witness runs last.
@@ -312,13 +317,13 @@ fn bounded_windows_supervision_has_an_external_watchdog() {
     // The watchdog owns a separate outer job so a wedged fixture cannot
     // survive a watchdog failure. This also tests nested-job assignment.
     let outer_job = processkit::ProcessGroup::new().unwrap();
-    let mut command = tokio::process::Command::new(test_exe());
+    let mut command = windows_spawn::Command::new(test_exe());
     command
         .args(fixture_args(PROBE))
-        .stdin(Stdio::null())
-        .stdout(log.try_clone().unwrap())
-        .stderr(log);
-    let mut child = outer_job.spawn(command).unwrap();
+        .stdin(windows_spawn::Stdio::null())
+        .stdout(windows_spawn::Stdio::from(log.try_clone().unwrap()))
+        .stderr(windows_spawn::Stdio::from(log));
+    let mut child = spawn_in_job(&outer_job, command).unwrap();
     let deadline = Instant::now() + Duration::from_secs(25);
     loop {
         if let Some(status) = child.try_wait().unwrap() {

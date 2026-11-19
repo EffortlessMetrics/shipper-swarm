@@ -4,14 +4,14 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, ErrorKind, Read};
 use std::os::windows::io::AsHandle;
 use std::path::Path;
-use std::process::{ExitStatus, Stdio};
+use std::process::ExitStatus;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use interprocess::os::windows::named_pipe::{PipeListenerOptions, PipeMode, PipeStream, pipe_mode};
 use processkit::ProcessGroup;
-use tokio::process::{Child, Command};
+use windows_spawn::{Child, Command, Stdio};
 
 use super::super::capture::{CaptureBuffer, CaptureMode};
 use super::super::interruption::{self, InterruptionLease};
@@ -31,8 +31,6 @@ pub(super) fn run_supervised(
     timeout: Option<Duration>,
     capture: CaptureMode,
 ) -> Result<CapturedCommandOutput> {
-    // The Windows implementations of spawn and try_wait use synchronous
-    // process-handle calls; none of Tokio's future/stdio adapters are used.
     let lease = InterruptionLease::acquire()?;
     interruption::check()?;
     let started = Instant::now();
@@ -44,15 +42,14 @@ pub(super) fn run_supervised(
         })
         .transpose()?;
 
-    // A fresh, unnamed, kill-on-close job. The wrapper spawns suspended,
-    // assigns through the owned process handle, then resumes. We retain both
-    // the job and the direct child; descendant state cannot change its status.
+    // A fresh, unnamed, kill-on-close job. The direct child owns its
+    // process handle and exit status separately from the job.
     let job = create_job()?;
     let (stdout, stdout_writer) = capture_pipe().context("failed to prepare Windows stdout")?;
     let (stderr, stderr_writer) = capture_pipe().context("failed to prepare Windows stderr")?;
-    let mut command = Command::new(program);
+    let mut command = command_for(program, args, working_dir)
+        .with_context(|| format!("failed to prepare Windows command: {program}"))?;
     command
-        .args(args)
         .current_dir(working_dir)
         .stdout(Stdio::from(stdout_writer))
         .stderr(Stdio::from(stderr_writer));
@@ -60,14 +57,17 @@ pub(super) fn run_supervised(
     interruption::check()?;
     let mut child = match spawn_in_job(&job, command) {
         Ok(child) => child,
+        Err(LaunchError::Create(error)) if error.kind() == ErrorKind::NotFound => {
+            return Err(error).with_context(|| format!("failed to spawn command: {program}"));
+        }
         Err(error) => {
-            let reason = std::error::Error::source(&error)
-                .and_then(|source| source.downcast_ref::<io::Error>());
-            if reason.is_some_and(|source| source.kind() == ErrorKind::NotFound) {
-                return Err(error).with_context(|| format!("failed to spawn command: {program}"));
-            }
-            // The wrapper may already have created a suspended child. Its
-            // rollback attempts termination but discards the cleanup result.
+            let failure = match error {
+                LaunchError::Create(_) => CleanupFailure::JobSpawn,
+                LaunchError::Assign => CleanupFailure::JobAssignment,
+                LaunchError::Resume => CleanupFailure::JobResume,
+            };
+            // A suspended child may have been created. The wrapper's
+            // rollback attempts termination without confirming exit.
             return Ok(CapturedCommandOutput {
                 output: CommandOutput {
                     exit_code: -1,
@@ -80,7 +80,7 @@ pub(super) fn run_supervised(
                     stdout: Some(CaptureLoss::Cleanup),
                     stderr: Some(CaptureLoss::Cleanup),
                 },
-                cleanup_failure: Some(CleanupFailure::JobSpawn),
+                cleanup_failure: Some(failure),
                 interrupted: interruption::requested(),
                 interruption_lease: lease,
             });
@@ -186,6 +186,89 @@ pub(super) fn run_supervised(
     })
 }
 
+fn command_for(program: &str, args: &[&str], working_dir: &Path) -> io::Result<Command> {
+    let path = Path::new(program);
+    if !path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat"))
+    {
+        let mut command = Command::new(program);
+        command.args(args);
+        return Ok(command);
+    }
+
+    let script = which::which_in(program, std::env::var_os("PATH"), working_dir)
+        .map_err(|error| io::Error::new(ErrorKind::NotFound, error))?;
+    let script = script.to_str().ok_or_else(invalid_batch_argument)?;
+    if script.contains(['%', '"', '\0', '\r', '\n']) {
+        return Err(invalid_batch_argument());
+    }
+
+    let system_root = std::env::var_os("SystemRoot")
+        .context("Windows system directory is unavailable")
+        .map_err(io::Error::other)?;
+    let mut command = Command::new(Path::new(&system_root).join("System32").join("cmd.exe"));
+    let mut command_line = format!("/d /e:ON /v:OFF /s /c \"\"{script}\"");
+    for arg in args {
+        command_line.push(' ');
+        append_batch_argument(&mut command_line, arg)?;
+    }
+    command_line.push('"');
+    command.raw_arg(command_line);
+    Ok(command)
+}
+
+fn invalid_batch_argument() -> io::Error {
+    io::Error::new(
+        ErrorKind::InvalidInput,
+        "invalid Windows batch path or argument",
+    )
+}
+
+fn append_batch_argument(command_line: &mut String, arg: &str) -> io::Result<()> {
+    if arg.contains(['\0', '\r', '\n']) {
+        return Err(invalid_batch_argument());
+    }
+    // Match the Rust Windows batch argument rules for UTF-8 arguments.
+    // https://github.com/rust-lang/rust/blob/1.95.0/library/std/src/sys/args/windows.rs
+    let quoted = arg.is_empty()
+        || arg.ends_with('\\')
+        || arg.chars().any(|character| {
+            character.is_control()
+                || (character.is_ascii()
+                    && !character.is_ascii_alphanumeric()
+                    && !r"#$*+-./:?@\_".contains(character))
+        });
+    if quoted {
+        command_line.push('"');
+    }
+    let mut slashes = 0;
+    for character in arg.chars() {
+        match character {
+            '\\' => slashes += 1,
+            '"' => {
+                command_line.extend(std::iter::repeat_n('\\', slashes));
+                command_line.push('"');
+                slashes = 0;
+            }
+            '%' => {
+                // Consume one empty cmd.exe substring expansion to preserve
+                // the percent sign as data instead of expanding a variable.
+                command_line.push_str("%%cd:~,");
+                slashes = 0;
+            }
+            _ => slashes = 0,
+        }
+        command_line.push(character);
+    }
+    if quoted {
+        command_line.extend(std::iter::repeat_n('\\', slashes));
+        command_line.push('"');
+    }
+    Ok(())
+}
+
 struct PipeReader {
     probe: PipeStream<pipe_mode::Messages, pipe_mode::Messages>,
     bytes: PipeStream<pipe_mode::Bytes, pipe_mode::Bytes>,
@@ -259,15 +342,41 @@ fn create_job() -> Result<ProcessGroup> {
     ProcessGroup::new().context("failed to create the invocation's Windows Job Object")
 }
 
-fn spawn_in_job(job: &ProcessGroup, command: Command) -> processkit::Result<Child> {
+#[derive(Debug)]
+pub(super) enum LaunchError {
+    Create(io::Error),
+    Assign,
+    Resume,
+}
+
+pub(super) fn spawn_in_job(
+    job: &ProcessGroup,
+    mut command: Command,
+) -> std::result::Result<Child, LaunchError> {
+    let suspended = command.spawn_suspended().map_err(LaunchError::Create)?;
+    // The process handle retained by 'suspended' pins this invocation's PID
+    // across ProcessKit's OpenProcess/AssignProcessToJobObject call. That API
+    // may also succeed if the process already exited, so require a live member
+    // in the otherwise empty job before attempting resume.
     #[cfg(test)]
-    if has_fault(Fault::Spawn) {
-        return Err(processkit::Error::spawn(
-            "fixture",
-            io::Error::other("injected job launch failure"),
-        ));
+    if has_fault(Fault::Assign) {
+        return Err(LaunchError::Assign);
     }
-    job.spawn(command)
+    job.adopt_external(suspended.id())
+        .map_err(|_| LaunchError::Assign)?;
+    if !job
+        .stats()
+        .is_ok_and(|stats| stats.active_process_count == 1)
+    {
+        return Err(LaunchError::Assign);
+    }
+    #[cfg(test)]
+    if has_fault(Fault::Resume) {
+        return Err(LaunchError::Resume);
+    }
+    // windows-spawn resumes only the primary-thread handle returned by the
+    // same CreateProcessW call. ProcessKit never enumerates or resumes threads.
+    suspended.resume().map_err(|_| LaunchError::Resume)
 }
 
 fn terminate(job: &ProcessGroup) -> bool {
@@ -351,7 +460,8 @@ impl<R: Read> PipeCapture<R> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Fault {
     JobSetup,
-    Spawn,
+    Assign,
+    Resume,
     Terminate,
     Accounting,
     Reap,

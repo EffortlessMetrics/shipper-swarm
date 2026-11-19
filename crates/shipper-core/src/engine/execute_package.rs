@@ -402,24 +402,6 @@ fn with_package_event_batch(
     commit(&mut state, &mut log)
 }
 
-fn flush_package_events(
-    event_log: &Arc<Mutex<events::EventLog>>,
-    events_path: &Path,
-    key: &str,
-    pending_events: Vec<PublishEvent>,
-) -> Result<()> {
-    validate_package_event_batch(key, &pending_events)?;
-    let mut log = event_log
-        .lock()
-        .map_err(|_| anyhow::anyhow!("event log lock poisoned while flushing package events"))?;
-    for event in pending_events {
-        log.record(event);
-    }
-    log.write_to_file(events_path)?;
-    log.clear();
-    Ok(())
-}
-
 /// Emit a [`EventType::RetryBackoffStarted`] event + a human-readable warn
 /// line through the Reporter, then `thread::sleep(delay)`. Used at every
 /// retry-backoff site in the publish loop so operators never stare at a
@@ -1461,10 +1443,6 @@ pub(crate) fn publish_package_with_timeout(
                     return PackagePublishResult { result: Err(error) };
                 }
             } else {
-                // The cleaned ordinary outcome has passed the immediate
-                // interruption decision. Registry waits below retain normal
-                // process termination rather than deferring it indefinitely.
-                drop(captured._interruption_lease);
                 let failure_output = format!("{}\n{}", out.stderr_tail, out.stdout_tail);
                 // Killing Cargo cannot establish whether the upload reached the
                 // registry. The typed timeout owns this decision even when the
@@ -1497,6 +1475,35 @@ pub(crate) fn publish_package_with_timeout(
                     next_attempt_at: None,
                     redacted_message: Some(msg.clone()),
                 };
+
+                // Preserve the unresolved upload under the process lease.
+                // Registry I/O below can take longer than a controlled stop
+                // allows, so release the lease as soon as replay is safe.
+                if let Err(error) = commit_pending_with_attempt_detail_transition(
+                    st,
+                    state_dir,
+                    event_log,
+                    events_path,
+                    &key,
+                    PackageState::Ambiguous {
+                        message: msg.clone(),
+                    },
+                    attempt_detail.clone(),
+                    vec![PublishEvent {
+                        timestamp: completion_timestamp,
+                        event_type: EventType::PackageUploadUnconfirmed {
+                            class: class.clone(),
+                            message: msg.clone(),
+                        },
+                        package: pkg_label.clone(),
+                    }],
+                ) {
+                    return PackagePublishResult { result: Err(error) };
+                }
+                drop(captured._interruption_lease);
+                if let Err(error) = crate::ops::process::interruption::check() {
+                    return PackagePublishResult { result: Err(error) };
+                }
 
                 // Event: PackageFailed
                 let mut pending_events = vec![PublishEvent {
@@ -1578,10 +1585,13 @@ pub(crate) fn publish_package_with_timeout(
                             break;
                         }
                         ReconciliationOutcome::NotPublished { .. } => {
-                            if let Err(e) = flush_package_events(
+                            if let Err(e) = commit_pending_transition(
+                                st,
+                                state_dir,
                                 event_log,
                                 events_path,
                                 &key,
+                                PackageState::Pending,
                                 std::mem::take(&mut pending_events),
                             ) {
                                 return PackagePublishResult { result: Err(e) };
@@ -1853,12 +1863,13 @@ pub(crate) fn publish_package_with_timeout(
                                 &class,
                                 &msg,
                             ));
-                            if let Err(e) = commit_attempt_detail_transition(
+                            if let Err(e) = commit_pending_with_attempt_detail_transition(
                                 st,
                                 state_dir,
                                 event_log,
                                 events_path,
                                 &key,
+                                PackageState::Pending,
                                 attempt_detail,
                                 pending_events,
                             ) {

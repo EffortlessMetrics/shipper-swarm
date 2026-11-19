@@ -2599,6 +2599,7 @@ dependencies = [
  "tokio",
  "toml",
  "which",
+ "windows-spawn",
 ]
 
 [[package]]

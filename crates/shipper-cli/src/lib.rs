@@ -5901,6 +5901,7 @@ fn event_type_is_active_progress(event_type: &EventType) -> bool {
         EventType::PackageStarted { .. }
             | EventType::PackageAttempted { .. }
             | EventType::PackageOutput { .. }
+            | EventType::PackageUploadUnconfirmed { .. }
             | EventType::PublishWaiting { .. }
             | EventType::RateLimitObserved { .. }
             | EventType::PublishReconciling { .. }
@@ -6046,6 +6047,7 @@ fn event_type_name(event_type: &EventType) -> &'static str {
         EventType::PackageStarted { .. } => "package_started",
         EventType::PackageAttempted { .. } => "package_attempted",
         EventType::PackageOutput { .. } => "package_output",
+        EventType::PackageUploadUnconfirmed { .. } => "package_upload_unconfirmed",
         EventType::PackageUploaded => "package_uploaded",
         EventType::PackagePublished { .. } => "package_published",
         EventType::PackageFailed { .. } => "package_failed",

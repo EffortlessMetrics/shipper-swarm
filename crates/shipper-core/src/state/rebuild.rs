@@ -194,7 +194,24 @@ fn apply_event(
         EventType::PackageStarted { name, version } => {
             let key = format!("{}@{}", name, version);
             let progress = ensure_package(packages, &key, name, version, event.timestamp);
-            progress.state = PackageState::Pending;
+            if !matches!(
+                progress.state,
+                PackageState::Ambiguous { .. }
+                    | PackageState::Failed {
+                        class: ErrorClass::Ambiguous,
+                        ..
+                    }
+            ) {
+                progress.state = PackageState::Pending;
+            }
+            // The new invocation may reconcile an old upload. Its result
+            // must not rewrite the earlier Cargo attempt's durable outcome.
+            if active_attempts
+                .get(&key)
+                .is_some_and(|active| active.upload_unconfirmed)
+            {
+                active_attempts.remove(&key);
+            }
             progress.last_updated_at = event.timestamp;
         }
         EventType::ReadinessStarted { .. } => {
@@ -257,6 +274,21 @@ fn apply_event(
             if let Some(progress) = ensure_event_package(packages, event, event.timestamp) {
                 progress.state = PackageState::Skipped {
                     reason: reason.clone(),
+                };
+                progress.last_updated_at = event.timestamp;
+            }
+        }
+        EventType::PackageUploadUnconfirmed { class, message } => {
+            if let Some(active) = active_attempt_for_key_mut(active_attempts, &event.package) {
+                active.ended_at = event.timestamp;
+                active.error_class = Some(class.clone());
+                active.redacted_message = Some(message.clone());
+                active.upload_unconfirmed = true;
+                attempt_history.push(rebuild_attempt_to_detail(active.clone()));
+            }
+            if let Some(progress) = ensure_event_package(packages, event, event.timestamp) {
+                progress.state = PackageState::Ambiguous {
+                    message: message.clone(),
                 };
                 progress.last_updated_at = event.timestamp;
             }
@@ -397,6 +429,7 @@ struct RebuildAttemptDetail {
     next_attempt_at: Option<DateTime<Utc>>,
     redacted_message: Option<String>,
     saw_failure: bool,
+    upload_unconfirmed: bool,
 }
 
 fn start_rebuild_attempt(
@@ -430,6 +463,7 @@ fn start_rebuild_attempt(
             next_attempt_at: None,
             redacted_message: None,
             saw_failure: false,
+            upload_unconfirmed: false,
         },
     );
 }
@@ -447,6 +481,14 @@ fn apply_package_failed(
     let Some(active) = active_attempt_for_key_mut(active_attempts, package_key) else {
         return;
     };
+    if active.upload_unconfirmed {
+        attempt_history.retain(|detail| {
+            detail.package != active.package
+                || detail.version != active.version
+                || detail.attempt != active.attempt
+        });
+        active.upload_unconfirmed = false;
+    }
     // Live attempt details capture the first failure's timestamp/message when the
     // attempt is recorded (retry schedule or exhaustion). A later terminal
     // PackageFailed must not rewrite those fields or finalization drifts.
@@ -485,7 +527,9 @@ fn finalize_attempt(
     attempt_history: &mut Vec<AttemptDetail>,
     package_key: &str,
 ) {
-    if let Some(active) = active_attempts.remove(package_key) {
+    if let Some(active) = active_attempts.remove(package_key)
+        && !active.upload_unconfirmed
+    {
         let mut attempt = rebuild_attempt_to_detail(active);
         if attempt.max_attempts < attempt.attempt {
             attempt.max_attempts = attempt.attempt;
@@ -500,7 +544,9 @@ fn finalize_active_attempts(
 ) {
     let mut active = Vec::with_capacity(active_attempts.len());
     while let Some((_, active_attempt)) = active_attempts.pop_first() {
-        active.push(active_attempt);
+        if !active_attempt.upload_unconfirmed {
+            active.push(active_attempt);
+        }
     }
     active.sort_by(|left, right| {
         left.started_at

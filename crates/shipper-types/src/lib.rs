@@ -1745,6 +1745,12 @@ pub enum EventType {
         stdout_tail: String,
         stderr_tail: String,
     },
+    /// Cargo exited unsuccessfully and registry visibility is still unknown.
+    /// The class and message describe the Cargo attempt.
+    PackageUploadUnconfirmed {
+        class: ErrorClass,
+        message: String,
+    },
     PackagePublished {
         duration_ms: u64,
     },
