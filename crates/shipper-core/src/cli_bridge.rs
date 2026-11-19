@@ -18,6 +18,13 @@ pub struct PlanningWorkspace {
     metadata: cargo_metadata::Metadata,
 }
 
+/// Ask Cargo for its workspace root without resolving dependencies or using
+/// the network. Used to check the workspace's encryption policy before full
+/// planning metadata can update the lockfile or fetch dependencies.
+pub fn discover_workspace_root(manifest_path: &Path) -> Result<std::path::PathBuf> {
+    crate::ops::cargo::discover_workspace_root(manifest_path)
+}
+
 impl PlanningWorkspace {
     pub fn load(manifest_path: &Path) -> Result<Self> {
         Ok(Self {

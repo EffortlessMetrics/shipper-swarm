@@ -52,12 +52,18 @@ Consumers of the Rust API and of `events.jsonl`, `state.json`, or
   event log, `PackageAttempted` records `max_attempts`, and finalization checks
   event, state, reconciliation, and receipt agreement. Disagreement fails
   closed instead of being hidden by a newer summary.
-- **Stronger encrypted-state writes with legacy reads.** New encrypted
-  artifacts use the versioned PBKDF2-HMAC-SHA256 v2 parameters at 600,000
-  iterations. Existing unversioned v1 artifacts remain readable at their
-  original 100,000-iteration cost. Real 0.4 state, event, receipt,
-  reconciliation, and encrypted artifacts are covered by retained replay and
-  resume evidence.
+- **Encrypted inspection and SDK helpers, not encrypted execution.** Explicit
+  SDK writes use versioned PBKDF2-HMAC-SHA256 v2 at 600,000 iterations.
+  Durable status uses SDK loaders to read encrypted v1 state and receipts at
+  their original 100,000-iteration cost. Tagged-writer fixtures verified
+  these reads and refusal of wrong passphrases or tampered artifacts.
+  Execution commands refuse an encryption request instead of writing
+  plaintext; this does not add encrypted publish or resume.
+- **Verified plaintext replay and resume from 0.4.** Qualification replayed
+  the published 0.4 terminal journal without uploading. In a separate loopback
+  test, 0.5 resumed a fresh interrupted journal from the tagged 0.4 writer.
+  Mixed 0.4/0.5 journals preserve verifiable 0.4 Cargo completion timestamps;
+  missing evidence remains unknown.
 - **Registry and ownership refusal happens earlier.** Registry destinations
   require validated scheme, authority, host-family, private-network, and
   rehearsal posture. Strict-ownership runs validate every selected registry

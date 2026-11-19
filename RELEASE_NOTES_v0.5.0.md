@@ -18,8 +18,15 @@ registry and credential checks stop unsafe work earlier.
   run evidence.
 - Registry destination, loopback/private-network, selector, credential, and
   strict-ownership validation occurs before irreversible package work.
-- Real 0.4 durable artifacts, including encrypted v1 state, remain readable
-  and are covered by retained replay/resume evidence.
+- Qualification replayed the published 0.4 plaintext terminal journal
+  without uploading. In a separate loopback test, 0.5 resumed a fresh
+  interrupted plaintext journal from the tagged 0.4 writer. Mixed 0.4/0.5
+  journals preserve verifiable 0.4 Cargo completion timestamps without
+  inventing missing evidence.
+- Durable status uses SDK loaders to read tagged-writer encrypted v1 state
+  and receipts and rejects wrong passphrases and tampered artifacts.
+  Execution commands refuse requested encryption rather than writing
+  plaintext. This does not add encrypted publish or resume.
 
 ## Before upgrading
 
@@ -31,7 +38,8 @@ Read the [0.5.0 migration guide](https://github.com/EffortlessMetrics/shipper/bl
 - parse `events.jsonl`, `state.json`, `receipt.json`, or command JSON;
 - depend on exit status `2` or generate resume commands;
 - use custom, private, loopback, or multiple registries;
-- read or write encrypted state.
+- use `--encrypt` or `[encryption]` in configuration, or read or write
+  encrypted state through the SDK.
 
 ### Installation posture
 
@@ -53,7 +61,8 @@ The short compatibility summary is:
 - old durable artifacts remain readable within the tested contract;
 - new Rust fields and variants require source updates in some consumers; do
   not resume journals containing new 0.5 records with a 0.4 binary;
-- new encrypted artifacts use KDF v2 while v1 reads remain supported;
+- new encrypted SDK writes use KDF v2; v1 reads remain supported for
+  inspection, not as proof of encrypted execution;
 - `parallel.per_package_timeout` remains the shared timeout key for one
   migration cycle;
 - a Shipper partial-result exit `2` is distinct from Clap's usage-error exit
@@ -76,8 +85,11 @@ The short compatibility summary is:
 
 This release includes the `h2` 0.4.16 remediation for RUSTSEC-2026-0258,
 updates `quinn-proto` for its upstream security fix, updates `serde_with` as
-defense in depth, strengthens KDF parameters for new encrypted writes, and
-preserves secret redaction across operator diagnostics.
+defense in depth, strengthens KDF parameters for encrypted SDK writes, and
+preserves secret redaction across operator diagnostics. A separate
+[lockfile-only update](https://github.com/EffortlessMetrics/shipper-swarm/pull/486)
+cleared 15 blocking RustSec findings in candidate qualification; five
+non-blocking warnings remained visible.
 The release workflow also fails closed on approved source, reviewed notes,
 binary ordering, workflow authority, and resume identity.
 

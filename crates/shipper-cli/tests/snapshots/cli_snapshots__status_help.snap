@@ -53,6 +53,12 @@ Options:
       --state-dir <STATE_DIR>
           Directory for shipper state and receipts (default: .shipper)
 
+      --encrypt
+          Read encrypted state and receipt with status --durable; execution does not support encryption
+
+      --encrypt-passphrase <ENCRYPT_PASSPHRASE>
+          Passphrase for encrypted durable status (prefer the SHIPPER_ENCRYPT_KEY environment variable)
+
       --format <FORMAT>
           Output format: text (default) or json
 

@@ -27,6 +27,8 @@ pub(in crate::engine) fn precheck(
     state_dir: &Path,
     require_existing: bool,
 ) -> Result<bool> {
+    crate::engine::require_supported_execution_encryption(opts.encryption.enabled)
+        .context(PublishAdmissionError)?;
     super::bootstrap::validate_resume_target(ws, opts)?;
     load_retained_state(ws, opts, state_dir, require_existing, None)
         .map(|state| state.is_some())

@@ -333,14 +333,18 @@ The compatibility promise is asymmetric:
 - **0.5 artifacts:** new events contain enough information to rebuild every
   field the project claims is reconstructible. State and receipt fields are
   projections/summaries, not a second source of truth.
-- **0.4 artifacts:** old event, state, and receipt files remain readable and
-  safely resumable. A field absent from the old vocabulary is `unknown`; it
-  must not be fabricated as zero or inferred without evidence.
+- **0.4 artifacts:** plaintext terminal replay and interrupted continuation
+  are separate proofs. A mixed journal preserves historical Cargo completion
+  timestamps only when supported by the original attempt evidence. A field
+  absent from the old vocabulary is `unknown`; it must not be fabricated as
+  zero or inferred without evidence.
 
-Encrypted payloads use a versioned KDF header for new writes. KDF v1
-unversioned payloads remain readable at their legacy PBKDF2 cost, while KDF v2
-is the new stronger default. Unsupported or unreasonable parameters are
-rejected rather than accepted as an implicit fallback.
+Explicit encrypted SDK writes use the versioned KDF v2 header. Unversioned
+KDF v1 state/receipts remain readable at their legacy PBKDF2 cost, including
+through durable status. Unsupported or unreasonable parameters are rejected
+rather than accepted as an implicit fallback. Durable inspection is not
+encrypted execution. An execution command must refuse requested encryption
+before mutating evidence rather than persisting plaintext under that request.
 
 Security evidence follows the same non-disclosure rule as execution evidence:
 complete authorization header values and bounded `Token=`/`ApiKey=` values are

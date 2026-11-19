@@ -97,6 +97,17 @@ pub fn validate_publish_cleanup_safety(state_dir: &Path) -> Result<()> {
 #[error("publish admission was refused")]
 pub(crate) struct PublishAdmissionError;
 
+/// Refuse operations that currently write plaintext execution evidence when
+/// encryption is required. This does not restrict encrypted state and receipt
+/// I/O through the SDK or durable status inspection.
+pub fn require_supported_execution_encryption(enabled: bool) -> Result<()> {
+    anyhow::ensure!(
+        !enabled,
+        "encrypted execution evidence is not supported; preserve existing evidence and use a release workflow that meets your encryption requirements"
+    );
+    Ok(())
+}
+
 /// Preserve admission identity across the separate CLI adapter without parsing prose.
 #[doc(hidden)]
 pub fn is_publish_admission_error(error: &anyhow::Error) -> bool {
@@ -434,6 +445,7 @@ pub fn run_preflight_in_place_with_options(
     reporter: &mut dyn Reporter,
     run_opts: PreflightRunOptions,
 ) -> Result<PreflightReport> {
+    require_supported_execution_encryption(opts.encryption.enabled)?;
     crate::config::validate_per_error_config(&opts.retry_per_error)?;
     preflight::run(ws, opts, reporter, run_opts)
 }
@@ -759,6 +771,7 @@ pub fn run_rehearsal(
     opts: &RuntimeOptions,
     reporter: &mut dyn Reporter,
 ) -> Result<RehearsalOutcome> {
+    require_supported_execution_encryption(opts.encryption.enabled)?;
     crate::ops::process::interruption::check()?;
     crate::config::validate_per_error_config(&opts.retry_per_error)?;
     let rehearsal_name = opts
@@ -1497,6 +1510,42 @@ mod tests {
             rehearsal_skip: false,
             rehearsal_smoke_install: None,
         }
+    }
+
+    #[test]
+    #[serial]
+    fn required_encryption_refuses_execution_before_state_or_reporter_effects() {
+        let td = tempfile::tempdir().expect("temp dir");
+        let mut ws = planned_workspace(td.path(), "http://127.0.0.1:1".into());
+        let reg = test_registry_client(ws.plan.registry.clone()).expect("local client");
+        let dir = td.path().join("execution");
+        let mut opts = default_opts(dir.clone());
+        opts.encryption = crate::encryption::EncryptionConfig::new("test-only-key".into());
+        let mut reporter = CollectingReporter::default();
+        let mut state = init_state(&ws, &td.path().join("fixture")).expect("fixture state");
+        let state_before = serde_json::to_vec(&state).unwrap();
+
+        let errors = [
+            run_publish_with_state(&ws, &opts, &mut reporter)
+                .err()
+                .unwrap(),
+            run_resume_with_state(&ws, &opts, &mut reporter)
+                .err()
+                .unwrap(),
+            parallel::run_publish_parallel(&ws, &opts, &mut state, &dir, &reg, &mut reporter)
+                .unwrap_err(),
+            run_preflight_in_place(&mut ws, &opts, &mut reporter).unwrap_err(),
+            run_rehearsal(&ws, &opts, &mut reporter).unwrap_err(),
+        ];
+        for error in errors {
+            assert!(format!("{error:#}").contains("encrypted execution evidence is not supported"));
+            assert!(!format!("{error:#}").contains("test-only-key"));
+        }
+        assert_eq!(serde_json::to_vec(&state).unwrap(), state_before);
+        assert!(!dir.exists(), "refusal must not open state or lock files");
+        assert!(
+            reporter.infos.is_empty() && reporter.warns.is_empty() && reporter.errors.is_empty()
+        );
     }
 
     #[test]

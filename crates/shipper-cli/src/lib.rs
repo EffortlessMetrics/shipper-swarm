@@ -218,11 +218,11 @@ struct Cli {
     #[arg(long, global = true)]
     webhook_secret: Option<String>,
 
-    /// Enable encryption for state files
+    /// Read encrypted state and receipt with status --durable; execution does not support encryption
     #[arg(long, global = true)]
     encrypt: bool,
 
-    /// Passphrase for state file encryption (or use SHIPPER_ENCRYPT_KEY env var)
+    /// Passphrase for encrypted durable status (prefer the SHIPPER_ENCRYPT_KEY environment variable)
     #[arg(long, global = true)]
     encrypt_passphrase: Option<String>,
 
@@ -316,8 +316,6 @@ const ADVANCED_RELEASE_ARG_IDS: &[&str] = &[
     "per_package_timeout",
     "webhook_url",
     "webhook_secret",
-    "encrypt",
-    "encrypt_passphrase",
     "registries",
     "all_registries",
     "resume_from",
@@ -346,15 +344,22 @@ const NON_EXECUTING_HELP_SUBCOMMANDS: &[&str] = &[
     "status",
 ];
 const DOCTOR_HELP_HIDDEN_ARG_IDS: &[&str] = &["verbose"];
+const ENCRYPTION_ARG_IDS: &[&str] = &["encrypt", "encrypt_passphrase"];
 
 fn cli_command() -> Command {
     let mut command = Cli::command();
     command.build();
 
     let mut command = hide_args_from_help(command, ADVANCED_RELEASE_ARG_IDS);
+    command = hide_args_from_help(command, ENCRYPTION_ARG_IDS);
     for subcommand in NON_EXECUTING_HELP_SUBCOMMANDS {
         command = command.mut_subcommand(*subcommand, |subcommand_args| {
             let subcommand_args = hide_args_from_help(subcommand_args, ADVANCED_RELEASE_ARG_IDS);
+            let subcommand_args = if *subcommand == "status" {
+                subcommand_args
+            } else {
+                hide_args_from_help(subcommand_args, ENCRYPTION_ARG_IDS)
+            };
             if *subcommand == "doctor" {
                 hide_args_from_help(subcommand_args, DOCTOR_HELP_HIDDEN_ARG_IDS)
             } else {
@@ -1704,6 +1709,42 @@ pub fn run_process() -> Result<std::process::ExitCode> {
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 mod process_signals;
 
+fn writes_execution_evidence(cli: &Cli) -> bool {
+    matches!(
+        cli.cmd.as_ref(),
+        Some(
+            Commands::Publish
+                | Commands::Resume
+                | Commands::Preflight { .. }
+                | Commands::Rehearse
+                | Commands::Yank { .. }
+                | Commands::Remediate { .. }
+        )
+    )
+}
+
+fn check_execution_encryption(cli: &Cli, enabled: bool) -> Result<()> {
+    if !writes_execution_evidence(cli) {
+        return Ok(());
+    }
+    engine::require_supported_execution_encryption(enabled).map_err(|error| {
+        if matches!(cli.cmd.as_ref(), Some(Commands::Publish)) {
+            mark_publish_early_error_with_next_action(
+                error,
+                &cli.format,
+                (
+                    "unsupported_state_encryption",
+                    "publish was refused because execution evidence cannot be encrypted",
+                    ActionKind::ResolveBlockers,
+                ),
+                "preserve existing evidence and use a release workflow that meets your encryption requirements",
+            )
+        } else {
+            error
+        }
+    })
+}
+
 /// Parse and execute CLI arguments without installing process signal handlers.
 pub fn run() -> Result<std::process::ExitCode> {
     // Build via cli_command() then from_arg_matches (swarm#108: scope first-run
@@ -1740,6 +1781,9 @@ pub fn run() -> Result<std::process::ExitCode> {
         return Ok(std::process::ExitCode::from(2));
     }
 
+    // Reject explicit encryption requests without launching Cargo. An implicit
+    // workspace configuration still needs Cargo's authoritative root discovery.
+    check_execution_encryption(&cli, cli.encrypt)?;
     let api_base = cli
         .api_base
         .clone()
@@ -1791,6 +1835,27 @@ pub fn run() -> Result<std::process::ExitCode> {
         }
     };
 
+    let prechecked_config = if writes_execution_evidence(&cli) {
+        let config = if let Some(path) = &cli.config {
+            Some(
+                ShipperConfig::load_from_file_without_value_validation(path)
+                    .with_context(|| format!("Failed to load config from: {}", path.display()))?,
+            )
+        } else {
+            // Default config belongs to Cargo's actual workspace root, not
+            // necessarily the working directory or the manifest's parent.
+            // Full metadata may fetch dependencies or write a lockfile.
+            let root = shipper_core::cli_bridge::discover_workspace_root(&spec.manifest_path)
+                .map_err(|err| plan_error(err, None))?;
+            ShipperConfig::load_from_workspace_without_value_validation(&root)
+                .context("Failed to load config from workspace")?
+        };
+        check_execution_encryption(&cli, config.as_ref().is_some_and(|c| c.encryption.enabled))?;
+        Some(config)
+    } else {
+        None
+    };
+
     // Discover the workspace without choosing a registry. Its configuration
     // must be loaded before publish eligibility and plan identity are computed.
     // `doctor` and `ci` still diagnose environments whose metadata or plan is
@@ -1813,7 +1878,9 @@ pub fn run() -> Result<std::process::ExitCode> {
         };
 
     // Load configuration file
-    let config = if let Some(ref config_path) = cli.config {
+    let config = if let Some(prechecked) = prechecked_config {
+        prechecked
+    } else if let Some(ref config_path) = cli.config {
         // Parse first so the single validation boundary below can apply CLI
         // trust flags such as --allow-loopback. The parser still rejects file,
         // TOML, and schema errors before returning a configuration.
@@ -1950,6 +2017,8 @@ pub fn run() -> Result<std::process::ExitCode> {
     // Merge CLI overrides with config (or defaults if no config)
     let config_for_merge = config.clone().unwrap_or_default();
     let opts: RuntimeOptions = config_for_merge.build_runtime_options(cli_overrides);
+
+    check_execution_encryption(&cli, opts.encryption.enabled)?;
 
     // Rehearsal deliberately keeps the live plan: its selected registry is the
     // alternate destination whose isolation the engine checks. Other secondary

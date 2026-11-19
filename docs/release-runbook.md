@@ -194,7 +194,12 @@ Use `shipper.exe` on Windows.
 
 The release record must identify current evidence for:
 
-- loading and resuming 0.4 state, event, receipt, and encrypted artifacts;
+- no-upload replay of a published 0.4 terminal plaintext journal and
+  initial/repeat mock-registry resume of a separate tagged-writer interruption;
+- tagged-writer encrypted v1 state/receipt inspection via durable status and
+  refusal of wrong passphrases or tampering (not encrypted resume);
+- encrypted execution refusal with no evidence writes or registry operations,
+  plus ordinary plaintext execution as a control;
 - rebuilding current state from events for every claimed field;
 - sequential/parallel scheduler conformance;
 - interruption and artifact handoff;

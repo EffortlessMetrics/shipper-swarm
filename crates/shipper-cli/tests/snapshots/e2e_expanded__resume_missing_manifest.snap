@@ -12,5 +12,4 @@ Error: failed to load release plan for `resume` - next steps:
   * Cargo metadata failure: run the printed `cargo metadata` command directly
 
 Caused by:
-    0: failed to execute cargo metadata
-    1: `cargo metadata` exited with an error: error: manifest path `<TMPDIR>/nonexistent/Cargo.toml` does not exist
+    cargo workspace discovery failed before cargo metadata: error: manifest path `<TMPDIR>/nonexistent/Cargo.toml` does not exist
