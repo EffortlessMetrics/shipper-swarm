@@ -622,7 +622,10 @@ fn legacy_attempt_timings(
     event_log: &EventLog,
 ) -> BTreeMap<(&str, u32), Option<LegacyAttemptTiming>> {
     let mut timings = BTreeMap::<(&str, u32), Option<LegacyAttemptTiming>>::new();
-    let mut active = BTreeMap::<&str, u32>::new();
+    // An execution boundary ends eligibility to attribute new outcomes, not
+    // responsibility for rejecting output without a new attempt to own it.
+    let mut last_legacy = BTreeMap::<&str, u32>::new();
+    let mut active = BTreeSet::<&str>::new();
     let mut modern = false;
     for event in event_log.all_events() {
         let package = event.package.as_str();
@@ -648,6 +651,7 @@ fn legacy_attempt_timings(
         match &event.event_type {
             EventType::PackageAttempted { attempt, .. } => {
                 active.remove(package);
+                last_legacy.remove(package);
                 let key = (package, *attempt);
                 if let Some(prior) = timings.get_mut(&key) {
                     *prior = None;
@@ -660,15 +664,16 @@ fn legacy_attempt_timings(
                             saw_outcome: false,
                         }),
                     );
-                    active.insert(package, *attempt);
+                    last_legacy.insert(package, *attempt);
+                    active.insert(package);
                 }
             }
             EventType::ExecutionStarted | EventType::ExecutionFinished { .. } => active.clear(),
             EventType::PackageStarted { .. } | EventType::PackageSkipped { .. } => {
                 active.remove(package);
             }
-            _ => {
-                let Some(attempt) = active.get(package) else {
+            EventType::PackageOutput { .. } => {
+                let Some(attempt) = last_legacy.get(package) else {
                     continue;
                 };
                 let Some(entry) = timings.get_mut(&(package, *attempt)) else {
@@ -677,19 +682,27 @@ fn legacy_attempt_timings(
                 let Some(timing) = entry.as_mut() else {
                     continue;
                 };
-                match event.event_type {
-                    EventType::PackageOutput { .. }
-                        if timing.saw_outcome || timing.output_at.is_some() =>
-                    {
-                        *entry = None;
-                    }
-                    EventType::PackageOutput { .. } => timing.output_at = Some(event.timestamp),
-                    EventType::ReadinessStarted { .. }
-                    | EventType::PackageFailed { .. }
-                    | EventType::PackagePublished { .. } => timing.saw_outcome = true,
-                    _ => {}
+                if !active.contains(package) || timing.saw_outcome || timing.output_at.is_some() {
+                    *entry = None;
+                } else {
+                    timing.output_at = Some(event.timestamp);
                 }
             }
+            // v0.4.0 logged PackageFailed before reconciling an ambiguous
+            // Cargo exit. StillUnknown can set replay's end, but on its own
+            // it is not evidence of the Cargo outcome for this attempt.
+            EventType::ReadinessStarted { .. }
+            | EventType::PackageFailed { .. }
+            | EventType::PackagePublished { .. }
+                if active.contains(package) =>
+            {
+                if let Some(attempt) = last_legacy.get(package)
+                    && let Some(Some(timing)) = timings.get_mut(&(package, *attempt))
+                {
+                    timing.saw_outcome = true;
+                }
+            }
+            _ => {}
         }
     }
     timings
@@ -2048,33 +2061,55 @@ mod tests {
                 "omitted ceiling after modern attempt",
                 Some(event(1, "modern@1.0.0", attempt(1))),
                 None,
-                None,
+                vec![],
             ),
             (
                 "omitted ceiling after modern checkpoint",
                 Some(event(1, "modern@1.0.0", EventType::PackageUploaded)),
                 None,
-                None,
+                vec![],
             ),
             (
                 "duplicate attempt identity",
                 None,
                 None,
-                Some(event(6, old, attempt(1))),
+                vec![event(6, old, attempt(1))],
             ),
             (
                 "duplicate Cargo output",
                 None,
                 Some(event(4, old, output())),
-                None,
+                vec![],
             ),
             (
                 "output after outcome",
                 None,
                 None,
-                Some(event(6, old, output())),
+                vec![event(6, old, output())],
             ),
-            ("missing Cargo output", None, None, None),
+            (
+                "orphan output after an execution boundary",
+                None,
+                None,
+                vec![
+                    event(
+                        6,
+                        "all",
+                        EventType::ExecutionFinished {
+                            result: ExecutionResult::Success,
+                        },
+                    ),
+                    event(7, "all", EventType::ExecutionStarted),
+                    event(8, old, output()),
+                ],
+            ),
+            (
+                "outcome belonging to another execution",
+                None,
+                Some(event(4, "all", EventType::ExecutionStarted)),
+                vec![],
+            ),
+            ("missing Cargo output", None, None, vec![]),
         ] {
             let td = tempdir()?;
             let mut events = vec![plan_created_event()];
@@ -2103,6 +2138,100 @@ mod tests {
                 error.to_string().contains("attempt_history drift"),
                 "{name}: {error:#}"
             );
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn legacy_still_unknown_requires_the_old_cargo_failure_event() -> Result<()> {
+        let t0 = Utc::now();
+        let package = "demo@1.0.0";
+        let event = |offset, event_type| PublishEvent {
+            timestamp: t0 + Duration::seconds(offset),
+            package: package.into(),
+            event_type,
+        };
+        let cargo_message = "ambiguous Cargo exit";
+        let registry_message = "registry could not confirm visibility";
+        let outcome = ReconciliationOutcome::StillUnknown {
+            attempts: 1,
+            elapsed_ms: 10,
+            reason: registry_message.into(),
+        };
+        let mut report = reconciliation_report(package);
+        report.records[0].outcome = outcome.clone();
+        report.records[0].operator_action = ReconciliationOperatorAction::OperatorActionRequired;
+
+        for has_failure in [true, false] {
+            let td = tempdir()?;
+            let mut events = vec![
+                plan_created_event(),
+                event(
+                    1,
+                    EventType::PackageAttempted {
+                        attempt: 1,
+                        max_attempts: 0,
+                        command: "cargo publish".into(),
+                    },
+                ),
+                event(
+                    3,
+                    EventType::PackageOutput {
+                        stdout_tail: String::new(),
+                        stderr_tail: String::new(),
+                    },
+                ),
+            ];
+            if has_failure {
+                events.push(event(
+                    4,
+                    EventType::PackageFailed {
+                        class: ErrorClass::Ambiguous,
+                        message: cargo_message.into(),
+                    },
+                ));
+            }
+            events.extend([
+                event(
+                    5,
+                    EventType::PublishReconciling {
+                        method: shipper_types::ReadinessMethod::Api,
+                    },
+                ),
+                event(
+                    6,
+                    EventType::PublishReconciled {
+                        outcome: outcome.clone(),
+                    },
+                ),
+            ]);
+            write_events(td.path(), events);
+            let path = td.path().join(EVENTS_FILE);
+            let mut state =
+                rebuild_state_from_events(&path, StateRebuildOptions::new(Registry::crates_io()))?;
+            let actual = &mut state.attempt_history[0];
+            assert_eq!(actual.ended_at, t0 + Duration::seconds(6));
+            assert_eq!(actual.error_class, Some(ErrorClass::Ambiguous));
+            assert_eq!(
+                actual.redacted_message.as_deref(),
+                Some(if has_failure {
+                    cargo_message
+                } else {
+                    registry_message
+                })
+            );
+            actual.ended_at = t0 + Duration::seconds(2);
+            let result = verify_unfinished_consistency(&path, &state, Some(&report));
+            if has_failure {
+                result?;
+            } else {
+                let error = result.expect_err("no evidence of the original Cargo failure");
+                assert!(
+                    error.to_string().contains("attempt_history drift"),
+                    "{error:#}"
+                );
+            }
         }
         Ok(())
     }
