@@ -73,17 +73,15 @@ pub(super) fn run_supervised(
     interruption::check().map_err(&mut before_launch)?;
     let mut child = match spawn_in_job(&job, command) {
         Ok(child) => child,
-        Err(LaunchError::Create(error)) if error.kind() == ErrorKind::NotFound => {
-            // windows-spawn resolves missing executables before creation.
-            // Keep other wrapper errors and assignment/resume failures on
-            // their existing conservative cleanup path.
-            return Err(error)
-                .with_context(|| format!("failed to spawn command: {program}"))
-                .map_err(before_launch);
-        }
         Err(error) => {
             let failure = match error {
-                LaunchError::Create(_) => CleanupFailure::JobSpawn,
+                LaunchError::Create(error) => {
+                    // In windows-spawn 0.1.0, CreateProcessW is the last
+                    // fallible step before returning the suspended handles.
+                    return Err(error)
+                        .with_context(|| format!("failed to spawn command: {program}"))
+                        .map_err(before_launch);
+                }
                 LaunchError::Assign => CleanupFailure::JobAssignment,
                 LaunchError::Resume => CleanupFailure::JobResume,
             };

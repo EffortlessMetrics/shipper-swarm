@@ -46,8 +46,6 @@ pub(crate) enum CleanupFailure {
     #[cfg(windows)]
     PipeEofUnconfirmed,
     #[cfg(windows)]
-    JobSpawn,
-    #[cfg(windows)]
     JobAssignment,
     #[cfg(windows)]
     JobResume,
@@ -71,8 +69,6 @@ impl CleanupFailure {
             Self::PipeEofUnconfirmed => {
                 "a Windows output reader closed after a read failure before confirming EOF"
             }
-            #[cfg(windows)]
-            Self::JobSpawn => "cleanup after Windows process creation failed to be confirmed",
             #[cfg(windows)]
             Self::JobAssignment => {
                 "cleanup after Windows Job Object assignment failed to be confirmed"

@@ -1787,27 +1787,9 @@ pub(crate) fn publish_package_with_timeout(
                                 p.name,
                                 p.version
                             );
-                            if let Err(persistence_error) =
-                                commit_pending_with_attempt_detail_transition(
-                                    st,
-                                    state_dir,
-                                    event_log,
-                                    events_path,
-                                    &key,
-                                    PackageState::Failed {
-                                        class: class.clone(),
-                                        message: msg.clone(),
-                                    },
-                                    attempt_detail,
-                                    pending_events,
-                                )
-                            {
-                                return PackagePublishResult {
-                                    result: Err(error.context(format!(
-                                        "also failed to persist package failure transition: {persistence_error:#}"
-                                    ))),
-                                };
-                            }
+                            // The unconfirmed-upload checkpoint is already durable.
+                            // Unavailable evidence cannot turn it into a retryable
+                            // failure: resume must reconcile before another Cargo run.
                             return PackagePublishResult { result: Err(error) };
                         }
                     }

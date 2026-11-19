@@ -738,6 +738,106 @@ fn only_proved_no_launch_can_resume_the_retained_attempt() -> Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+#[test]
+#[serial]
+fn invalid_windows_cargo_image_can_resume_after_fixing_the_executable() -> Result<()> {
+    const ERROR_BAD_EXE_FORMAT: i32 = 193;
+    const ERROR_EXE_MACHINE_TYPE_MISMATCH: i32 = 216;
+    let key = "demo@0.1.0";
+    for parallel in [false, true] {
+        let fixture = Fixture::new(parallel, false);
+        let invalid = fixture.bin.join("invalid-cargo.exe");
+        fs::write(&invalid, b"not a Windows executable")?;
+        let mut opts = fixture.opts.clone();
+        opts.max_attempts = 2;
+
+        let mut vars = fake_program_env_vars(&fixture.bin);
+        vars.retain(|(name, _)| *name != "SHIPPER_CARGO_BIN");
+        vars.extend([
+            (
+                "SHIPPER_CARGO_BIN",
+                Some(invalid.to_string_lossy().into_owned()),
+            ),
+            (
+                "SHIPPER_CARGO_ARGS_LOG",
+                Some(fixture.cargo_log.to_string_lossy().into_owned()),
+            ),
+        ]);
+        let error = temp_env::with_vars(vars, || {
+            run_publish(&fixture.ws, &opts, &mut CollectingReporter::default())
+        })
+        .expect_err("the Windows loader must reject the invalid image");
+        ensure!(
+            error.is::<crate::ops::process::CommandNotLaunched>(),
+            "{error:#}"
+        );
+        let image_error = error
+            .downcast_ref::<std::io::Error>()
+            .and_then(std::io::Error::raw_os_error);
+        ensure!(
+            matches!(
+                image_error,
+                Some(ERROR_BAD_EXE_FORMAT | ERROR_EXE_MACHINE_TYPE_MISMATCH)
+            ),
+            "{error:#}"
+        );
+        ensure!(fixture.cargo_calls() == 0 && fixture.registry.hits() == 1);
+
+        let path = events::events_path(&fixture.state_dir);
+        let log = events::EventLog::read_from_file(&path)?;
+        ensure!(log.all_events().iter().any(|event| matches!(
+            event.event_type,
+            EventType::PackageNotLaunched { attempt: 1, .. }
+        )));
+        ensure!(log.all_events().iter().all(|event| !matches!(
+            event.event_type,
+            EventType::PackageOutput { .. } | EventType::PackageCleanupIncomplete { .. }
+        )));
+        let retained = fixture.retained()?;
+        assert_eq!(retained.packages[key].attempts, 1);
+        assert!(matches!(
+            retained.packages[key].state,
+            PackageState::Failed {
+                class: ErrorClass::Retryable,
+                ..
+            }
+        ));
+
+        // Restore the valid fake Cargo override, then resume the same run
+        // under its original two-attempt budget.
+        fixture.registry.respond_with(&[404, 200]);
+        let receipt = fixture.with_cargo("0", || {
+            run_resume(&fixture.ws, &opts, &mut CollectingReporter::default())
+        })?;
+        assert_eq!(receipt.packages[0].state, PackageState::Published);
+        assert_eq!(receipt.packages[0].attempts, 2);
+        assert_eq!(fixture.cargo_calls(), 1);
+
+        let complete = fixture.retained()?;
+        let rebuilt = crate::state::rebuild::rebuild_state_from_events(
+            &path,
+            crate::state::rebuild::StateRebuildOptions::new(complete.registry.clone()),
+        )?;
+        assert_eq!(rebuilt.packages[key].state, complete.packages[key].state);
+        assert_eq!(rebuilt.attempt_history, complete.attempt_history);
+
+        fixture.with_cargo("0", || {
+            run_resume(&fixture.ws, &opts, &mut CollectingReporter::default())
+        })?;
+        assert_eq!(fixture.cargo_calls(), 1);
+        assert_eq!(
+            fixture.retained()?.attempt_history,
+            complete.attempt_history
+        );
+        eprintln!(
+            "parallel={parallel} loader_error={image_error:?} fake_uploads={}",
+            fixture.cargo_calls()
+        );
+    }
+    Ok(())
+}
+
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 #[test]
 #[serial]
@@ -997,6 +1097,123 @@ fn durable_upload_outcomes_refuse_a_stale_projection() -> Result<()> {
         }
     }
     ensure!(failures.is_empty(), "{}", failures.join("\n"));
+    Ok(())
+}
+
+#[test]
+#[serial]
+fn unavailable_post_cargo_visibility_preserves_hold_until_registry_confirmation() -> Result<()> {
+    for parallel in [false, true] {
+        let fixture = Fixture::new(parallel, false);
+        let mut opts = fixture.opts.clone();
+        opts.max_attempts = 2;
+        fixture.registry.respond_with(&[404, 503]);
+        let first = with_test_env(
+            &fixture.bin,
+            vec![
+                ("SHIPPER_CARGO_EXIT", Some("42".into())),
+                ("SHIPPER_CARGO_STDOUT", Some(String::new())),
+                (
+                    "SHIPPER_CARGO_STDERR",
+                    Some("connection reset by peer".into()),
+                ),
+                (
+                    "SHIPPER_CARGO_ARGS_LOG",
+                    Some(fixture.cargo_log.to_string_lossy().into_owned()),
+                ),
+            ],
+            || run_publish(&fixture.ws, &opts, &mut CollectingReporter::default()),
+        )
+        .expect_err("unavailable post-Cargo registry evidence must stop publishing");
+        ensure!(
+            format!("{first:#}")
+                .contains("failed to verify registry visibility after cargo failure"),
+            "parallel={parallel}: {first:#}"
+        );
+        ensure!(fixture.registry.hits() == 2 && fixture.cargo_calls() == 1);
+
+        let key = "demo@0.1.0";
+        let path = events::events_path(&fixture.state_dir);
+        let original_bytes = fs::read(&path)?;
+        let original_log = events::EventLog::read_from_file(&path)?;
+        let original = fixture.retained()?;
+        let replay = || {
+            crate::state::rebuild::rebuild_state_from_events(
+                &path,
+                crate::state::rebuild::StateRebuildOptions::new(original.registry.clone()),
+            )
+        };
+        let original_replay = replay()?;
+
+        fixture.registry.respond_with(&[503]);
+        let error = fixture
+            .with_cargo("71", || {
+                run_resume(&fixture.ws, &opts, &mut CollectingReporter::default())
+            })
+            .expect_err("resume must not retry while registry evidence remains unavailable");
+        ensure!(
+            fixture.cargo_calls() == 1,
+            "parallel={parallel}: resume launched Cargo after registry failure"
+        );
+        ensure!(fixture.registry.hits() == 3);
+        ensure!(
+            matches!(
+                classify_publish_stop(&error),
+                Some(PublishStopClassification::StillUnknown { .. })
+            ),
+            "parallel={parallel}: {error:#}"
+        );
+        assert!(matches!(
+            original.packages[key].state,
+            PackageState::Ambiguous { .. }
+        ));
+        assert_eq!(
+            original_replay.packages[key].state,
+            original.packages[key].state
+        );
+        assert_eq!(original_replay.packages[key].attempts, 1);
+        assert_eq!(original_replay.attempt_history, original.attempt_history);
+        let [detail] = original.attempt_history.as_slice() else {
+            anyhow::bail!("expected one durable Cargo attempt");
+        };
+        assert_eq!(detail.attempt, 1);
+        assert_eq!(detail.error_class, Some(ErrorClass::Retryable));
+        assert!(detail.next_attempt_at.is_none());
+        ensure!(original_log.all_events().iter().any(|event| matches!(
+            event.event_type,
+            EventType::PackageUploadUnconfirmed {
+                class: ErrorClass::Retryable,
+                ..
+            }
+        )));
+        ensure!(original_log.all_events().iter().all(|event| !matches!(
+            event.event_type,
+            EventType::PackageFailed { .. } | EventType::PackagePublished { .. }
+        )));
+
+        let held = fixture.retained()?;
+        assert!(matches!(
+            held.packages[key].state,
+            PackageState::Ambiguous { .. }
+        ));
+        assert_eq!(held.attempt_history, original.attempt_history);
+        assert_eq!(replay()?.packages[key].state, held.packages[key].state);
+        assert_eq!(replay()?.attempt_history, held.attempt_history);
+
+        fixture.registry.respond_with(&[200]);
+        let receipt = fixture.with_cargo("71", || {
+            run_resume(&fixture.ws, &opts, &mut CollectingReporter::default())
+        })?;
+        ensure!(fixture.registry.hits() == 4 && fixture.cargo_calls() == 1);
+        assert_eq!(receipt.execution_result, ExecutionResult::Success);
+        assert_eq!(receipt.packages[0].state, PackageState::Published);
+        assert_eq!(receipt.packages[0].attempts, 1);
+        let completed = fixture.retained()?;
+        assert_eq!(completed.attempt_history, original.attempt_history);
+        assert_eq!(replay()?.attempt_history, completed.attempt_history);
+        assert_eq!(replay()?.packages[key].state, PackageState::Published);
+        assert!(fs::read(&path)?.starts_with(&original_bytes));
+    }
     Ok(())
 }
 
