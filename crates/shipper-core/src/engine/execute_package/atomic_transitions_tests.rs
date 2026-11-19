@@ -443,6 +443,7 @@ fn failed_event_write_keeps_batch_and_original_projection() -> Result<()> {
 }
 
 #[test]
+#[serial_test::serial]
 fn unresolved_upload_replays_through_repeated_resume_before_registry_outcome() -> Result<()> {
     for class in [ErrorClass::Retryable, ErrorClass::Ambiguous] {
         let directory = tempfile::tempdir()?;
@@ -536,6 +537,7 @@ fn unresolved_upload_replays_through_repeated_resume_before_registry_outcome() -
 }
 
 #[test]
+#[serial_test::serial]
 fn interrupted_not_published_checkpoint_preserves_interleaved_history_order() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let path = events_path(directory.path());

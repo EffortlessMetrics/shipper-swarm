@@ -89,9 +89,13 @@ Never derive critical decisions from CLI stdout alone. Stdout is a human-facing 
 `EventType::PackageUploaded` is emitted only after Cargo has accepted an
 upload. It is now the durable checkpoint for `PackageState::Uploaded`:
 state rebuild maps that event to `uploaded`, and a later `package_published`
-event advances the projection to `published`. `EventType::ReadinessStarted`
-continues to map to `uploaded` for backward compatibility with historical
-event logs.
+event advances the projection to `published`.
+
+For historical logs, replay infers `uploaded` from `EventType::ReadinessStarted`
+only when the package's current `PackageAttempted` has no recorded attempt
+ceiling, a `PackageOutput` follows it, and the active attempt in replay still
+matches. A modern diagnostic registry visibility probe alone cannot establish
+Cargo acceptance.
 
 ## Persistence boundary and failure model
 

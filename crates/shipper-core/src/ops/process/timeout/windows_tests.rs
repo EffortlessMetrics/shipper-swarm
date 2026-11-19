@@ -100,6 +100,7 @@ fn process_resources() -> (usize, usize) {
 }
 
 #[test]
+#[serial_test::serial]
 #[ignore = "launched only by a native supervision witness"]
 fn windows_fixture() {
     if std::env::var_os(CHILD_MODE).is_some() {
@@ -148,6 +149,7 @@ fn windows_fixture() {
 }
 
 #[test]
+#[serial_test::serial]
 #[ignore = "the watchdog launches this probe in a separate process"]
 fn windows_probe() {
     let root = tempfile::tempdir().unwrap();
@@ -358,6 +360,7 @@ impl Drop for Sibling {
 }
 
 #[test]
+#[serial_test::serial]
 fn bounded_windows_supervision_has_an_external_watchdog() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("probe.log");

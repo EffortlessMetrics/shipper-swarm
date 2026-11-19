@@ -102,6 +102,7 @@ fn noisy_cargo_child() {
 
 #[cfg(windows)]
 #[test]
+#[serial_test::serial]
 #[ignore = "fake Cargo descendant with inherited stdout and stderr"]
 fn inherited_pipe_holder() {
     use std::os::windows::fs::OpenOptionsExt;
