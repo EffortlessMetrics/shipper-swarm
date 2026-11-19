@@ -174,6 +174,41 @@ def check(text):
                 "retention-days": "30",
             }, "policy artifact must always retain the canonical report directory without missing-file waivers")
 
+    # The dedicated MSRV job is shared by both routes. Match an ordered, live
+    # checkout/install/proof sequence rather than accepting echoed commands.
+    msrv_steps = sections(jobs.get("msrv", ""), 4).get("steps", "")
+    steps = [
+        sections("        " + body, 8)
+        for body in re.split(r"^      - ", msrv_steps, flags=re.M)[1:]
+    ]
+    checkout = {"uses": "actions/checkout@v7.0.1", "id": "msrv-checkout"}
+    install = {
+        "name": "Install Rust (MSRV)",
+        "uses": "dtolnay/rust-toolchain@v1",
+        "with": "          toolchain: 1.95.0",
+    }
+    proof = [step for step in steps if step.get("name") == "Check locked workspace with Rust 1.95.0"]
+    require(len(steps) == 4 and steps[:2] == [checkout, install]
+            and set(steps[2]) == {"name", "uses", "with"}
+            and steps[2]["uses"] == "actions/cache@v6",
+            "MSRV must check out the event source and install the exact compiler before its cache and proof")
+    require(len(proof) == 1 and steps[-1] == proof[0]
+            and set(proof[0]) == {"name", "env", "run"}
+            and sections(proof[0]["env"], 10) == {
+                "CHECKOUT_SHA": "${{ steps.msrv-checkout.outputs.commit }}",
+            }
+            and [line.strip() for line in proof[0]["run"].splitlines()] == r"""|
+set -euo pipefail
+printf 'checkout_sha=%s\n' "$CHECKOUT_SHA"
+[[ -n "$CHECKOUT_SHA" && "$CHECKOUT_SHA" == "$GITHUB_SHA" ]]
+sha256sum Cargo.lock
+rustc_version=$(rustc -vV)
+printf '%s\n' "$rustc_version"
+[[ $'\n'"$rustc_version"$'\n' == *$'\nrelease: 1.95.0\n'* ]]
+cargo +1.95.0 -vV
+cargo +1.95.0 check --workspace --locked""".splitlines(),
+            "MSRV proof must run unconditionally and bind checkout, compiler and locked check")
+
     # Pin the high-cost/deep proof that a nominally equivalent fallback might omit.
     for witness in [
         "cargo nextest run --workspace --all-features --profile ci",
@@ -210,6 +245,14 @@ def test_mutations(text):
         ("missing job", "  release-build-hosted:", "  omitted-release-proof:"),
         ("unbounded runtime", "timeout-minutes: 75", "timeout-minutes: 360"),
         ("concurrency collision", " && '-manual-hosted' || ''", " && '' || ''"),
+        ("unpinned MSRV installation", "toolchain: 1.95.0", "toolchain: stable"),
+        ("unpinned MSRV check", "cargo +1.95.0 check --workspace --locked", "cargo check --workspace --locked"),
+        ("unlocked MSRV check", "cargo +1.95.0 check --workspace --locked", "cargo +1.95.0 check --workspace"),
+        ("disabled MSRV check", "name: Check locked workspace with Rust 1.95.0",
+         "name: Check locked workspace with Rust 1.95.0\n        if: false"),
+        ("misbound MSRV checkout", "steps.msrv-checkout.outputs.commit", "github.sha"),
+        ("MSRV compiler assertion removed", "release: 1.95.0", "release:"),
+        ("missing MSRV lock digest", "sha256sum Cargo.lock", "true"),
         ("waived failure", "steps: *lint_steps", "continue-on-error: true\n    steps: *lint_steps"),
     ]
     mutants.extend([
@@ -252,7 +295,7 @@ def main():
         for failure in failures:
             print(f"ERROR: {failure}", file=sys.stderr)
         return 1
-    print("Hosted routes, twelve job pairs, executable policy proof and report retention verified.")
+    print("Hosted routes, twelve job pairs, executable policy proof, MSRV receipt and report retention verified.")
     if args.test:
         test_mutations(text)
     return 0
