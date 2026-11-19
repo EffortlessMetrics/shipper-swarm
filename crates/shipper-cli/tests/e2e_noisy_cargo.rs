@@ -404,7 +404,10 @@ fn parallel_publish_omits_oversized_lines_without_changing_success() {
 #[test]
 #[serial_test::serial]
 fn windows_timeout_with_inherited_pipes_preserves_ambiguous_event_authority() {
-    use shipper_core::types::{EventType, PublishEvent, ReconciliationOutcome};
+    use shipper_core::state::{consistency, execution_state, rebuild};
+    use shipper_core::types::{
+        ErrorClass, EventType, PackageState, PublishEvent, ReconciliationOutcome,
+    };
 
     for parallel in [false, true] {
         let directory = tempfile::tempdir().unwrap();
@@ -419,6 +422,44 @@ fn windows_timeout_with_inherited_pipes_preserves_ambiguous_event_authority() {
                 .arg(action)
                 .output()
                 .unwrap()
+        };
+
+        let assert_ambiguous_checkpoint = || {
+            let state = execution_state::load_state(&state_dir).unwrap().unwrap();
+            let key = "demo@0.1.0";
+            let progress = &state.packages[key];
+            assert!(
+                matches!(progress.state, PackageState::Ambiguous { .. }),
+                "{progress:?}"
+            );
+            assert_eq!(progress.attempts, 1);
+            let [attempt] = state.attempt_history.as_slice() else {
+                panic!(
+                    "expected one durable attempt, found {:?}",
+                    state.attempt_history
+                );
+            };
+            assert_eq!(
+                (&*attempt.package, &*attempt.version, attempt.attempt),
+                ("demo", "0.1.0", 1)
+            );
+            assert_eq!(attempt.error_class, Some(ErrorClass::Ambiguous));
+            assert!(attempt.next_attempt_at.is_none());
+
+            let rebuilt = rebuild::rebuild_state_from_events(
+                &event_path,
+                rebuild::StateRebuildOptions::new(state.registry.clone()),
+            )
+            .unwrap();
+            assert_eq!(rebuilt.packages[key].state, progress.state);
+            assert_eq!(rebuilt.packages[key].attempts, progress.attempts);
+            assert_eq!(rebuilt.attempt_history, state.attempt_history);
+            assert!(
+                consistency::verify_events_state_consistency(&event_path, &state)
+                    .unwrap()
+                    .is_consistent()
+            );
+            state.attempt_history
         };
 
         let output = run("publish");
@@ -443,6 +484,7 @@ fn windows_timeout_with_inherited_pipes_preserves_ambiguous_event_authority() {
             EventType::PackageCleanupIncomplete { .. } | EventType::PackagePublished { .. }
         )));
 
+        let attempts_after_publish = assert_ambiguous_checkpoint();
         let resumed = run("resume");
         assert!(!resumed.status.success(), "{resumed:?}");
         assert_eq!(
@@ -454,14 +496,7 @@ fn windows_timeout_with_inherited_pipes_preserves_ambiguous_event_authority() {
                 .unwrap()
                 .starts_with(&initial)
         );
-        let state = shipper_core::state::execution_state::load_state(&state_dir)
-            .unwrap()
-            .unwrap();
-        assert!(
-            shipper_core::state::consistency::verify_events_state_consistency(&event_path, &state)
-                .unwrap()
-                .is_consistent()
-        );
+        assert_eq!(assert_ambiguous_checkpoint(), attempts_after_publish);
     }
 }
 

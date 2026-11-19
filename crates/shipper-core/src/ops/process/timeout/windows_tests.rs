@@ -174,6 +174,12 @@ fn windows_probe() {
             noisy_err
         );
     }
+    let output = fixture(root.path(), "noisy0", TEST_TIMEOUT, tail);
+    assert_eq!(output.capture.stdout, Some(CaptureLoss::LineBytes));
+    assert_eq!(output.capture.stderr, Some(CaptureLoss::LineBytes));
+    assert_eq!(output.cleanup_failure, None);
+    assert_eq!(output.output.exit_code, 0);
+
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
@@ -252,6 +258,11 @@ fn windows_probe() {
     });
     assert_eq!(output.capture.stdout, Some(CaptureLoss::Read));
     assert_eq!(output.capture.stderr, Some(CaptureLoss::Read));
+    assert_eq!(
+        output.cleanup_failure,
+        Some(CleanupFailure::PipeEofUnconfirmed)
+    );
+    assert!(output.output.duration < MAX_CLEANUP);
     assert!(sibling.0.try_wait().unwrap().is_none());
 
     let setup = with_fault(Fault::JobSetup, || {

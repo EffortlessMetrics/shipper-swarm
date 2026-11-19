@@ -44,6 +44,8 @@ pub(crate) enum CleanupFailure {
     Reap,
     InheritedPipe,
     #[cfg(windows)]
+    PipeEofUnconfirmed,
+    #[cfg(windows)]
     JobSpawn,
     #[cfg(windows)]
     JobAssignment,
@@ -65,6 +67,10 @@ impl CleanupFailure {
             }
             Self::Reap => "the owned child was not reaped within the cleanup allowance",
             Self::InheritedPipe => "an inherited output pipe remained open after group shutdown",
+            #[cfg(windows)]
+            Self::PipeEofUnconfirmed => {
+                "a Windows output reader closed after a read failure before confirming EOF"
+            }
             #[cfg(windows)]
             Self::JobSpawn => "cleanup after Windows process creation failed to be confirmed",
             #[cfg(windows)]

@@ -117,7 +117,10 @@ pub(super) fn run_supervised(
         if let Some((deadline, termination_failed)) = cleanup {
             let reaped = poll_reap(&mut child, exit_status.is_some(), &mut cleanup_failure);
             let empty = job_empty(&job);
-            if reaped && empty && stdout.finished() && stderr.finished() {
+            if reaped && empty && stdout.reader_closed() && stderr.reader_closed() {
+                if !stdout.eof_confirmed || !stderr.eof_confirmed {
+                    cleanup_failure.get_or_insert(CleanupFailure::PipeEofUnconfirmed);
+                }
                 break;
             }
             if Instant::now() >= deadline {
@@ -131,7 +134,7 @@ pub(super) fn run_supervised(
                         CleanupFailure::JobStillActive
                     });
                 }
-                if !stdout.finished() || !stderr.finished() {
+                if !stdout.reader_closed() || !stderr.reader_closed() {
                     cleanup_failure.get_or_insert(CleanupFailure::InheritedPipe);
                     stdout.cancel();
                     stderr.cancel();
@@ -398,6 +401,7 @@ fn job_empty(job: &ProcessGroup) -> bool {
 
 struct PipeCapture<R> {
     stream: Option<R>,
+    eof_confirmed: bool,
     buffer: CaptureBuffer,
 }
 
@@ -405,6 +409,7 @@ impl<R: Read> PipeCapture<R> {
     fn new(stream: R, capture: CaptureMode) -> Self {
         Self {
             stream: Some(stream),
+            eof_confirmed: false,
             buffer: CaptureBuffer::new(capture),
         }
     }
@@ -424,6 +429,7 @@ impl<R: Read> PipeCapture<R> {
         for _ in 0..READS_PER_TURN {
             let bytes = match stream.read(&mut chunk) {
                 Ok(0) => {
+                    self.eof_confirmed = true;
                     self.stream = None;
                     break;
                 }
@@ -443,7 +449,7 @@ impl<R: Read> PipeCapture<R> {
         made_progress
     }
 
-    fn finished(&self) -> bool {
+    fn reader_closed(&self) -> bool {
         self.stream.is_none()
     }
 
