@@ -65,7 +65,7 @@ pub(crate) fn run_command_with_timeout(
 pub(crate) struct CommandNotLaunched(Option<InterruptionLease>);
 
 impl CommandNotLaunched {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     fn for_publish(
         error: anyhow::Error,
         capture: CaptureMode,

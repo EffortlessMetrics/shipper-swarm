@@ -17,8 +17,10 @@ use super::windows::{CLEANUP_ALLOWANCE, Fault, run_supervised, spawn_in_job, wit
 const FIXTURE: &str = "ops::process::timeout::windows_tests::windows_fixture";
 const PROBE: &str = "ops::process::timeout::windows_tests::windows_probe";
 const CHILD_MODE: &str = "SHIPPER_WINDOWS_SUPERVISOR_TEST_CHILD";
+const SIBLING_MODE: &str = "sibling";
 const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_CLEANUP: Duration = Duration::from_secs(3);
+const OUTER_WATCHDOG: Duration = Duration::from_secs(25);
 
 fn test_exe() -> std::path::PathBuf {
     std::env::current_exe().expect("test binary path")
@@ -103,7 +105,7 @@ fn process_resources() -> (usize, usize) {
 #[serial_test::serial]
 #[ignore = "launched only by a native supervision witness"]
 fn windows_fixture() {
-    if std::env::var_os(CHILD_MODE).is_some() {
+    if let Some(child_mode) = std::env::var_os(CHILD_MODE) {
         let _exclusive = OpenOptions::new()
             .create_new(true)
             .write(true)
@@ -111,7 +113,13 @@ fn windows_fixture() {
             .open("descendant-handle")
             .unwrap();
         fs::write("descendant-ready", "").unwrap();
-        thread::sleep(Duration::from_secs(12));
+        // The isolation control must outlive every check the watchdog permits.
+        let lifetime = if child_mode == SIBLING_MODE {
+            OUTER_WATCHDOG + TEST_TIMEOUT
+        } else {
+            Duration::from_secs(12)
+        };
+        thread::sleep(lifetime);
         process::exit(0);
     }
 
@@ -206,7 +214,7 @@ fn windows_probe() {
     let sibling_dir = tempfile::tempdir().unwrap();
     let mut sibling = Sibling(
         fixture_command()
-            .env(CHILD_MODE, "1")
+            .env(CHILD_MODE, SIBLING_MODE)
             .current_dir(sibling_dir.path())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -349,13 +357,35 @@ fn windows_probe() {
     assert!(!default_action.load(SeqCst));
     drop(output);
     assert!(default_action.load(SeqCst));
+
+    sibling.stop().expect("stop and reap the control sibling");
+    assert!(descendant_is_gone(sibling_dir.path()));
 }
 
 struct Sibling(process::Child);
 
+impl Sibling {
+    fn stop(&mut self) -> io::Result<()> {
+        if self.0.try_wait()?.is_none() {
+            self.0.kill()?;
+        }
+        let deadline = Instant::now() + MAX_CLEANUP;
+        while self.0.try_wait()?.is_none() {
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "control sibling did not exit after termination",
+                ));
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        Ok(())
+    }
+}
+
 impl Drop for Sibling {
     fn drop(&mut self) {
-        let _ = self.0.kill();
+        let _ = self.stop();
     }
 }
 
@@ -375,7 +405,7 @@ fn bounded_windows_supervision_has_an_external_watchdog() {
         .stdout(windows_spawn::Stdio::from(log.try_clone().unwrap()))
         .stderr(windows_spawn::Stdio::from(log));
     let mut child = spawn_in_job(&outer_job, command).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(25);
+    let deadline = Instant::now() + OUTER_WATCHDOG;
     loop {
         if let Some(status) = child.try_wait().unwrap() {
             assert!(status.success(), "{}", fs::read_to_string(&path).unwrap());

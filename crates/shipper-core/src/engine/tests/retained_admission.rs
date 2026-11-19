@@ -613,7 +613,7 @@ fn failed_upload_checkpoint_projection_must_refuse_resume() -> Result<()> {
     assert_upload_checkpoint_split_write_refuses_resume(UploadCheckpointFault::ProjectionSync)
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 #[test]
 #[serial]
 fn only_proved_no_launch_can_resume_the_retained_attempt() -> Result<()> {
@@ -738,7 +738,7 @@ fn only_proved_no_launch_can_resume_the_retained_attempt() -> Result<()> {
     Ok(())
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 #[test]
 #[serial]
 fn repeated_no_launch_requires_its_matching_attempt_projection() -> Result<()> {
