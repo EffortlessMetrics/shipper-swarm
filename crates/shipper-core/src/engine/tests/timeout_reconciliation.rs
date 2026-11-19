@@ -64,7 +64,7 @@ fn write_timed_cargo(bin: &Path) {
     fs::write(
         fake_cargo_path(bin),
         format!(
-            "@echo off\r\nif exist silent-cargo (\r\n  \"%SHIPPER_TIMEOUT_FIXTURE_EXE%\" --exact {CHILD} --ignored --nocapture --quiet >nul 2>&1\r\n  exit /b\r\n)\r\n\"%SHIPPER_TIMEOUT_FIXTURE_EXE%\" --exact {CHILD} --ignored --nocapture --quiet\r\nexit /b\r\n"
+            "@echo off\r\nif exist silent-cargo goto :silent\r\n\"%SHIPPER_TIMEOUT_FIXTURE_EXE%\" --exact {CHILD} --ignored --nocapture --quiet\r\nexit /b %errorlevel%\r\n:silent\r\n\"%SHIPPER_TIMEOUT_FIXTURE_EXE%\" --exact {CHILD} --ignored --nocapture --quiet >nul 2>&1\r\nexit /b %errorlevel%\r\n"
         ),
     )
     .expect("write Cargo proxy");
@@ -407,7 +407,10 @@ fn ordinary_exits_keep_output_classification() {
                     .expect_err("ordinary failure");
                 let retained = state::load_state(&state_dir).expect("load").expect("state");
                 match &retained.packages["demo@0.1.0"].state {
-                    PackageState::Failed { class, .. } => assert_eq!(class, &expected_class),
+                    PackageState::Failed { class, .. } => assert_eq!(
+                        class, &expected_class,
+                        "parallel={parallel}, message={message:?}"
+                    ),
                     state => panic!("ordinary exit must preserve failure class: {state:?}"),
                 }
                 assert_eq!(
