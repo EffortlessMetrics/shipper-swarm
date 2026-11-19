@@ -502,9 +502,10 @@ fn start_rebuild_attempt(
     } else {
         max_attempts
     };
-    if let Some(conflict) = active_attempts.remove(package_key) {
-        attempt_history.push(rebuild_attempt_to_detail(conflict));
-    }
+    // A resumed retry can begin while the preceding checkpoint is still
+    // active in replay. Close it through the checkpoint-aware path so an
+    // already recorded attempt is updated in place, not appended again.
+    finalize_attempt(active_attempts, attempt_history, package_key);
     active_attempts.insert(
         package_key.to_string(),
         RebuildAttemptDetail {
