@@ -268,14 +268,7 @@ fn persist(
         progress.attempts = attempt;
     }
     if let Some(detail) = attempt_detail {
-        // A cleaned Cargo failure first records an unresolved checkpoint.
-        // Reconciliation or retry can finish that same attempt.
-        next_state.attempt_history.retain(|previous| {
-            previous.package != detail.package
-                || previous.version != detail.version
-                || previous.attempt != detail.attempt
-        });
-        next_state.attempt_history.push(detail);
+        crate::state::record_attempt_detail(&mut next_state.attempt_history, detail);
     }
     progress.last_updated_at = Utc::now();
     next_state.updated_at = Utc::now();

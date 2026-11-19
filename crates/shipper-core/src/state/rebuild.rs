@@ -196,7 +196,8 @@ fn apply_event(
             let progress = ensure_package(packages, &key, name, version, event.timestamp);
             if !matches!(
                 progress.state,
-                PackageState::Ambiguous { .. }
+                PackageState::Uploaded
+                    | PackageState::Ambiguous { .. }
                     | PackageState::Failed {
                         class: ErrorClass::Ambiguous,
                         ..
@@ -339,10 +340,15 @@ fn apply_event(
                     if let Some(active) =
                         active_attempt_for_key_mut(active_attempts, &event.package)
                     {
-                        active.ended_at = event.timestamp;
-                        active.error_class = Some(ErrorClass::Ambiguous);
-                        if active.redacted_message.is_none() {
-                            active.redacted_message = Some(reason.clone());
+                        if active.upload_checkpoint.is_none() {
+                            // Older journals use reconciliation as the
+                            // attempt's completion boundary. A modern
+                            // checkpoint already recorded the Cargo result.
+                            active.ended_at = event.timestamp;
+                            active.error_class = Some(ErrorClass::Ambiguous);
+                            if active.redacted_message.is_none() {
+                                active.redacted_message = Some(reason.clone());
+                            }
                         }
                         finalize_attempt(active_attempts, attempt_history, &event.package);
                     }
@@ -490,11 +496,6 @@ fn apply_package_failed(
         return;
     };
     if active.upload_checkpoint == Some(UploadCheckpoint::Provisional) {
-        attempt_history.retain(|detail| {
-            detail.package != active.package
-                || detail.version != active.version
-                || detail.attempt != active.attempt
-        });
         active.upload_checkpoint = Some(UploadCheckpoint::Classified);
     }
     // Live attempt details capture the first failure's timestamp/message when the
@@ -538,11 +539,12 @@ fn finalize_attempt(
     if let Some(active) = active_attempts.remove(package_key)
         && active.upload_checkpoint != Some(UploadCheckpoint::Provisional)
     {
+        let checkpointed = active.upload_checkpoint.is_some();
         let mut attempt = rebuild_attempt_to_detail(active);
         if attempt.max_attempts < attempt.attempt {
             attempt.max_attempts = attempt.attempt;
         }
-        attempt_history.push(attempt);
+        record_rebuilt_detail(attempt_history, attempt, checkpointed);
     }
 }
 
@@ -561,8 +563,22 @@ fn finalize_active_attempts(
             .cmp(&right.started_at)
             .then_with(|| left.package.cmp(&right.package))
     });
-    for detail in active {
-        attempt_history.push(rebuild_attempt_to_detail(detail));
+    for active_attempt in active {
+        let checkpointed = active_attempt.upload_checkpoint.is_some();
+        let detail = rebuild_attempt_to_detail(active_attempt);
+        record_rebuilt_detail(attempt_history, detail, checkpointed);
+    }
+}
+
+fn record_rebuilt_detail(
+    history: &mut Vec<AttemptDetail>,
+    detail: AttemptDetail,
+    checkpointed: bool,
+) {
+    if checkpointed {
+        super::record_attempt_detail(history, detail);
+    } else {
+        history.push(detail);
     }
 }
 

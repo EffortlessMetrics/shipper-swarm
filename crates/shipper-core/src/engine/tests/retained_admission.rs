@@ -708,3 +708,296 @@ fn retry_backoff_checkpoint_replays_the_live_projection() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+#[serial]
+fn durable_upload_outcomes_refuse_a_stale_projection() -> Result<()> {
+    let mut failures = Vec::new();
+    for parallel in [false, true] {
+        for published in [false, true] {
+            for response in [404, 503] {
+                let result = (|| -> Result<()> {
+                    let fixture = Fixture::new(parallel, false);
+                    let mut opts = fixture.opts.clone();
+                    opts.max_attempts = 3;
+                    if published {
+                        fixture.registry.respond_with(&[404, 200, response]);
+                    } else {
+                        fixture.registry.respond_with(&[404, response]);
+                    }
+                    let fault = crate::state::file_sync_test_support::observe(
+                        &fixture.state_dir,
+                        move |path| {
+                            if path.file_name().and_then(|name| name.to_str()) == Some("state.tmp")
+                            {
+                                let snapshot: ExecutionState =
+                                    serde_json::from_slice(&fs::read(path)?)
+                                        .map_err(std::io::Error::other)?;
+                                let expected = if published {
+                                    PackageState::Published
+                                } else {
+                                    PackageState::Uploaded
+                                };
+                                if snapshot.packages["demo@0.1.0"].state == expected {
+                                    return Err(std::io::Error::other("failed outcome snapshot"));
+                                }
+                            }
+                            Ok(())
+                        },
+                    );
+                    let error = fixture
+                        .with_cargo(if published { "42" } else { "0" }, || {
+                            run_publish(&fixture.ws, &opts, &mut CollectingReporter::default())
+                        })
+                        .expect_err("the outcome snapshot must fail");
+                    ensure!(
+                        format!("{error:#}").contains("failed outcome snapshot"),
+                        "{error:#}"
+                    );
+                    drop(fault);
+                    let disk = fixture.retained()?;
+                    let progress = &disk.packages["demo@0.1.0"];
+                    ensure!(
+                        progress.attempts == 1
+                            && disk.attempt_history.len() == usize::from(published)
+                    );
+                    ensure!(if published {
+                        matches!(progress.state, PackageState::Ambiguous { .. })
+                    } else {
+                        progress.state == PackageState::Pending
+                    });
+                    let journal = events::events_path(&fixture.state_dir);
+                    let rebuilt = crate::state::rebuild::rebuild_state_from_events(
+                        &journal,
+                        crate::state::rebuild::StateRebuildOptions::new(disk.registry.clone()),
+                    )?;
+                    let expected = if published {
+                        PackageState::Published
+                    } else {
+                        PackageState::Uploaded
+                    };
+                    ensure!(rebuilt.packages["demo@0.1.0"].state == expected);
+                    ensure!(
+                        rebuilt.packages["demo@0.1.0"].attempts == 1
+                            && rebuilt.attempt_history.len() == 1
+                    );
+                    ensure!(rebuilt.attempt_history[0].attempt == 1);
+                    ensure!(fixture.cargo_calls() == 1);
+                    let hits = fixture.registry.hits();
+                    let before = fixture.snapshot()?;
+                    for entry in [Entry::Resume, Entry::Publish, Entry::DirectParallel] {
+                        let result = invoke(&fixture, entry, &opts, &mut disk.clone());
+                        ensure!(fixture.cargo_calls() == 1, "{entry:?} sent a second upload");
+                        let error = result.expect_err("stale upload projection must refuse");
+                        ensure!(is_publish_admission_error(&error), "{error:#}");
+                        ensure!(fixture.registry.hits() == hits && fixture.snapshot()? == before);
+                    }
+                    Ok(())
+                })();
+                if let Err(error) = result {
+                    failures.push(format!(
+                        "parallel={parallel} published={published} registry={response}: {error:#}"
+                    ));
+                }
+            }
+        }
+    }
+    ensure!(failures.is_empty(), "{}", failures.join("\n"));
+    Ok(())
+}
+
+#[test]
+#[serial]
+fn legacy_v04_readiness_evidence_controls_resume() -> Result<()> {
+    use crate::types::{AttemptDetail, ReadinessMethod};
+
+    for parallel in [false, true] {
+        for terminal in [false, true] {
+            let fixture = Fixture::new(parallel, false);
+            let mut opts = fixture.opts.clone();
+            opts.max_attempts = 3;
+            opts.readiness.enabled = true;
+            let mut disk = init_state(&fixture.ws, &fixture.state_dir)?;
+            let key = "demo@0.1.0";
+            let at = Utc::now();
+            let ended = at + chrono::Duration::milliseconds(1);
+            let progress = disk.packages.get_mut(key).context("legacy package")?;
+            progress.attempts = 1;
+            progress.state = if terminal {
+                PackageState::Published
+            } else {
+                PackageState::Uploaded
+            };
+            disk.attempt_history.push(AttemptDetail {
+                package: "demo".into(),
+                version: "0.1.0".into(),
+                attempt: 1,
+                max_attempts: 3,
+                started_at: at,
+                ended_at: ended,
+                error_class: None,
+                next_attempt_at: None,
+                redacted_message: None,
+            });
+            state::save_state(&fixture.state_dir, &disk)?;
+            let path = events::events_path(&fixture.state_dir);
+            let mut log = events::EventLog::new();
+            log.record(PublishEvent {
+                timestamp: at,
+                event_type: EventType::PlanCreated {
+                    plan_id: disk.plan_id.clone(),
+                    package_count: 1,
+                },
+                package: "all".into(),
+            });
+            for (timestamp, event_type) in [
+                (
+                    at,
+                    EventType::PackageStarted {
+                        name: "demo".into(),
+                        version: "0.1.0".into(),
+                    },
+                ),
+                (
+                    at,
+                    EventType::PackageAttempted {
+                        attempt: 1,
+                        command: "cargo publish".into(),
+                        max_attempts: 0,
+                    },
+                ),
+                (
+                    ended,
+                    EventType::PackageOutput {
+                        stdout_tail: "Uploading demo".into(),
+                        stderr_tail: String::new(),
+                    },
+                ),
+                (
+                    ended,
+                    EventType::ReadinessStarted {
+                        method: ReadinessMethod::Api,
+                    },
+                ),
+                (
+                    ended,
+                    if terminal {
+                        EventType::PackagePublished { duration_ms: 1 }
+                    } else {
+                        EventType::PackageStarted {
+                            name: "demo".into(),
+                            version: "0.1.0".into(),
+                        }
+                    },
+                ),
+            ] {
+                log.record(PublishEvent {
+                    timestamp,
+                    event_type,
+                    package: key.into(),
+                });
+            }
+            log.write_to_file(&path)?;
+            ensure!(!fs::read_to_string(&path)?.contains("max_attempts"));
+            let replay = crate::state::rebuild::rebuild_state_from_events(
+                &path,
+                crate::state::rebuild::StateRebuildOptions::new(disk.registry.clone()),
+            )?;
+            ensure!(
+                replay.packages[key].state == disk.packages[key].state,
+                "legacy phase lost"
+            );
+            ensure!(replay.packages[key].attempts == 1 && replay.attempt_history.len() == 1);
+            ensure!(
+                replay.attempt_history[0].started_at == at
+                    && replay.attempt_history[0].attempt == 1
+            );
+            if terminal {
+                fixture.with_cargo("71", || {
+                    run_resume(&fixture.ws, &opts, &mut CollectingReporter::default())
+                })?;
+                ensure!(fixture.cargo_calls() == 0 && fixture.registry.hits() == 0);
+                ensure!(fixture.retained()?.attempt_history == disk.attempt_history);
+                continue;
+            }
+            let mut stale = disk.clone();
+            stale.packages.get_mut(key).unwrap().state = PackageState::Pending;
+            stale.attempt_history.clear();
+            state::save_state(&fixture.state_dir, &stale)?;
+            let before = fixture.snapshot()?;
+            let error = invoke(&fixture, Entry::Resume, &opts, &mut stale)
+                .expect_err("the historical readiness witness must block a stale Pending snapshot");
+            ensure!(is_publish_admission_error(&error), "{error:#}");
+            ensure!(
+                fixture.cargo_calls() == 0
+                    && fixture.registry.hits() == 0
+                    && fixture.snapshot()? == before
+            );
+            state::save_state(&fixture.state_dir, &disk)?;
+            for response in [404, 503] {
+                fixture.registry.respond_with(&[response]);
+                let hits = fixture.registry.hits();
+                let result = fixture.with_cargo("71", || {
+                    run_resume(&fixture.ws, &opts, &mut CollectingReporter::default())
+                });
+                ensure!(result.is_err());
+                ensure!(fixture.registry.hits() > hits && fixture.cargo_calls() == 0);
+                let retained = fixture.retained()?;
+                ensure!(retained.packages[key].state == PackageState::Uploaded);
+                ensure!(retained.attempt_history == disk.attempt_history);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+#[serial]
+fn accepted_upload_survives_visibility_failure_and_resumes_verification() -> Result<()> {
+    for parallel in [false, true] {
+        let fixture = Fixture::new(parallel, false);
+        let mut opts = fixture.opts.clone();
+        opts.max_attempts = 2;
+        opts.readiness.enabled = true;
+        let first = fixture.with_cargo("0", || {
+            run_publish(&fixture.ws, &opts, &mut CollectingReporter::default())
+        });
+        ensure!(first.is_err() && fixture.cargo_calls() == 1);
+        let disk = fixture.retained()?;
+        let path = events::events_path(&fixture.state_dir);
+        let key = "demo@0.1.0";
+        ensure!(disk.packages[key].state == PackageState::Uploaded);
+        ensure!(disk.packages[key].attempts == 1 && disk.attempt_history.len() == 1);
+        ensure!(
+            disk.attempt_history[0].attempt == 1 && disk.attempt_history[0].error_class.is_none()
+        );
+        let journal = events::EventLog::read_from_file(&path)?;
+        let accepted = journal
+            .all_events()
+            .iter()
+            .find(|event| matches!(event.event_type, EventType::PackageUploaded))
+            .context("accepted Cargo upload event")?;
+        ensure!(disk.attempt_history[0].ended_at == accepted.timestamp);
+
+        for response in [404, 503] {
+            fixture.registry.respond_with(&[response]);
+            let hits = fixture.registry.hits();
+            let result = fixture.with_cargo("71", || {
+                run_resume(&fixture.ws, &opts, &mut CollectingReporter::default())
+            });
+            ensure!(result.is_err() && fixture.registry.hits() > hits);
+            ensure!(fixture.cargo_calls() == 1);
+            let retained = fixture.retained()?;
+            let rebuilt = crate::state::rebuild::rebuild_state_from_events(
+                &path,
+                crate::state::rebuild::StateRebuildOptions::new(retained.registry.clone()),
+            )?;
+            ensure!(retained.packages[key].state == PackageState::Uploaded);
+            ensure!(rebuilt.packages[key].state == retained.packages[key].state);
+            ensure!(retained.packages[key].attempts == 1 && rebuilt.packages[key].attempts == 1);
+            ensure!(retained.attempt_history == disk.attempt_history);
+            ensure!(rebuilt.attempt_history == retained.attempt_history);
+        }
+    }
+    Ok(())
+}

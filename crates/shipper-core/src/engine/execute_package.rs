@@ -1118,19 +1118,15 @@ pub(crate) fn publish_package_with_timeout(
                     return PackagePublishResult { result: Err(e) };
                 }
 
-                if attempt >= opts.max_attempts {
-                    return PackagePublishResult {
-                        result: Err(anyhow::anyhow!(
-                            "{}@{}: upload reconciliation did not observe published package before max attempts",
-                            p.name,
-                            p.version
-                        )),
-                    };
-                }
-
-                // Previous cargo attempt could have partially completed. Re-run cargo in
-                // this resume attempt if the package is still not visible.
-                cargo_succeeded = false;
+                // Cargo already accepted this upload. Registry absence
+                // during readiness cannot authorize another submission.
+                return PackagePublishResult {
+                    result: Err(anyhow::anyhow!(
+                        "{}@{}: previously accepted upload is not yet visible on the registry",
+                        p.name,
+                        p.version
+                    )),
+                };
             }
             Err(error) => {
                 if let Err(close_error) = record_readiness_error(
@@ -2163,32 +2159,33 @@ pub(crate) fn publish_package_with_timeout(
                         return PackagePublishResult { result: Err(e) };
                     }
                     let error_class_str = format!("{:?}", class);
-                    let failed = PackageState::Failed {
-                        class: class.clone(),
-                        message: msg.clone(),
-                    };
-                    // Event: PackageFailed (final)
-                    let pending_events = vec![PublishEvent {
-                        timestamp: Utc::now(),
-                        event_type: EventType::PackageFailed {
-                            class: class.clone(),
-                            message: msg.clone(),
-                        },
-                        package: pkg_label.clone(),
-                    }];
-                    if let Err(e) = commit_pending_transition(
-                        st,
-                        state_dir,
-                        event_log,
-                        events_path,
-                        &key,
-                        failed,
-                        pending_events,
-                    ) {
-                        return PackagePublishResult { result: Err(e) };
+                    // Keep the accepted upload checkpoint when readiness
+                    // fails. Subsequent runs can still verify visibility.
+                    if !cargo_succeeded {
+                        if let Err(e) = commit_transition(
+                            st,
+                            state_dir,
+                            event_log,
+                            events_path,
+                            &key,
+                            PackageState::Failed {
+                                class: class.clone(),
+                                message: msg.clone(),
+                            },
+                            PublishEvent {
+                                timestamp: Utc::now(),
+                                event_type: EventType::PackageFailed {
+                                    class: class.clone(),
+                                    message: msg.clone(),
+                                },
+                                package: pkg_label.clone(),
+                            },
+                        ) {
+                            return PackagePublishResult { result: Err(e) };
+                        }
                     }
 
-                    // Send webhook notification: package failed
+                    // Send webhook notification: publication did not finish
                     maybe_send_event(
                         &opts.webhook,
                         WebhookEvent::PublishFailed {
