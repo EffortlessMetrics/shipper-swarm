@@ -14,7 +14,7 @@ use shipper_types::{
     PublishEvent, ReconciliationOutcome, Registry,
 };
 
-use super::{events, execution_state};
+use super::{events, execution_state, upload_evidence::UploadWitness};
 
 /// Inputs that cannot be recovered from `events.jsonl` alone.
 #[derive(Debug, Clone)]
@@ -71,9 +71,20 @@ pub fn rebuild_state_from_events(
     let mut attempt_history = Vec::new();
     let mut active_attempts: BTreeMap<String, RebuildAttemptDetail> = BTreeMap::new();
 
+    let mut upload_witnesses = BTreeMap::<&str, UploadWitness>::new();
     for event in events {
+        let witness = upload_witnesses.entry(&event.package).or_default();
+        let next = witness.observe(&event.event_type);
+        let legacy_acceptance = match (*witness, next) {
+            (UploadWitness::Attempted { .. }, UploadWitness::LegacyUploaded(attempt)) => {
+                Some(attempt)
+            }
+            _ => None,
+        };
+        *witness = next;
         apply_event(
             event,
+            legacy_acceptance,
             &mut plan_id,
             &mut packages,
             &mut active_attempts,
@@ -171,6 +182,7 @@ fn recognizable_cleanup_hold(raw: &[u8]) -> bool {
 
 fn apply_event(
     event: &PublishEvent,
+    legacy_acceptance: Option<u32>,
     plan_id: &mut Option<String>,
     packages: &mut BTreeMap<String, PackageProgress>,
     active_attempts: &mut BTreeMap<String, RebuildAttemptDetail>,
@@ -215,9 +227,19 @@ fn apply_event(
             progress.last_updated_at = event.timestamp;
         }
         EventType::ReadinessStarted { .. } => {
-            if let Some(progress) = ensure_event_package(packages, event, event.timestamp) {
-                progress.state = PackageState::Uploaded;
-                progress.last_updated_at = event.timestamp;
+            // v0.4 had no PackageUploaded marker. Its first readiness check
+            // followed the successful Cargo attempt and the Uploaded save.
+            // A modern readiness start can be only a visibility probe.
+            if let Some(attempt) = legacy_acceptance
+                && let Some(active) = active_attempt_for_key_mut(active_attempts, &event.package)
+                && active.attempt == attempt
+            {
+                active.ended_at = event.timestamp;
+                finalize_attempt(active_attempts, attempt_history, &event.package);
+                if let Some(progress) = ensure_event_package(packages, event, event.timestamp) {
+                    progress.state = PackageState::Uploaded;
+                    progress.last_updated_at = event.timestamp;
+                }
             }
         }
         EventType::PackageUploaded => {
@@ -495,13 +517,14 @@ fn apply_package_failed(
     let Some(active) = active_attempt_for_key_mut(active_attempts, package_key) else {
         return;
     };
-    if active.upload_checkpoint == Some(UploadCheckpoint::Provisional) {
+    let checkpointed = active.upload_checkpoint == Some(UploadCheckpoint::Provisional);
+    if checkpointed {
         active.upload_checkpoint = Some(UploadCheckpoint::Classified);
     }
     // Live attempt details capture the first failure's timestamp/message when the
     // attempt is recorded (retry schedule or exhaustion). A later terminal
     // PackageFailed must not rewrite those fields or finalization drifts.
-    if !active.saw_failure {
+    if !active.saw_failure && !checkpointed {
         active.ended_at = timestamp;
         active.error_class = Some(class.clone());
         active.redacted_message = Some(message.to_string());
@@ -1560,7 +1583,7 @@ mod tests {
     }
 
     #[test]
-    fn rebuild_readiness_started_still_projects_uploaded_for_compatibility() {
+    fn rebuild_recovers_legacy_acceptance_from_the_first_readiness_start() {
         let td = tempdir().expect("tempdir");
         let events_path = td.path().join("events.jsonl");
         write_events(
@@ -1577,6 +1600,23 @@ mod tests {
                 event(
                     1,
                     "demo@0.1.0",
+                    EventType::PackageAttempted {
+                        attempt: 1,
+                        command: "cargo publish".into(),
+                        max_attempts: 0,
+                    },
+                ),
+                event(
+                    2,
+                    "demo@0.1.0",
+                    EventType::PackageOutput {
+                        stdout_tail: "Uploading demo".into(),
+                        stderr_tail: String::new(),
+                    },
+                ),
+                event(
+                    3,
+                    "demo@0.1.0",
                     EventType::ReadinessStarted {
                         method: ReadinessMethod::Api,
                     },
@@ -1587,7 +1627,7 @@ mod tests {
         let state = rebuild_state_from_events(&events_path, options()).expect("rebuild");
         let progress = state.packages.get("demo@0.1.0").expect("package");
         assert_eq!(progress.state, PackageState::Uploaded);
-        assert_eq!(progress.last_updated_at, ts(1));
+        assert_eq!(progress.last_updated_at, ts(3));
     }
 
     #[test]

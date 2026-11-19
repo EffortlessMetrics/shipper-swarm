@@ -13,6 +13,7 @@ pub mod rebuild;
 pub mod reconciliation;
 pub mod rehearsal;
 pub(crate) mod run_observation;
+pub(crate) mod upload_evidence;
 
 /// A checkpointed attempt owns the history slot of its first durable detail.
 /// Reconciliation and retry scheduling can refine the detail in place.

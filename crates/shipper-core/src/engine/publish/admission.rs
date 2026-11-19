@@ -12,10 +12,10 @@ use crate::engine::{
 };
 use crate::lock::{LockContents, LockReservation};
 use crate::plan::PlannedWorkspace;
+use crate::state::upload_evidence::UploadWitness;
 use crate::state::{consistency, events, execution_state as state, run_observation};
 use crate::types::{
-    ErrorClass, EventType, ExecutionState, PackageState, PublishEvent, ReconciliationOutcome,
-    ReconciliationReport, RuntimeOptions,
+    EventType, ExecutionState, PackageState, PublishEvent, ReconciliationReport, RuntimeOptions,
 };
 
 /// This is an early diagnostic only. Its result makes the state requirement
@@ -151,127 +151,6 @@ fn load_retained_state(
         reject_exhausted_resume_retry_ceiling(ws, opts, &existing)?;
     }
     Ok(Some(existing))
-}
-
-#[derive(Clone, Copy, Default)]
-enum UploadWitness {
-    #[default]
-    None,
-    Attempted {
-        number: u32,
-        legacy: bool,
-        output_recorded: bool,
-    },
-    Unconfirmed(Option<u32>),
-    Uploaded,
-    Terminal,
-}
-
-impl UploadWitness {
-    fn observe(self, event: &EventType) -> Self {
-        match event {
-            EventType::PackagePublished { .. }
-            | EventType::PackageSkipped { .. }
-            | EventType::PublishReconciled {
-                outcome: ReconciliationOutcome::Published { .. },
-            } => Self::Terminal,
-            _ if matches!(self, Self::Terminal) => self,
-            EventType::PackageUploaded => Self::Uploaded,
-            _ if matches!(self, Self::Uploaded) => self,
-            EventType::PackageAttempted {
-                attempt,
-                max_attempts,
-                ..
-            } => Self::Attempted {
-                number: *attempt,
-                legacy: *max_attempts == 0,
-                output_recorded: false,
-            },
-            EventType::PackageOutput { .. } => match self {
-                Self::Attempted {
-                    number,
-                    legacy: true,
-                    ..
-                } => Self::Attempted {
-                    number,
-                    legacy: true,
-                    output_recorded: true,
-                },
-                _ => self,
-            },
-            // v0.4 saved Uploaded after writing Cargo output and emitted
-            // readiness before polling. Modern readiness diagnostics alone
-            // cannot establish that Cargo accepted an upload.
-            EventType::ReadinessStarted { .. }
-                if matches!(
-                    self,
-                    Self::Attempted {
-                        legacy: true,
-                        output_recorded: true,
-                        ..
-                    }
-                ) =>
-            {
-                Self::Uploaded
-            }
-            EventType::PackageUploadUnconfirmed { .. }
-            | EventType::PackageFailed {
-                class: ErrorClass::Ambiguous,
-                ..
-            }
-            | EventType::PublishReconciled {
-                outcome: ReconciliationOutcome::StillUnknown { .. },
-            } => Self::Unconfirmed(match self {
-                Self::Attempted { number, .. } => Some(number),
-                Self::Unconfirmed(attempt) => attempt,
-                _ => None,
-            }),
-            EventType::PackageFailed { .. }
-            | EventType::PublishReconciled {
-                outcome: ReconciliationOutcome::NotPublished { .. },
-            } => Self::None,
-            _ => self,
-        }
-    }
-
-    fn permits(self, progress: Option<&crate::types::PackageProgress>) -> bool {
-        if matches!(self, Self::None) {
-            return true;
-        }
-        let Some(progress) = progress else {
-            return false;
-        };
-        // Authentic old terminal snapshots already skip, including in
-        // histories without a corresponding terminal event.
-        if matches!(
-            progress.state,
-            PackageState::Published | PackageState::Skipped { .. }
-        ) {
-            return true;
-        }
-        match self {
-            Self::Unconfirmed(attempt) => {
-                attempt.is_none_or(|number| number == progress.attempts)
-                    && matches!(
-                        progress.state,
-                        PackageState::Ambiguous { .. }
-                            | PackageState::Failed {
-                                class: ErrorClass::Ambiguous,
-                                ..
-                            }
-                    )
-            }
-            Self::Uploaded => progress.state == PackageState::Uploaded,
-            // An authentic v0.4 snapshot could commit immediately before
-            // ReadinessStarted. It can still verify visibility safely.
-            Self::Attempted {
-                number,
-                legacy: true,
-                output_recorded: true,
-            } => number == progress.attempts && progress.state == PackageState::Uploaded,
-            _ => false,
-        }
-    }
 }
 
 /// A split write can leave a readable snapshot behind its latest Cargo

@@ -423,6 +423,16 @@ fn ordinary_exits_keep_output_classification() {
                     event.event_type,
                     EventType::PublishReconciling { .. } | EventType::PublishReconciled { .. }
                 )));
+                let replay = crate::state::rebuild::rebuild_state_from_events(
+                    &events::events_path(&state_dir),
+                    crate::state::rebuild::StateRebuildOptions::new(retained.registry.clone()),
+                )
+                .expect("replay final failure");
+                assert_eq!(
+                    replay.packages["demo@0.1.0"].state,
+                    retained.packages["demo@0.1.0"].state
+                );
+                assert_eq!(replay.attempt_history, retained.attempt_history);
                 // Retryable exhaustion keeps its existing final visibility
                 // check; Permanent returns after the initial quick check.
                 let requests = if expected_class == ErrorClass::Retryable {

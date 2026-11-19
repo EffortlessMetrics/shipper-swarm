@@ -24,6 +24,7 @@ use crate::runtime::execution::{
 };
 use crate::state::events;
 use crate::state::execution_state as state;
+use crate::state::upload_evidence::UploadWitness;
 use shipper_types::{
     AttemptDetail, AttemptEvidence, ErrorClass, EventType, ExecutionState, PackageEvidence,
     PackageReceipt, PackageState, PlannedPackage, PublishEvent, PublishRegime, ReadinessConfig,
@@ -335,27 +336,6 @@ fn commit_pending_with_attempt_detail_transition(
             events_path,
             key,
             new_state,
-            detail,
-        )
-    })
-}
-
-fn commit_attempt_detail_transition(
-    st: &Arc<Mutex<ExecutionState>>,
-    state_dir: &Path,
-    event_log: &Arc<Mutex<events::EventLog>>,
-    events_path: &Path,
-    key: &str,
-    detail: AttemptDetail,
-    pending_events: Vec<PublishEvent>,
-) -> Result<()> {
-    with_package_event_batch(st, event_log, key, pending_events, |state, log| {
-        crate::engine::transition::commit_attempt_detail_pending(
-            state,
-            state_dir,
-            log,
-            events_path,
-            key,
             detail,
         )
     })
@@ -776,10 +756,32 @@ pub(crate) fn publish_package_with_timeout(
         };
     }
 
-    // Record package started event
-    {
+    // Resolve legacy visibility-only work under the event writer lock, so a
+    // sibling cannot append while we read the retained upload evidence.
+    let verify_retained_upload = {
         let Ok(mut log) = event_log.lock() else {
             return poisoned_lock("event log");
+        };
+        let verify_legacy_exhaustion = if matches!(
+            progress.state,
+            PackageState::Failed {
+                class: ErrorClass::Ambiguous,
+                ..
+            }
+        ) {
+            match events::EventLog::read_from_file(events_path) {
+                Ok(retained) => retained
+                    .all_events()
+                    .iter()
+                    .filter(|event| event.package == pkg_label)
+                    .fold(UploadWitness::default(), |witness, event| {
+                        witness.observe(&event.event_type)
+                    })
+                    .requires_legacy_visibility_check(&progress),
+                Err(error) => return PackagePublishResult { result: Err(error) },
+            }
+        } else {
+            false
         };
         log.record(PublishEvent {
             timestamp: started_at,
@@ -798,10 +800,10 @@ pub(crate) fn publish_package_with_timeout(
             };
         }
         log.clear();
-    }
+        verify_legacy_exhaustion || progress.state == PackageState::Uploaded
+    };
 
-    let (mut attempt, was_uploaded, ambiguous_prior, check_existing_version) = {
-        let was_uploaded = matches!(progress.state, PackageState::Uploaded);
+    let (mut attempt, ambiguous_prior, check_existing_version) = {
         // Registry visibility may have changed between invocations. A retained
         // retryable failure needs the same pre-attempt check as pending work;
         // keep Ambiguous and Uploaded on their dedicated reconciliation paths.
@@ -818,22 +820,17 @@ pub(crate) fn publish_package_with_timeout(
             PackageState::Failed {
                 class: ErrorClass::Ambiguous,
                 message,
-            } => Some(message.clone()),
+            } if !verify_retained_upload => Some(message.clone()),
             _ => None,
         };
-        (
-            progress.attempts,
-            was_uploaded,
-            ambiguous_prior,
-            check_existing_version,
-        )
+        (progress.attempts, ambiguous_prior, check_existing_version)
     };
 
     reporter.info(&format!("{}@{}: publishing...", p.name, p.version));
     let mut last_err: Option<(ErrorClass, String)> = None;
     let mut attempt_evidence: Vec<AttemptEvidence> = Vec::new();
     let mut readiness_evidence: Vec<ReadinessEvidence> = Vec::new();
-    let mut cargo_succeeded = was_uploaded;
+    let mut cargo_succeeded = false;
 
     // Apply policy effects for readiness (Fix 7: parallel mode must respect PublishPolicy::Fast)
     let effects = policy_effects(opts);
@@ -1011,7 +1008,7 @@ pub(crate) fn publish_package_with_timeout(
         }
     }
 
-    if was_uploaded {
+    if verify_retained_upload {
         reporter.info(&format!(
             "{}@{}: resuming from uploaded (verifying registry visibility)",
             p.name, p.version
@@ -1416,8 +1413,6 @@ pub(crate) fn publish_package_with_timeout(
                 cargo_succeeded = true;
                 // PackageUploaded is the durable checkpoint that proves cargo
                 // accepted the upload and projects Uploaded on rebuild.
-                // Keep the older ReadinessStarted mapping as a compatibility
-                // bridge for historical event logs that predate this seam.
                 if let Err(e) = commit_with_attempt_detail_transition(
                     st,
                     state_dir,
@@ -1881,17 +1876,11 @@ pub(crate) fn publish_package_with_timeout(
                                 class.clone(),
                                 &msg,
                             );
-                        } else if let Err(e) = commit_attempt_detail_transition(
-                            st,
-                            state_dir,
-                            event_log,
-                            events_path,
-                            &key,
-                            attempt_detail,
-                            pending_events,
-                        ) {
-                            return PackagePublishResult { result: Err(e) };
                         }
+                        // Exhaustion leaves the durable unconfirmed checkpoint
+                        // in place until the final visibility check returns.
+                        // A separate PackageFailed here would classify replay
+                        // before the matching live state can be committed.
                     }
                 }
                 continue;

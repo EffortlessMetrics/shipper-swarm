@@ -203,6 +203,7 @@ pub(crate) fn commit_pending_with_attempt_detail(
 /// Flush buffered explanatory events while appending attempt detail without
 /// changing the package state projection. This is used for retry scheduling,
 /// where the package remains pending between attempts.
+#[cfg(test)]
 pub(crate) fn commit_attempt_detail_pending(
     state: &mut ExecutionState,
     state_dir: &Path,

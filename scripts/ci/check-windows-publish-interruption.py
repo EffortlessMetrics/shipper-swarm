@@ -37,6 +37,7 @@ def cli_fixture(sh, root, stage, parallel):
     entered = threading.Event()
     release = threading.Event()
     version_visible = threading.Event()
+    event_path = root / "state/events.jsonl"
 
     class Registry(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -44,6 +45,11 @@ def cli_fixture(sh, root, stage, parallel):
             status = 404
             if version_visible.is_set():
                 status = 200
+            elif stage == "final-visibility":
+                # Let the quick post-Cargo check finish absent. Block only
+                # once the final check has journaled ReadinessStarted.
+                if event_path.exists() and b'"type":"readiness_started"' in event_path.read_bytes():
+                    status = 503
             elif stage != "backoff" and (root / "unknown-registry").exists():
                 status = 503
             if status == 503:
@@ -89,12 +95,13 @@ def cli_fixture(sh, root, stage, parallel):
             "--per-package-timeout", "2s", "--format", "json",
             "--readiness-method", "api", "--readiness-poll", "0ms",
             "--readiness-timeout", "1s"]
+    if stage == "final-visibility":
+        args[args.index("--max-attempts") + 1] = "1"
     if stage == "backoff":
         args[args.index("--format") + 1] = "text"
         args += ["--base-delay", "20s", "--max-delay", "20s", "--retry-jitter", "0"]
     if parallel:
         args += ["--parallel", "--max-concurrent", "2"]
-    event_path = root / "state/events.jsonl"
     try:
         with (root / "cli.stdout").open("wb") as out, (root / "cli.stderr").open("wb") as err:
             proc = subprocess.Popen(args + ["publish"], cwd=root, env=env, stdin=subprocess.DEVNULL,
@@ -158,6 +165,11 @@ def cli_fixture(sh, root, stage, parallel):
             assert following.startswith(initial)
             return
         assert live_state == "ambiguous"
+        if stage == "final-visibility":
+            kinds = [event["type"] for event in events]
+            assert kinds.count("readiness_started") == 1, kinds
+            assert kinds.index("package_upload_unconfirmed") < kinds.index("readiness_started")
+            assert all(kind not in ("package_uploaded", "package_failed") for kind in kinds), kinds
         assert [event["class"] for event in checkpoint] == [
             "ambiguous" if stage == "timeout" else "retryable"
         ], checkpoint
@@ -177,7 +189,7 @@ def main():
         cli_fixture(Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4], sys.argv[5] == "1")
     else:
         parser = argparse.ArgumentParser()
-        parser.add_argument("stage", choices=["nonzero", "timeout", "backoff"])
+        parser.add_argument("stage", choices=["nonzero", "timeout", "backoff", "final-visibility"])
         parser.add_argument("binary", type=Path)
         options = parser.parse_args()
         startup = subprocess.STARTUPINFO()

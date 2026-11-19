@@ -808,31 +808,131 @@ fn durable_upload_outcomes_refuse_a_stale_projection() -> Result<()> {
 
 #[test]
 #[serial]
+fn final_visibility_start_keeps_an_unconfirmed_upload_in_replay_and_resume() -> Result<()> {
+    for parallel in [false, true] {
+        let fixture = Fixture::new(parallel, false);
+        fixture.registry.respond_with(&[404, 404]);
+        let events_path = events::events_path(&fixture.state_dir);
+        let observed_path = events_path.clone();
+        let fault =
+            crate::state::file_sync_test_support::observe(&fixture.state_dir, move |path| {
+                if path != observed_path {
+                    return Ok(());
+                }
+                let log = events::EventLog::read_from_file(path).map_err(std::io::Error::other)?;
+                if log.all_events().last().is_some_and(|event| {
+                    matches!(event.event_type, EventType::ReadinessStarted { .. })
+                }) {
+                    return Err(std::io::Error::other(
+                        "stop before the final visibility result",
+                    ));
+                }
+                Ok(())
+            });
+        let result = with_test_env(
+            &fixture.bin,
+            vec![
+                ("SHIPPER_CARGO_EXIT", Some("42".into())),
+                ("SHIPPER_CARGO_STDOUT", Some(String::new())),
+                (
+                    "SHIPPER_CARGO_STDERR",
+                    Some("connection reset by peer".into()),
+                ),
+                (
+                    "SHIPPER_CARGO_ARGS_LOG",
+                    Some(fixture.cargo_log.to_string_lossy().into_owned()),
+                ),
+            ],
+            || {
+                run_publish(
+                    &fixture.ws,
+                    &fixture.opts,
+                    &mut CollectingReporter::default(),
+                )
+            },
+        );
+        drop(fault);
+        let error =
+            result.expect_err("the observer must interrupt before the final registry result");
+        ensure!(format!("{error:#}").contains("stop before the final visibility result"));
+        ensure!(fixture.registry.hits() == 2 && fixture.cargo_calls() == 1);
+
+        let disk = fixture.retained()?;
+        let rebuilt = crate::state::rebuild::rebuild_state_from_events(
+            &events_path,
+            crate::state::rebuild::StateRebuildOptions::new(disk.registry.clone()),
+        )?;
+        let key = "demo@0.1.0";
+        assert!(matches!(
+            disk.packages[key].state,
+            PackageState::Ambiguous { .. }
+        ));
+        assert_eq!(rebuilt.packages[key].state, disk.packages[key].state);
+        assert_eq!(rebuilt.packages[key].attempts, disk.packages[key].attempts);
+        assert_eq!(rebuilt.attempt_history, disk.attempt_history);
+        assert_eq!(
+            disk.attempt_history[0].error_class,
+            Some(ErrorClass::Retryable)
+        );
+
+        fixture.registry.respond_with(&[503]);
+        let resume = fixture.with_cargo("71", || {
+            run_resume(
+                &fixture.ws,
+                &fixture.opts,
+                &mut CollectingReporter::default(),
+            )
+        });
+        ensure!(resume.is_err() && fixture.registry.hits() == 3 && fixture.cargo_calls() == 1);
+        let resumed = fixture.retained()?;
+        ensure!(matches!(
+            resumed.packages[key].state,
+            PackageState::Ambiguous { .. }
+        ));
+        ensure!(resumed.attempt_history == disk.attempt_history);
+    }
+    Ok(())
+}
+
+#[test]
+#[serial]
 fn legacy_v04_readiness_evidence_controls_resume() -> Result<()> {
     use crate::types::{AttemptDetail, ReadinessMethod};
 
+    // v0.4.0 (b3ebe6623) saved a successful Cargo attempt and Uploaded
+    // before recording readiness. Exhaustion saved Failed(Ambiguous)
+    // and recorded PackageFailed without changing the attempt detail.
+
+    let exhausted_state = PackageState::Failed {
+        class: ErrorClass::Ambiguous,
+        message: "published locally, but version not observed on registry within timeout".into(),
+    };
     for parallel in [false, true] {
-        for terminal in [false, true] {
+        for phase in [
+            exhausted_state.clone(),
+            PackageState::Uploaded,
+            PackageState::Published,
+        ] {
+            let terminal = phase == PackageState::Published;
+            let exhausted = phase == exhausted_state;
             let fixture = Fixture::new(parallel, false);
             let mut opts = fixture.opts.clone();
-            opts.max_attempts = 3;
+            opts.max_attempts = 1;
             opts.readiness.enabled = true;
             let mut disk = init_state(&fixture.ws, &fixture.state_dir)?;
             let key = "demo@0.1.0";
             let at = Utc::now();
             let ended = at + chrono::Duration::milliseconds(1);
+            let output = ended + chrono::Duration::milliseconds(1);
+            let readiness = output + chrono::Duration::milliseconds(1);
             let progress = disk.packages.get_mut(key).context("legacy package")?;
             progress.attempts = 1;
-            progress.state = if terminal {
-                PackageState::Published
-            } else {
-                PackageState::Uploaded
-            };
+            progress.state = phase.clone();
             disk.attempt_history.push(AttemptDetail {
                 package: "demo".into(),
                 version: "0.1.0".into(),
                 attempt: 1,
-                max_attempts: 3,
+                max_attempts: 1,
                 started_at: at,
                 ended_at: ended,
                 error_class: None,
@@ -867,27 +967,16 @@ fn legacy_v04_readiness_evidence_controls_resume() -> Result<()> {
                     },
                 ),
                 (
-                    ended,
+                    output,
                     EventType::PackageOutput {
                         stdout_tail: "Uploading demo".into(),
                         stderr_tail: String::new(),
                     },
                 ),
                 (
-                    ended,
+                    readiness,
                     EventType::ReadinessStarted {
                         method: ReadinessMethod::Api,
-                    },
-                ),
-                (
-                    ended,
-                    if terminal {
-                        EventType::PackagePublished { duration_ms: 1 }
-                    } else {
-                        EventType::PackageStarted {
-                            name: "demo".into(),
-                            version: "0.1.0".into(),
-                        }
                     },
                 ),
             ] {
@@ -896,6 +985,27 @@ fn legacy_v04_readiness_evidence_controls_resume() -> Result<()> {
                     event_type,
                     package: key.into(),
                 });
+            }
+            let final_at = readiness + chrono::Duration::milliseconds(1);
+            if terminal {
+                log.record(PublishEvent {
+                    timestamp: final_at,
+                    event_type: EventType::PackagePublished { duration_ms: 1 },
+                    package: key.into(),
+                });
+            } else if exhausted {
+                for (timestamp, event_type) in [
+                    (final_at, EventType::ReadinessTimeout { max_wait_ms: 0 }),
+                    (
+                        final_at + chrono::Duration::milliseconds(1),
+                        EventType::PackageFailed {
+                            class: ErrorClass::Ambiguous,
+                            message: "published locally, but version not observed on registry within timeout".into(),
+                        },
+                    ),
+                ] {
+                    log.record(PublishEvent { timestamp, event_type, package: key.into() });
+                }
             }
             log.write_to_file(&path)?;
             ensure!(!fs::read_to_string(&path)?.contains("max_attempts"));
@@ -908,10 +1018,9 @@ fn legacy_v04_readiness_evidence_controls_resume() -> Result<()> {
                 "legacy phase lost"
             );
             ensure!(replay.packages[key].attempts == 1 && replay.attempt_history.len() == 1);
-            ensure!(
-                replay.attempt_history[0].started_at == at
-                    && replay.attempt_history[0].attempt == 1
-            );
+            let mut expected_detail = disk.attempt_history[0].clone();
+            expected_detail.ended_at = readiness;
+            assert_eq!(replay.attempt_history, [expected_detail.clone()]);
             if terminal {
                 fixture.with_cargo("71", || {
                     run_resume(&fixture.ws, &opts, &mut CollectingReporter::default())
@@ -943,9 +1052,23 @@ fn legacy_v04_readiness_evidence_controls_resume() -> Result<()> {
                 ensure!(result.is_err());
                 ensure!(fixture.registry.hits() > hits && fixture.cargo_calls() == 0);
                 let retained = fixture.retained()?;
-                ensure!(retained.packages[key].state == PackageState::Uploaded);
+                ensure!(retained.packages[key].state == phase);
                 ensure!(retained.attempt_history == disk.attempt_history);
+                let replay = crate::state::rebuild::rebuild_state_from_events(
+                    &path,
+                    crate::state::rebuild::StateRebuildOptions::new(disk.registry.clone()),
+                )?;
+                assert_eq!(replay.packages[key].state, phase);
+                assert_eq!(replay.attempt_history, [expected_detail.clone()]);
             }
+            fixture.registry.respond_with(&[200]);
+            fixture.with_cargo("71", || {
+                run_resume(&fixture.ws, &opts, &mut CollectingReporter::default())
+            })?;
+            let published = fixture.retained()?;
+            assert_eq!(published.packages[key].state, PackageState::Published);
+            assert_eq!(published.attempt_history, disk.attempt_history);
+            ensure!(fixture.cargo_calls() == 0);
         }
     }
     Ok(())
