@@ -1,0 +1,335 @@
+//! Native process witnesses run inside a separately watched test process.
+
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
+use std::os::windows::fs::OpenOptionsExt;
+use std::path::Path;
+use std::process::{self, Command, Stdio};
+use std::sync::atomic::Ordering::SeqCst;
+use std::thread;
+use std::time::{Duration, Instant};
+
+use super::super::capture::CaptureMode;
+use super::super::interruption::PublishInterruption;
+use super::super::{CaptureLoss, CapturedCommandOutput, CleanupFailure};
+use super::windows::{CLEANUP_ALLOWANCE, Fault, run_supervised, with_fault};
+
+const FIXTURE: &str = "ops::process::timeout::windows_tests::windows_fixture";
+const PROBE: &str = "ops::process::timeout::windows_tests::windows_probe";
+const CHILD_MODE: &str = "SHIPPER_WINDOWS_SUPERVISOR_TEST_CHILD";
+const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_CLEANUP: Duration = Duration::from_secs(3);
+
+fn test_exe() -> std::path::PathBuf {
+    std::env::current_exe().expect("test binary path")
+}
+
+fn wait_until(duration: Duration, mut condition: impl FnMut() -> bool) {
+    let deadline = Instant::now() + duration;
+    while !condition() {
+        assert!(Instant::now() < deadline, "fixture watchdog expired");
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn fixture_args(name: &str) -> [&str; 4] {
+    ["--ignored", "--exact", name, "--nocapture"]
+}
+
+fn fixture_command() -> Command {
+    let mut command = Command::new(test_exe());
+    command.args(fixture_args(FIXTURE));
+    command
+}
+
+fn fixture(
+    dir: &Path,
+    mode: &str,
+    timeout: Duration,
+    capture: CaptureMode,
+) -> CapturedCommandOutput {
+    fs::write(dir.join("mode"), mode).unwrap();
+    run_supervised(
+        test_exe().to_str().unwrap(),
+        &fixture_args(FIXTURE),
+        dir,
+        Some(timeout),
+        capture,
+    )
+    .unwrap_or_else(|error| panic!("supervisor fixture {mode}: {error:#}"))
+}
+
+fn assert_clean(result: &CapturedCommandOutput, status: i32) {
+    assert_eq!(
+        result.output.exit_code, status,
+        "output: {:?}, capture: {:?}, cleanup: {:?}",
+        result.output, result.capture, result.cleanup_failure
+    );
+    assert!(!result.output.timed_out);
+    assert!(!result.interrupted);
+    assert_eq!(
+        result.cleanup_failure, None,
+        "output: {:?}, capture: {:?}",
+        result.output, result.capture
+    );
+    assert!(result.capture.is_complete());
+}
+
+fn descendant_is_gone(dir: &Path) -> bool {
+    OpenOptions::new()
+        .read(true)
+        .open(dir.join("descendant-handle"))
+        .is_ok()
+}
+
+fn process_resources() -> (usize, usize) {
+    // Read the resource counts of this probe while it remains alive. The
+    // outer watcher also bounds the diagnostic subprocess.
+    let output = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command"])
+        .arg(format!(
+            "$p = Get-Process -Id {}; Write-Output $p.HandleCount; Write-Output $p.Threads.Count",
+            process::id()
+        ))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let counts = String::from_utf8(output.stdout).unwrap();
+    let mut counts = counts.lines().map(|line| line.trim().parse().unwrap());
+    (counts.next().unwrap(), counts.next().unwrap())
+}
+
+#[test]
+#[ignore = "launched only by a native supervision witness"]
+fn windows_fixture() {
+    if std::env::var_os(CHILD_MODE).is_some() {
+        let _exclusive = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .share_mode(0)
+            .open("descendant-handle")
+            .unwrap();
+        fs::write("descendant-ready", "").unwrap();
+        thread::sleep(Duration::from_secs(12));
+        process::exit(0);
+    }
+
+    let mode = fs::read_to_string("mode").unwrap();
+    let code = match mode.as_str() {
+        "quiet0" | "quiet42" => {
+            writeln!(io::stdout(), "stdout-marker").unwrap();
+            writeln!(io::stderr(), "stderr-marker").unwrap();
+            if mode == "quiet0" { 0 } else { 42 }
+        }
+        "noisy0" | "noisy42" | "noisy-out0" | "noisy-err42" => {
+            for _ in 0..128 {
+                if mode != "noisy-err42" {
+                    io::stdout().write_all(&[b'o'; 8192]).unwrap();
+                }
+                if mode != "noisy-out0" {
+                    io::stderr().write_all(&[b'e'; 8192]).unwrap();
+                }
+            }
+            if mode.ends_with('0') { 0 } else { 42 }
+        }
+        "descendant0" | "descendant42" | "timeout" => {
+            let _descendant = fixture_command().env(CHILD_MODE, "1").spawn().unwrap();
+            wait_until(TEST_TIMEOUT, || Path::new("descendant-ready").exists());
+            if mode == "timeout" {
+                thread::sleep(Duration::from_secs(12));
+            }
+            if mode == "descendant42" { 42 } else { 0 }
+        }
+        _ => panic!("unexpected fixture {mode}"),
+    };
+    process::exit(code);
+}
+
+#[test]
+#[ignore = "the watchdog launches this probe in a separate process"]
+fn windows_probe() {
+    let root = tempfile::tempdir().unwrap();
+    let tail = CaptureMode::PublishTail(8);
+    let full = CaptureMode::Full;
+    for (mode, status) in [("quiet0", 0), ("quiet42", 42)] {
+        let output = fixture(root.path(), mode, TEST_TIMEOUT, tail);
+        assert_clean(&output, status);
+        assert!(output.output.stdout.contains("stdout-marker"));
+        assert!(output.output.stderr.contains("stderr-marker"));
+    }
+    for (mode, status, noisy_out, noisy_err) in [
+        ("noisy0", 0, true, true),
+        ("noisy42", 42, true, true),
+        ("noisy-out0", 0, true, false),
+        ("noisy-err42", 42, false, true),
+    ] {
+        let output = fixture(root.path(), mode, TEST_TIMEOUT, full);
+        assert_clean(&output, status);
+        assert_eq!(
+            output.output.stdout.contains(&"o".repeat(1024 * 1024)),
+            noisy_out
+        );
+        assert_eq!(
+            output.output.stderr.contains(&"e".repeat(1024 * 1024)),
+            noisy_err
+        );
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        assert_clean(&fixture(root.path(), "quiet0", TEST_TIMEOUT, tail), 0);
+    });
+    let before = process_resources();
+    for _ in 0..20 {
+        assert_clean(&fixture(root.path(), "quiet0", TEST_TIMEOUT, tail), 0);
+    }
+    for _ in 0..4 {
+        let dir = tempfile::tempdir().unwrap();
+        assert_clean(&fixture(dir.path(), "descendant0", TEST_TIMEOUT, tail), 0);
+        assert!(descendant_is_gone(dir.path()));
+    }
+    assert_eq!(process_resources(), before);
+
+    // The sibling holds its own exclusive handle for the duration of every
+    // destructive branch. Its process handle remains with this test only.
+    let sibling_dir = tempfile::tempdir().unwrap();
+    let mut sibling = Sibling(
+        fixture_command()
+            .env(CHILD_MODE, "1")
+            .current_dir(sibling_dir.path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    wait_until(TEST_TIMEOUT, || {
+        sibling_dir.path().join("descendant-ready").exists()
+    });
+
+    for (mode, status) in [("descendant0", 0), ("descendant42", 42)] {
+        let dir = tempfile::tempdir().unwrap();
+        let output = fixture(dir.path(), mode, TEST_TIMEOUT, tail);
+        assert_clean(&output, status);
+        assert!(output.output.duration < MAX_CLEANUP);
+        assert!(descendant_is_gone(dir.path()));
+        assert!(sibling.0.try_wait().unwrap().is_none());
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let timeout = Duration::from_millis(1500);
+    let output = fixture(dir.path(), "timeout", timeout, tail);
+    assert!(output.output.timed_out);
+    assert_eq!(output.output.exit_code, -1);
+    assert_eq!(output.cleanup_failure, None);
+    assert!(output.output.duration < timeout + MAX_CLEANUP);
+    assert!(descendant_is_gone(dir.path()));
+    assert!(sibling.0.try_wait().unwrap().is_none());
+
+    let dir = tempfile::tempdir().unwrap();
+    let output = with_fault(Fault::Terminate, || {
+        fixture(dir.path(), "descendant42", TEST_TIMEOUT, tail)
+    });
+    assert_eq!(output.cleanup_failure, Some(CleanupFailure::JobTermination));
+    assert_eq!(output.capture.stdout, Some(CaptureLoss::Cleanup));
+    assert_eq!(output.capture.stderr, Some(CaptureLoss::Cleanup));
+    assert_eq!(output.output.exit_code, 42);
+    assert!(!output.output.timed_out);
+    assert!(output.output.duration >= CLEANUP_ALLOWANCE);
+    assert!(output.output.duration < MAX_CLEANUP);
+    wait_until(TEST_TIMEOUT, || descendant_is_gone(dir.path()));
+    assert!(sibling.0.try_wait().unwrap().is_none());
+
+    let output = with_fault(Fault::Accounting, || {
+        fixture(root.path(), "quiet0", TEST_TIMEOUT, tail)
+    });
+    assert_eq!(output.cleanup_failure, Some(CleanupFailure::JobStillActive));
+    let output = with_fault(Fault::Reap, || {
+        fixture(root.path(), "quiet0", TEST_TIMEOUT, tail)
+    });
+    assert_eq!(output.cleanup_failure, Some(CleanupFailure::Reap));
+    let output = with_fault(Fault::Read, || {
+        fixture(root.path(), "quiet0", TEST_TIMEOUT, tail)
+    });
+    assert_eq!(output.capture.stdout, Some(CaptureLoss::Read));
+    assert_eq!(output.capture.stderr, Some(CaptureLoss::Read));
+    assert!(sibling.0.try_wait().unwrap().is_none());
+
+    let setup = with_fault(Fault::JobSetup, || {
+        run_supervised(
+            test_exe().to_str().unwrap(),
+            &fixture_args(FIXTURE),
+            root.path(),
+            Some(TEST_TIMEOUT),
+            tail,
+        )
+    });
+    assert!(setup.is_err());
+    let output = with_fault(Fault::Spawn, || {
+        fixture(root.path(), "quiet0", TEST_TIMEOUT, tail)
+    });
+    assert_eq!(output.cleanup_failure, Some(CleanupFailure::JobSpawn));
+    assert_eq!(output.output.exit_code, -1);
+    assert!(sibling.0.try_wait().unwrap().is_none());
+
+    // Interruption is sticky in this process, so this witness runs last.
+    let dir = tempfile::tempdir().unwrap();
+    let context = PublishInterruption::process_wide();
+    let requested = context.request_flag();
+    let default_action = context.default_action_flag();
+    let output = thread::scope(|scope| {
+        scope.spawn(|| {
+            wait_until(TEST_TIMEOUT, || {
+                dir.path().join("descendant-ready").exists()
+            });
+            assert!(!default_action.load(SeqCst));
+            requested.store(true, SeqCst);
+        });
+        fixture(dir.path(), "timeout", TEST_TIMEOUT + TEST_TIMEOUT, tail)
+    });
+    assert!(output.interrupted);
+    assert!(!output.output.timed_out);
+    assert_eq!(output.cleanup_failure, None);
+    assert!(descendant_is_gone(dir.path()));
+    assert!(sibling.0.try_wait().unwrap().is_none());
+    assert!(!default_action.load(SeqCst));
+    drop(output);
+    assert!(default_action.load(SeqCst));
+}
+
+struct Sibling(process::Child);
+
+impl Drop for Sibling {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+    }
+}
+
+#[test]
+fn bounded_windows_supervision_has_an_external_watchdog() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("probe.log");
+    let log = fs::File::create(&path).unwrap();
+    // The watchdog owns a separate outer job so a wedged fixture cannot
+    // survive a watchdog failure. This also tests nested-job assignment.
+    let outer_job = processkit::ProcessGroup::new().unwrap();
+    let mut command = tokio::process::Command::new(test_exe());
+    command
+        .args(fixture_args(PROBE))
+        .stdin(Stdio::null())
+        .stdout(log.try_clone().unwrap())
+        .stderr(log);
+    let mut child = outer_job.spawn(command).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(25);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(status.success(), "{}", fs::read_to_string(&path).unwrap());
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Windows supervisor exceeded the external watchdog: {}",
+            fs::read_to_string(&path).unwrap_or_default()
+        );
+        thread::sleep(Duration::from_millis(15));
+    }
+}

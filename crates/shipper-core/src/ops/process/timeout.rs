@@ -14,9 +14,14 @@ mod unix;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use unix::run_supervised;
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+use windows::run_supervised;
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 mod legacy;
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 use legacy::run_supervised;
 
 /// Run a command with optional timeout and captured output.
@@ -73,3 +78,6 @@ pub(crate) fn run_command_with_publish_capture(
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod cleanup_tests;
+
+#[cfg(all(test, windows))]
+mod windows_tests;

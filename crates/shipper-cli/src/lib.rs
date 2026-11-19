@@ -1696,12 +1696,12 @@ fn is_registry_destination_validation_error(error: &anyhow::Error) -> bool {
 /// Executable-only entry point with process-lifetime termination handling.
 /// Embedders should call [`run`] and retain ownership of their signal policy.
 pub fn run_process() -> Result<std::process::ExitCode> {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     process_signals::install()?;
     run()
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 mod process_signals;
 
 /// Parse and execute CLI arguments without installing process signal handlers.
