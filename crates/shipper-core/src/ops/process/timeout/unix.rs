@@ -458,6 +458,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn invalid_pipe_read_closes_stream_and_marks_capture_lost() {
         let mut pipe = scripted_pipe(vec![5, READ_BYTES + 1]);
         assert!(pipe.drain_turn());
@@ -469,6 +470,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn full_chunk_and_short_followup_preserve_complete_capture() {
         let mut pipe = scripted_pipe(vec![READ_BYTES, 3]);
         assert!(pipe.drain_turn());
