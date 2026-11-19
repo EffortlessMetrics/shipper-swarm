@@ -135,7 +135,8 @@ class BinaryProof(unittest.TestCase):
         helper = cls.repo / "scripts/release/verify_binary.py"
         helper.parent.mkdir(parents=True)
         shutil.copyfile(ROOT / "scripts/release/verify_binary.py", helper)
-        checked(["git", "add", "Cargo.lock", "scripts"], cwd=cls.repo, env=cls.env)
+        shutil.copyfile(ROOT / "rust-toolchain.toml", cls.repo / "rust-toolchain.toml")
+        checked(["git", "add", "Cargo.lock", "rust-toolchain.toml", "scripts"], cwd=cls.repo, env=cls.env)
         checked(["git", "commit", "--quiet", "-m", "bounded source fixture"], cwd=cls.repo, env=cls.env)
         cls.sha = checked(["git", "rev-parse", "HEAD"], cwd=cls.repo, env=cls.env)
         cls.tree = checked(["git", "rev-parse", "HEAD^{tree}"], cwd=cls.repo, env=cls.env)
