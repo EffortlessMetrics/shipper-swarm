@@ -613,6 +613,197 @@ fn failed_upload_checkpoint_projection_must_refuse_resume() -> Result<()> {
     assert_upload_checkpoint_split_write_refuses_resume(UploadCheckpointFault::ProjectionSync)
 }
 
+#[cfg(windows)]
+#[test]
+#[serial]
+fn only_proved_no_launch_can_resume_the_retained_attempt() -> Result<()> {
+    for parallel in [false, true] {
+        let missing = Fixture::new(parallel, false);
+        let cargo = fake_cargo_path(&missing.bin);
+        let disabled = cargo.with_extension("disabled");
+        fs::rename(&cargo, &disabled)?;
+        let error = missing
+            .with_cargo("0", || {
+                run_publish(
+                    &missing.ws,
+                    &missing.opts,
+                    &mut CollectingReporter::default(),
+                )
+            })
+            .expect_err("Cargo executable is missing");
+        ensure!(
+            error.is::<crate::ops::process::CommandNotLaunched>(),
+            "{error:#}"
+        );
+        ensure!(missing.cargo_calls() == 0 && missing.registry.hits() == 1);
+
+        let path = events::events_path(&missing.state_dir);
+        let log = events::EventLog::read_from_file(&path)?;
+        ensure!(log.all_events().iter().any(|event| matches!(
+            event.event_type,
+            EventType::PackageNotLaunched { attempt: 1, .. }
+        )));
+        ensure!(log.all_events().iter().all(|event| !matches!(
+            event.event_type,
+            EventType::PackageOutput { .. } | EventType::PublishReconciling { .. }
+        )));
+        let retained = missing.retained()?;
+        fs::rename(&disabled, &cargo)?;
+        missing
+            .with_cargo("0", || {
+                run_resume(
+                    &missing.ws,
+                    &missing.opts,
+                    &mut CollectingReporter::default(),
+                )
+            })
+            .expect_err("the no-launch attempt consumed the current budget");
+        ensure!(missing.cargo_calls() == 0);
+
+        let key = "demo@0.1.0";
+        let rebuilt = crate::state::rebuild::rebuild_state_from_events(
+            &path,
+            crate::state::rebuild::StateRebuildOptions::new(retained.registry.clone()),
+        )?;
+        assert_eq!(rebuilt.packages[key].state, retained.packages[key].state);
+        assert_eq!(rebuilt.packages[key].attempts, 1);
+        assert_eq!(rebuilt.attempt_history, retained.attempt_history);
+        assert_eq!(
+            retained.attempt_history[0].error_class,
+            Some(ErrorClass::Retryable)
+        );
+
+        let mut opts = missing.opts.clone();
+        opts.max_attempts = 2;
+        missing.registry.respond_with(&[404, 200]);
+        missing.with_cargo("0", || {
+            run_resume(&missing.ws, &opts, &mut CollectingReporter::default())
+        })?;
+        ensure!(missing.cargo_calls() == 1);
+        let complete = missing.retained()?;
+        assert_eq!(complete.packages[key].state, PackageState::Published);
+        assert_eq!(
+            complete
+                .attempt_history
+                .iter()
+                .map(|detail| detail.attempt)
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
+        let rebuilt = crate::state::rebuild::rebuild_state_from_events(
+            &path,
+            crate::state::rebuild::StateRebuildOptions::new(complete.registry.clone()),
+        )?;
+        assert_eq!(rebuilt.packages[key].state, complete.packages[key].state);
+        assert_eq!(rebuilt.attempt_history, complete.attempt_history);
+
+        // The same retained attempt prefix can also be left by an invocation
+        // that actually launched. A failed output append cannot prove no launch.
+        let uncertain = Fixture::new(parallel, false);
+        let mut opts = uncertain.opts.clone();
+        opts.max_attempts = 2;
+        let fault = crate::state::file_sync_test_support::observe_event_append(
+            &uncertain.state_dir,
+            |path| {
+                let log = events::EventLog::read_from_file(path).map_err(std::io::Error::other)?;
+                if log.all_events().last().is_some_and(|event| {
+                    matches!(event.event_type, EventType::PackageAttempted { .. })
+                }) {
+                    return Err(std::io::Error::other("withhold Cargo completion evidence"));
+                }
+                Ok(())
+            },
+        );
+        let error = uncertain
+            .with_cargo("0", || {
+                run_publish(&uncertain.ws, &opts, &mut CollectingReporter::default())
+            })
+            .expect_err("post-launch completion must be withheld");
+        drop(fault);
+        ensure!(format!("{error:#}").contains("withhold Cargo completion evidence"));
+        ensure!(uncertain.cargo_calls() == 1 && uncertain.registry.hits() == 1);
+        let log = events::EventLog::read_from_file(&events::events_path(&uncertain.state_dir))?;
+        ensure!(log.all_events().last().is_some_and(|event| matches!(
+            event.event_type,
+            EventType::PackageAttempted { attempt: 1, .. }
+        )));
+        let before = uncertain.snapshot()?;
+        let error = invoke(&uncertain, Entry::Resume, &opts, &mut uncertain.retained()?)
+            .expect_err("an unresolved launched attempt must refuse resume");
+        ensure!(is_publish_admission_error(&error), "{error:#}");
+        ensure!(format!("{error:#}").contains("unresolved Cargo upload"));
+        ensure!(uncertain.cargo_calls() == 1 && uncertain.registry.hits() == 1);
+        ensure!(uncertain.snapshot()? == before);
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+#[serial]
+fn repeated_no_launch_requires_its_matching_attempt_projection() -> Result<()> {
+    for parallel in [false, true] {
+        let fixture = Fixture::new(parallel, false);
+        let mut opts = fixture.opts.clone();
+        opts.max_attempts = 3;
+        let cargo = fake_cargo_path(&fixture.bin);
+        let disabled = cargo.with_extension("disabled");
+        fs::rename(&cargo, &disabled)?;
+        fixture
+            .with_cargo("0", || {
+                run_publish(&fixture.ws, &opts, &mut CollectingReporter::default())
+            })
+            .expect_err("the first missing-Cargo attempt records a retryable failure");
+        let first = fixture.retained()?;
+
+        let fault = crate::state::file_sync_test_support::observe(&fixture.state_dir, |path| {
+            if path.file_name().and_then(|name| name.to_str()) == Some("state.tmp") {
+                let projection: ExecutionState =
+                    serde_json::from_slice(&fs::read(path)?).map_err(std::io::Error::other)?;
+                if projection.attempt_history.len() == 2 {
+                    return Err(std::io::Error::other(
+                        "withhold the second no-launch projection",
+                    ));
+                }
+            }
+            Ok(())
+        });
+        let error = fixture
+            .with_cargo("0", || {
+                run_resume(&fixture.ws, &opts, &mut CollectingReporter::default())
+            })
+            .expect_err("the second no-launch event must fail at the state write");
+        drop(fault);
+        ensure!(format!("{error:#}").contains("withhold the second no-launch projection"));
+        let stale = fixture.retained()?;
+        assert_eq!(stale.packages["demo@0.1.0"].attempts, 2);
+        assert_eq!(
+            stale.packages["demo@0.1.0"].state,
+            first.packages["demo@0.1.0"].state
+        );
+        assert_eq!(stale.attempt_history, first.attempt_history);
+        let log = events::EventLog::read_from_file(&events::events_path(&fixture.state_dir))?;
+        ensure!(log.all_events().last().is_some_and(|event| matches!(
+            event.event_type,
+            EventType::PackageNotLaunched { attempt: 2, .. }
+        )));
+
+        fs::rename(disabled, cargo)?;
+        let before = fixture.snapshot()?;
+        let hits = fixture.registry.hits();
+        let error = invoke(&fixture, Entry::Resume, &opts, &mut stale.clone())
+            .expect_err("an earlier attempt's retryable projection cannot stand in for this one");
+        ensure!(is_publish_admission_error(&error), "{error:#}");
+        ensure!(format!("{error:#}").contains("state.json lacks the matching attempt"));
+        ensure!(
+            fixture.snapshot()? == before
+                && fixture.cargo_calls() == 0
+                && fixture.registry.hits() == hits
+        );
+    }
+    Ok(())
+}
+
 #[test]
 #[serial]
 fn retry_backoff_checkpoint_replays_the_live_projection() -> Result<()> {

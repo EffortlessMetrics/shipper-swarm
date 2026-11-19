@@ -1,6 +1,8 @@
 //! Per-package upload evidence shared by admission, execution, and replay.
 
-use crate::types::{ErrorClass, EventType, PackageProgress, PackageState, ReconciliationOutcome};
+use crate::types::{
+    AttemptDetail, ErrorClass, EventType, PackageProgress, PackageState, ReconciliationOutcome,
+};
 
 #[derive(Clone, Copy, Default)]
 pub(crate) enum UploadWitness {
@@ -12,6 +14,7 @@ pub(crate) enum UploadWitness {
         output_recorded: bool,
     },
     Unconfirmed(Option<u32>),
+    NotLaunched(u32),
     Uploaded,
     LegacyUploaded(u32),
     LegacyVisibilityFailed(u32),
@@ -51,18 +54,21 @@ impl UploadWitness {
                 legacy: *max_attempts == 0,
                 output_recorded: false,
             },
+            (Self::Attempted { number, legacy, .. }, EventType::PackageOutput { .. }) => {
+                Self::Attempted {
+                    number,
+                    legacy,
+                    output_recorded: true,
+                }
+            }
             (
                 Self::Attempted {
                     number,
-                    legacy: true,
-                    ..
+                    legacy: false,
+                    output_recorded: false,
                 },
-                EventType::PackageOutput { .. },
-            ) => Self::Attempted {
-                number,
-                legacy: true,
-                output_recorded: true,
-            },
+                EventType::PackageNotLaunched { attempt, .. },
+            ) if number == *attempt => Self::NotLaunched(number),
             // v0.4 saved Uploaded after writing Cargo output and emitted
             // readiness before polling. Modern readiness diagnostics alone
             // cannot establish that Cargo accepted an upload.
@@ -114,7 +120,11 @@ impl UploadWitness {
             )
     }
 
-    pub(crate) fn permits(self, progress: Option<&PackageProgress>) -> bool {
+    pub(crate) fn permits(
+        self,
+        progress: Option<&PackageProgress>,
+        attempt_history: &[AttemptDetail],
+    ) -> bool {
         if matches!(self, Self::None) {
             return true;
         }
@@ -140,6 +150,24 @@ impl UploadWitness {
                                 ..
                             }
                     )
+            }
+            Self::NotLaunched(attempt) => {
+                let PackageState::Failed {
+                    class: ErrorClass::Retryable,
+                    message,
+                } = &progress.state
+                else {
+                    return false;
+                };
+                attempt == progress.attempts
+                    && attempt_history.iter().any(|detail| {
+                        detail.package == progress.name
+                            && detail.version == progress.version
+                            && detail.attempt == attempt
+                            && detail.error_class == Some(ErrorClass::Retryable)
+                            && detail.next_attempt_at.is_none()
+                            && detail.redacted_message.as_ref() == Some(message)
+                    })
             }
             Self::Uploaded => progress.state == PackageState::Uploaded,
             Self::LegacyUploaded(attempt) => {

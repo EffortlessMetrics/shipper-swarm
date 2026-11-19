@@ -1270,7 +1270,50 @@ pub(crate) fn publish_package_with_timeout(
                 cargo_timeout,
             ) {
                 Ok(o) => o,
-                Err(e) => {
+                Err(mut e) => {
+                    if let Some(no_launch) =
+                        e.downcast_mut::<crate::ops::process::CommandNotLaunched>()
+                    {
+                        let _lease = no_launch.take_lease();
+                        let message = "Cargo publish was not launched; check the executable and process setup before resuming".to_string();
+                        let ended_at = Utc::now();
+                        if let Err(persistence_error) = commit_with_attempt_detail_transition(
+                            st,
+                            state_dir,
+                            event_log,
+                            events_path,
+                            &key,
+                            PackageState::Failed {
+                                class: ErrorClass::Retryable,
+                                message: message.clone(),
+                            },
+                            PublishEvent {
+                                timestamp: ended_at,
+                                event_type: EventType::PackageNotLaunched {
+                                    attempt,
+                                    message: message.clone(),
+                                },
+                                package: pkg_label.clone(),
+                            },
+                            AttemptDetail {
+                                package: p.name.clone(),
+                                version: p.version.clone(),
+                                attempt,
+                                max_attempts: opts.max_attempts,
+                                started_at: attempt_started_at,
+                                ended_at,
+                                error_class: Some(ErrorClass::Retryable),
+                                next_attempt_at: None,
+                                redacted_message: Some(message),
+                            },
+                        ) {
+                            return PackagePublishResult {
+                                result: Err(persistence_error.context(format!(
+                                    "failed to record that Cargo did not launch: {e:#}"
+                                ))),
+                            };
+                        }
+                    }
                     reporter.error(&format!(
                         "{}@{}: cargo publish failed to execute: {}",
                         p.name, p.version, e

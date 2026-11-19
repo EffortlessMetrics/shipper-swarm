@@ -171,8 +171,14 @@ fn ensure_upload_checkpoint_is_safe(
         let key = crate::runtime::execution::pkg_key(&package.name, &package.version);
         let witness = witnesses.get(key.as_str()).copied().unwrap_or_default();
         ensure!(
-            witness.permits(state.packages.get(&key)),
-            "{key}: retained events show an unresolved Cargo upload or durable upload outcome that state.json cannot safely resume; preserve both files and reconcile the prior upload before retrying"
+            witness.permits(state.packages.get(&key), &state.attempt_history),
+            "{key}: {}",
+            match witness {
+                UploadWitness::NotLaunched(_) =>
+                    "retained events prove Cargo did not launch, but state.json lacks the matching attempt; preserve both files and reconcile the state projection before retrying",
+                _ =>
+                    "retained events show an unresolved Cargo upload or durable upload outcome that state.json cannot safely resume; preserve both files and reconcile the prior upload before retrying",
+            }
         );
     }
     Ok(())

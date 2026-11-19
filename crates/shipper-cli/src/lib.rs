@@ -6047,6 +6047,7 @@ fn event_type_name(event_type: &EventType) -> &'static str {
         EventType::PackageStarted { .. } => "package_started",
         EventType::PackageAttempted { .. } => "package_attempted",
         EventType::PackageOutput { .. } => "package_output",
+        EventType::PackageNotLaunched { .. } => "package_not_launched",
         EventType::PackageUploadUnconfirmed { .. } => "package_upload_unconfirmed",
         EventType::PackageUploaded => "package_uploaded",
         EventType::PackagePublished { .. } => "package_published",
@@ -6099,6 +6100,9 @@ fn summarize_event(event: &PublishEvent) -> String {
             format!("published in {}", format_millis(*duration_ms))
         }
         EventType::PackageUploaded => "upload accepted by cargo".to_string(),
+        EventType::PackageNotLaunched { message, .. } => {
+            shipper_output_sanitizer::redact_sensitive(message)
+        }
         EventType::PackageFailed { class, message } => format!("failed ({:?}): {}", class, message),
         EventType::PackageCleanupIncomplete { message } => format!(
             "cleanup incomplete: {}",

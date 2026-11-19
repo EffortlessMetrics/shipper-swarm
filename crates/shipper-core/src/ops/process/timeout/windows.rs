@@ -19,6 +19,8 @@ use super::super::{
     CaptureLoss, CaptureStatus, CapturedCommandOutput, CleanupFailure, CommandOutput,
 };
 
+use super::CommandNotLaunched;
+
 pub(super) const CLEANUP_ALLOWANCE: Duration = Duration::from_secs(1);
 const POLL_INTERVAL: Duration = Duration::from_millis(8);
 const READ_BYTES: usize = 8 * 1024;
@@ -31,8 +33,10 @@ pub(super) fn run_supervised(
     timeout: Option<Duration>,
     capture: CaptureMode,
 ) -> Result<CapturedCommandOutput> {
-    let lease = InterruptionLease::acquire()?;
-    interruption::check()?;
+    let mut lease = InterruptionLease::acquire()
+        .map_err(|error| CommandNotLaunched::for_publish(error, capture, None))?;
+    let mut before_launch = |error| CommandNotLaunched::for_publish(error, capture, lease.take());
+    interruption::check().map_err(&mut before_launch)?;
     let started = Instant::now();
     let execution_deadline = timeout
         .map(|duration| {
@@ -40,25 +44,42 @@ pub(super) fn run_supervised(
                 .checked_add(duration)
                 .context("command timeout exceeds the monotonic clock range")
         })
-        .transpose()?;
+        .transpose()
+        .map_err(&mut before_launch)?;
 
     // A fresh, unnamed, kill-on-close job. The direct child owns its
     // process handle and exit status separately from the job.
-    let job = create_job()?;
-    let (stdout, stdout_writer) = capture_pipe().context("failed to prepare Windows stdout")?;
-    let (stderr, stderr_writer) = capture_pipe().context("failed to prepare Windows stderr")?;
+    let job = create_job().map_err(&mut before_launch)?;
+    let (stdout, stdout_writer) = capture_pipe(
+        #[cfg(test)]
+        Fault::ReadStdout,
+    )
+    .context("failed to prepare Windows stdout")
+    .map_err(&mut before_launch)?;
+    let (stderr, stderr_writer) = capture_pipe(
+        #[cfg(test)]
+        Fault::ReadStderr,
+    )
+    .context("failed to prepare Windows stderr")
+    .map_err(&mut before_launch)?;
     let mut command = command_for(program, args, working_dir)
-        .with_context(|| format!("failed to prepare Windows command: {program}"))?;
+        .with_context(|| format!("failed to prepare Windows command: {program}"))
+        .map_err(&mut before_launch)?;
     command
         .current_dir(working_dir)
         .stdout(Stdio::from(stdout_writer))
         .stderr(Stdio::from(stderr_writer));
 
-    interruption::check()?;
+    interruption::check().map_err(&mut before_launch)?;
     let mut child = match spawn_in_job(&job, command) {
         Ok(child) => child,
         Err(LaunchError::Create(error)) if error.kind() == ErrorKind::NotFound => {
-            return Err(error).with_context(|| format!("failed to spawn command: {program}"));
+            // windows-spawn resolves missing executables before creation.
+            // Keep other wrapper errors and assignment/resume failures on
+            // their existing conservative cleanup path.
+            return Err(error)
+                .with_context(|| format!("failed to spawn command: {program}"))
+                .map_err(before_launch);
         }
         Err(error) => {
             let failure = match error {
@@ -275,10 +296,16 @@ fn append_batch_argument(command_line: &mut String, arg: &str) -> io::Result<()>
 struct PipeReader {
     probe: PipeStream<pipe_mode::Messages, pipe_mode::Messages>,
     bytes: PipeStream<pipe_mode::Bytes, pipe_mode::Bytes>,
+    #[cfg(test)]
+    read_fault: Fault,
 }
 
 impl Read for PipeReader {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        #[cfg(test)]
+        if has_fault(self.read_fault) {
+            return Err(io::Error::other("injected output read failure"));
+        }
         // Read in byte mode so zero-length messages cannot mask later bytes.
         // interprocess normalizes both ERROR_NO_DATA and ERROR_BROKEN_PIPE
         // to zero here. PeekNamedPipe distinguishes open-empty from EOF.
@@ -294,7 +321,7 @@ impl Read for PipeReader {
     }
 }
 
-fn capture_pipe() -> io::Result<(PipeReader, File)> {
+fn capture_pipe(#[cfg(test)] read_fault: Fault) -> io::Result<(PipeReader, File)> {
     let name = format!(r"\\.\pipe\shipper-{:032x}", rand::random::<u128>());
     let listener = PipeListenerOptions::new()
         .path(name.as_str())
@@ -313,7 +340,15 @@ fn capture_pipe() -> io::Result<(PipeReader, File)> {
     // default flush-on-drop, and keep the OS read mode nonblocking.
     bytes.assume_flushed();
     bytes.set_nonblocking(true)?;
-    Ok((PipeReader { probe, bytes }, writer))
+    Ok((
+        PipeReader {
+            probe,
+            bytes,
+            #[cfg(test)]
+            read_fault,
+        },
+        writer,
+    ))
 }
 
 fn poll_reap(
@@ -418,12 +453,6 @@ impl<R: Read> PipeCapture<R> {
         let Some(stream) = self.stream.as_mut() else {
             return false;
         };
-        #[cfg(test)]
-        if has_fault(Fault::Read) {
-            self.buffer.lose(CaptureLoss::Read);
-            self.stream = None;
-            return false;
-        }
         let mut chunk = [0; READ_BYTES];
         let mut made_progress = false;
         for _ in 0..READS_PER_TURN {
@@ -471,7 +500,8 @@ pub(super) enum Fault {
     Terminate,
     Accounting,
     Reap,
-    Read,
+    ReadStdout,
+    ReadStderr,
 }
 
 #[cfg(test)]

@@ -253,16 +253,34 @@ fn windows_probe() {
         fixture(root.path(), "quiet0", TEST_TIMEOUT, tail)
     });
     assert_eq!(output.cleanup_failure, Some(CleanupFailure::Reap));
-    let output = with_fault(Fault::Read, || {
-        fixture(root.path(), "quiet0", TEST_TIMEOUT, tail)
-    });
-    assert_eq!(output.capture.stdout, Some(CaptureLoss::Read));
-    assert_eq!(output.capture.stderr, Some(CaptureLoss::Read));
-    assert_eq!(
-        output.cleanup_failure,
-        Some(CleanupFailure::PipeEofUnconfirmed)
-    );
-    assert!(output.output.duration < MAX_CLEANUP);
+    // libtest itself writes to stdout before a fixture runs. Use a silent
+    // child so closing either reader does not change the child's exit code.
+    let cmd = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+        .join("System32")
+        .join("cmd.exe");
+    for (fault, stdout, stderr) in [
+        (Fault::ReadStdout, Some(CaptureLoss::Read), None),
+        (Fault::ReadStderr, None, Some(CaptureLoss::Read)),
+    ] {
+        let output = with_fault(fault, || {
+            run_supervised(
+                cmd.to_str().unwrap(),
+                &["/d", "/c", "exit", "/b", "0"],
+                root.path(),
+                Some(TEST_TIMEOUT),
+                tail,
+            )
+            .unwrap()
+        });
+        assert_eq!(output.capture.stdout, stdout);
+        assert_eq!(output.capture.stderr, stderr);
+        assert_eq!(
+            output.cleanup_failure,
+            Some(CleanupFailure::PipeEofUnconfirmed)
+        );
+        assert_eq!(output.output.exit_code, 0);
+        assert!(output.output.duration < MAX_CLEANUP);
+    }
     assert!(sibling.0.try_wait().unwrap().is_none());
 
     let setup = with_fault(Fault::JobSetup, || {
@@ -274,7 +292,24 @@ fn windows_probe() {
             tail,
         )
     });
-    assert!(setup.is_err());
+    assert!(
+        setup
+            .err()
+            .is_some_and(|error| error.is::<super::CommandNotLaunched>())
+    );
+    let missing_program = root.path().join("missing-cargo.exe");
+    let missing = run_supervised(
+        missing_program.to_str().unwrap(),
+        &[],
+        root.path(),
+        Some(TEST_TIMEOUT),
+        tail,
+    );
+    assert!(
+        missing
+            .err()
+            .is_some_and(|error| error.is::<super::CommandNotLaunched>())
+    );
     for (fault, stage) in [
         (Fault::Assign, CleanupFailure::JobAssignment),
         (Fault::Resume, CleanupFailure::JobResume),

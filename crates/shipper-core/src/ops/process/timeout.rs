@@ -6,6 +6,7 @@ use anyhow::{Result, bail};
 
 use super::CapturedCommandOutput;
 use super::capture::CaptureMode;
+use super::interruption::InterruptionLease;
 use super::run::run_command_in_dir;
 use super::types::CommandOutput;
 
@@ -57,6 +58,42 @@ pub(crate) fn run_command_with_timeout(
         return Err(super::interruption::Interrupted.into());
     }
     Ok(captured.output)
+}
+
+/// A supervisor proved that the invocation never launched Cargo. The error
+/// carries its lease through the caller's durable no-launch checkpoint.
+pub(crate) struct CommandNotLaunched(Option<InterruptionLease>);
+
+impl CommandNotLaunched {
+    #[cfg(windows)]
+    fn for_publish(
+        error: anyhow::Error,
+        capture: CaptureMode,
+        lease: Option<InterruptionLease>,
+    ) -> anyhow::Error {
+        if matches!(capture, CaptureMode::PublishTail(_)) {
+            return error.context(Self(lease));
+        }
+        error
+    }
+
+    pub(crate) fn take_lease(&mut self) -> Option<InterruptionLease> {
+        self.0.take()
+    }
+}
+
+impl std::fmt::Debug for CommandNotLaunched {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CommandNotLaunched")
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Display for CommandNotLaunched {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("command was not launched")
+    }
 }
 
 /// Publish diagnostics opt into bounded retention; generic stdout stays complete.

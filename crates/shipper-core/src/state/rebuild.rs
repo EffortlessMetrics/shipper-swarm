@@ -74,17 +74,11 @@ pub fn rebuild_state_from_events(
     let mut upload_witnesses = BTreeMap::<&str, UploadWitness>::new();
     for event in events {
         let witness = upload_witnesses.entry(&event.package).or_default();
-        let next = witness.observe(&event.event_type);
-        let legacy_acceptance = match (*witness, next) {
-            (UploadWitness::Attempted { .. }, UploadWitness::LegacyUploaded(attempt)) => {
-                Some(attempt)
-            }
-            _ => None,
-        };
-        *witness = next;
+        let previous = *witness;
+        *witness = witness.observe(&event.event_type);
         apply_event(
             event,
-            legacy_acceptance,
+            (previous, *witness),
             &mut plan_id,
             &mut packages,
             &mut active_attempts,
@@ -182,7 +176,7 @@ fn recognizable_cleanup_hold(raw: &[u8]) -> bool {
 
 fn apply_event(
     event: &PublishEvent,
-    legacy_acceptance: Option<u32>,
+    upload_transition: (UploadWitness, UploadWitness),
     plan_id: &mut Option<String>,
     packages: &mut BTreeMap<String, PackageProgress>,
     active_attempts: &mut BTreeMap<String, RebuildAttemptDetail>,
@@ -214,7 +208,8 @@ fn apply_event(
                         class: ErrorClass::Ambiguous,
                         ..
                     }
-            ) {
+            ) && !matches!(upload_transition.1, UploadWitness::NotLaunched(_))
+            {
                 progress.state = PackageState::Pending;
             }
             // The new invocation may reconcile an old upload. Its result
@@ -230,7 +225,8 @@ fn apply_event(
             // v0.4 had no PackageUploaded marker. Its first readiness check
             // followed the successful Cargo attempt and the Uploaded save.
             // A modern readiness start can be only a visibility probe.
-            if let Some(attempt) = legacy_acceptance
+            if let (UploadWitness::Attempted { .. }, UploadWitness::LegacyUploaded(attempt)) =
+                upload_transition
                 && let Some(active) = active_attempt_for_key_mut(active_attempts, &event.package)
                 && active.attempt == attempt
             {
@@ -296,6 +292,29 @@ fn apply_event(
             if let Some(progress) = ensure_event_package(packages, event, event.timestamp) {
                 progress.state = PackageState::Skipped {
                     reason: reason.clone(),
+                };
+                progress.last_updated_at = event.timestamp;
+            }
+        }
+        EventType::PackageNotLaunched { message, .. }
+            if matches!(
+                upload_transition,
+                (
+                    UploadWitness::Attempted { .. },
+                    UploadWitness::NotLaunched(_)
+                )
+            ) =>
+        {
+            if let Some(active) = active_attempt_for_key_mut(active_attempts, &event.package) {
+                active.ended_at = event.timestamp;
+                active.error_class = Some(ErrorClass::Retryable);
+                active.redacted_message = Some(message.clone());
+            }
+            finalize_attempt(active_attempts, attempt_history, &event.package);
+            if let Some(progress) = ensure_event_package(packages, event, event.timestamp) {
+                progress.state = PackageState::Failed {
+                    class: ErrorClass::Retryable,
+                    message: message.clone(),
                 };
                 progress.last_updated_at = event.timestamp;
             }
