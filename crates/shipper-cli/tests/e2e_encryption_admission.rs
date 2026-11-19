@@ -60,6 +60,7 @@ exit 91
 }
 
 #[test]
+#[serial_test::serial]
 fn encryption_refuses_all_evidence_writers_before_cargo_for_explicit_flag() {
     let td = tempfile::tempdir().unwrap();
     fixture(td.path());
@@ -105,6 +106,7 @@ fn encryption_refuses_all_evidence_writers_before_cargo_for_explicit_flag() {
 }
 
 #[test]
+#[serial_test::serial]
 fn explicit_encryption_config_refuses_publish_with_existing_json_error_shape() {
     let td = tempfile::tempdir().unwrap();
     fixture(td.path());
@@ -131,6 +133,7 @@ fn explicit_encryption_config_refuses_publish_with_existing_json_error_shape() {
 }
 
 #[test]
+#[serial_test::serial]
 fn implicit_workspace_policy_permits_only_discovery_and_preserves_resume_bytes() {
     let td = tempfile::tempdir().unwrap();
     let root = td.path();
