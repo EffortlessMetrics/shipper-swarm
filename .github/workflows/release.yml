@@ -173,6 +173,8 @@ jobs:
     permissions:
       contents: read
     runs-on: ${{ matrix.runner }}
+    env:
+      RUSTUP_TOOLCHAIN: "1.95.0"
     strategy:
       fail-fast: false
       matrix:
@@ -194,6 +196,12 @@ jobs:
         with:
           ref: ${{ needs.release-identity-gate.outputs.approved_sha }}
 
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+
       - name: Record runner and target
         shell: bash
         run: |
@@ -201,11 +209,6 @@ jobs:
           echo "runner=${{ matrix.runner }}"
           echo "target=${{ matrix.target }}"
           rustc -vV
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
 
       - name: Install Python for packaged executable proof
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
