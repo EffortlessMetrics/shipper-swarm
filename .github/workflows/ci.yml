@@ -324,7 +324,11 @@ jobs:
           printf 'checkout_sha=%s\n' "$CHECKOUT_SHA"
           [[ -n "$CHECKOUT_SHA" && "$CHECKOUT_SHA" == "$GITHUB_SHA" ]]
           sha256sum Cargo.lock
-          rustc_version=$(rustc -vV)
+          RUSTC=$(rustup which --toolchain 1.95.0 rustc)
+          export RUSTC CARGO_BUILD_RUSTC="$RUSTC"
+          export RUSTC_WRAPPER="" RUSTC_WORKSPACE_WRAPPER=""
+          export CARGO_BUILD_RUSTC_WRAPPER="" CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER=""
+          rustc_version=$("$RUSTC" -vV)
           printf '%s\n' "$rustc_version"
           [[ $'\n'"$rustc_version"$'\n' == *$'\nrelease: 1.95.0\n'* ]]
           cargo +1.95.0 -vV

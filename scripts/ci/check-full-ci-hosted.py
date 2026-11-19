@@ -6,9 +6,12 @@ not arbitrary YAML. Changes to that layout require updating these predicates.
 """
 
 import argparse
+import os
 from pathlib import Path
 import re
+import subprocess
 import sys
+from tempfile import TemporaryDirectory
 
 
 HOSTED = (
@@ -86,6 +89,14 @@ def scalar(value, aliases):
     return " ".join(value.removeprefix(">-").split())
 
 
+def job_steps(jobs, job):
+    steps = sections(jobs.get(job, ""), 4).get("steps", "")
+    return [
+        sections("        " + body, 8)
+        for body in re.split(r"^      - ", steps, flags=re.M)[1:]
+    ]
+
+
 def check(text):
     failures = []
 
@@ -149,11 +160,7 @@ def check(text):
     # Inspect actual step fields, not strings that may occur in a disabled
     # step, an echo, or a command whose failure is swallowed. This remains a
     # bounded source-layout oracle; actionlint owns general YAML validation.
-    policy_steps = sections(jobs.get("policy", ""), 4).get("steps", "")
-    steps = [
-        sections("        " + body, 8)
-        for body in re.split(r"^      - ", policy_steps, flags=re.M)[1:]
-    ]
+    steps = job_steps(jobs, "policy")
     for command in POLICY_CHECKS:
         matching = [step for step in steps if step.get("run") == command]
         require(len(matching) == 1 and set(matching[0]) == {"name", "run"},
@@ -176,11 +183,7 @@ def check(text):
 
     # The dedicated MSRV job is shared by both routes. Match an ordered, live
     # checkout/install/proof sequence rather than accepting echoed commands.
-    msrv_steps = sections(jobs.get("msrv", ""), 4).get("steps", "")
-    steps = [
-        sections("        " + body, 8)
-        for body in re.split(r"^      - ", msrv_steps, flags=re.M)[1:]
-    ]
+    steps = job_steps(jobs, "msrv")
     checkout = {"uses": "actions/checkout@v7.0.1", "id": "msrv-checkout"}
     install = {
         "name": "Install Rust (MSRV)",
@@ -202,7 +205,11 @@ set -euo pipefail
 printf 'checkout_sha=%s\n' "$CHECKOUT_SHA"
 [[ -n "$CHECKOUT_SHA" && "$CHECKOUT_SHA" == "$GITHUB_SHA" ]]
 sha256sum Cargo.lock
-rustc_version=$(rustc -vV)
+RUSTC=$(rustup which --toolchain 1.95.0 rustc)
+export RUSTC CARGO_BUILD_RUSTC="$RUSTC"
+export RUSTC_WRAPPER="" RUSTC_WORKSPACE_WRAPPER=""
+export CARGO_BUILD_RUSTC_WRAPPER="" CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER=""
+rustc_version=$("$RUSTC" -vV)
 printf '%s\n' "$rustc_version"
 [[ $'\n'"$rustc_version"$'\n' == *$'\nrelease: 1.95.0\n'* ]]
 cargo +1.95.0 -vV
@@ -253,6 +260,10 @@ def test_mutations(text):
         ("misbound MSRV checkout", "steps.msrv-checkout.outputs.commit", "github.sha"),
         ("MSRV compiler assertion removed", "release: 1.95.0", "release:"),
         ("missing MSRV lock digest", "sha256sum Cargo.lock", "true"),
+        ("MSRV compiler not bound", 'export RUSTC CARGO_BUILD_RUSTC="$RUSTC"', "export CARGO_BUILD_RUSTC"),
+        ("MSRV compiler probe drift", 'rustc_version=$("$RUSTC" -vV)', "rustc_version=$(rustc -vV)"),
+        ("MSRV wrappers retained", 'export RUSTC_WRAPPER="" RUSTC_WORKSPACE_WRAPPER=""',
+         "export RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER"),
         ("waived failure", "steps: *lint_steps", "continue-on-error: true\n    steps: *lint_steps"),
     ]
     mutants.extend([
@@ -284,6 +295,43 @@ def test_mutations(text):
     print(f"Passed {len(mutants)} rejecting workflow fixtures.")
 
 
+def test_msrv_invocation(text):
+    jobs = sections(sections(text, 0)["jobs"], 2)
+    script = job_steps(jobs, "msrv")[-1]["run"].split("\n", 1)[1]
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        # A space in the compiler pathname also checks that the probe quotes it.
+        compiler = root / "toolchain rustc"
+        stubs = {
+            "rustup": """[[ "$*" == "which --toolchain 1.95.0 rustc" ]] || exit 10
+printf '%s\\n' "$TEST_COMPILER" """,
+            "toolchain rustc": """[[ "$*" == "-vV" ]] || exit 11
+printf '%s\\n' 'release: 1.95.0'""",
+            "rustc": "printf '%s\\n' 'release: 1.95.0'",
+            "cargo": """[[ "$RUSTC" == "$TEST_COMPILER" && "$CARGO_BUILD_RUSTC" == "$TEST_COMPILER" ]] || exit 12
+[[ -z "$RUSTC_WRAPPER" && -z "$RUSTC_WORKSPACE_WRAPPER" ]] || exit 13
+[[ -z "$CARGO_BUILD_RUSTC_WRAPPER" && -z "$CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER" ]] || exit 14
+printf '%s\\n' "$*" >> cargo-invocations""",
+        }
+        for name, body in stubs.items():
+            path = root / name
+            path.write_text("#!/bin/bash\n" + body + "\n", encoding="utf-8")
+            path.chmod(0o755)
+        (root / "Cargo.lock").write_text("fixture lockfile\n", encoding="utf-8")
+        env = dict(os.environ, PATH=f"{root}{os.pathsep}{os.environ['PATH']}",
+                   CHECKOUT_SHA="a" * 40, GITHUB_SHA="a" * 40, TEST_COMPILER=str(compiler))
+        for key in ("RUSTC", "CARGO_BUILD_RUSTC", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER",
+                    "CARGO_BUILD_RUSTC_WRAPPER", "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER"):
+            env[key] = "/fixture/ambient-override"
+        result = subprocess.run(["bash", "-c", script], cwd=root, env=env, capture_output=True, text=True)
+        calls = root / "cargo-invocations"
+        if result.returncode or not calls.exists() or calls.read_text(encoding="utf-8").splitlines() != [
+            "+1.95.0 -vV", "+1.95.0 check --workspace --locked",
+        ]:
+            raise ValueError(f"MSRV proof did not bind pinned rustc and reset inherited wrappers: {result.stderr}")
+    print("Passed MSRV invocation fixture with conflicting ambient compiler and wrappers.")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--test", action="store_true", help="also exercise rejecting workflow fixtures")
@@ -298,6 +346,7 @@ def main():
     print("Hosted routes, twelve job pairs, executable policy proof, MSRV receipt and report retention verified.")
     if args.test:
         test_mutations(text)
+        test_msrv_invocation(text)
     return 0
 
 
