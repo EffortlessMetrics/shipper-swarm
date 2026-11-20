@@ -7,6 +7,10 @@ View the end-of-run receipt with evidence.
 Reads `<state-dir>/receipt.json` and prints the completed release summary,
 package outcomes, git context, environment fingerprint, and captured evidence.
 
+With an absolute `--state-dir`, read retained evidence without loading Cargo
+or workspace configuration. Workspace correlation and rerun permission remain
+unverified.
+
 EXAMPLES:
     # Print the human-readable release receipt:
     shipper inspect-receipt

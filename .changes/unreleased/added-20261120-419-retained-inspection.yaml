@@ -1,0 +1,6 @@
+kind: added
+body: Inspect retained events and receipts from an absolute state directory without Cargo or the source checkout. Archive inspection reports unavailable workspace correlation and grants no permission to rerun.
+time: 2026-11-20T00:00:00Z
+custom:
+  Audience: Operators
+  Importance: Detailed

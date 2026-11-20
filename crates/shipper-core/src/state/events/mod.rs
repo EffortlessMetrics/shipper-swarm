@@ -293,6 +293,11 @@ impl EventLog {
             return Ok(Self::new());
         }
 
+        Self::read_existing_from_file(path)
+    }
+
+    /// Read a selected log, reporting an error if it has disappeared.
+    pub fn read_existing_from_file(path: &Path) -> Result<Self> {
         let file = File::open(path)
             .with_context(|| format!("failed to open events file {}", path.display()))?;
 

@@ -5,6 +5,7 @@ expression: normalize_output(&normalize_stderr(&combined))
 exit_code: Some(1)
 --- stdout ---
 --- stderr ---
+Workspace correlation unavailable. Inspecting retained evidence only.
 Error: failed to read event log from <STATE_DIR>/events.jsonl
 
 Caused by:

@@ -18,6 +18,29 @@ silence, a lock's age, or `state.json` alone.
 Events are authoritative, state is a resumable projection, and a receipt is a
 derived terminal summary. When they disagree, stop and investigate.
 
+## Read an archive when the checkout is unavailable
+
+Pass the absolute path to the directory containing the retained plaintext
+files. Both commands work offline with Cargo absent and with an invalid or
+missing checkout.
+
+```bash
+shipper --state-dir /absolute/archive inspect-events --format json
+shipper --state-dir /absolute/archive inspect-receipt --format json
+```
+
+Event output is JSON Lines. Receipt output is one JSON object. Both commands
+report unavailable workspace correlation on stderr. Plan IDs, package outcomes,
+and Git details describe the retained run. Use the matching checkout and
+`status --durable` to evaluate recovery. Reading an archive grants no rerun
+permission.
+
+A one-time inspection exits with a nonzero status if the requested evidence
+is missing or malformed. The live
+`inspect-events --follow` mode waits for the authoritative log and its next
+complete event. Relative paths and the default directory continue to resolve
+against the Cargo workspace root.
+
 ## 1. Start with the fail-closed durable view
 
 ```bash

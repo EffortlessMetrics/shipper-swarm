@@ -606,6 +606,10 @@ Reads `<state-dir>/events.jsonl`, which is the truth source for publish and
 resume state transitions. Use `--follow` while another terminal is running
 publish or resume.
 
+With an absolute `--state-dir`, read retained evidence without loading Cargo
+or workspace configuration. Workspace correlation and rerun permission remain
+unverified.
+
 Events are printed in append order within each log, preserving their original
 wall-clock timestamps. Timestamps can move backward; they do not define replay
 order.
@@ -628,6 +632,10 @@ View the end-of-run receipt with evidence.
 
 Reads `<state-dir>/receipt.json` and prints the completed release summary,
 package outcomes, git context, environment fingerprint, and captured evidence.
+
+With an absolute `--state-dir`, read retained evidence without loading Cargo
+or workspace configuration. Workspace correlation and rerun permission remain
+unverified.
 
 EXAMPLES:
     # Print the human-readable release receipt:
@@ -1763,6 +1771,25 @@ pub fn run() -> Result<std::process::ExitCode> {
         error.exit();
     }
 
+    // An explicit absolute path identifies retained evidence by itself.
+    // Keep relative/default paths on the workspace/config resolution path.
+    if let Some(state_dir) = cli.state_dir.as_deref().filter(|dir| dir.is_absolute()) {
+        let notice = "Workspace correlation unavailable. Inspecting retained evidence only.";
+        match &cli.cmd {
+            Some(Commands::InspectEvents { follow }) => {
+                eprintln!("{notice}");
+                run_inspect_events(state_dir, &cli.format, *follow, true)?;
+                return Ok(std::process::ExitCode::SUCCESS);
+            }
+            Some(Commands::InspectReceipt) => {
+                eprintln!("{notice}");
+                run_inspect_receipt(state_dir, &cli.format)?;
+                return Ok(std::process::ExitCode::SUCCESS);
+            }
+            _ => {}
+        }
+    }
+
     // Handle Config commands early (they don't need workspace plan)
     if let Some(Commands::Config(config_cmd)) = &cli.cmd {
         run_config_with_loopback(config_cmd.clone(), cli.allow_loopback)?;
@@ -2437,10 +2464,15 @@ pub fn run() -> Result<std::process::ExitCode> {
             }
         }
         Commands::InspectEvents { follow } => {
-            run_inspect_events(planned, &opts, &cli.format, follow)?;
+            run_inspect_events(
+                &absolute_state_dir(planned, &opts),
+                &cli.format,
+                follow,
+                false,
+            )?;
         }
         Commands::InspectReceipt => {
-            run_inspect_receipt(planned, &opts, &cli.format)?;
+            run_inspect_receipt(&absolute_state_dir(planned, &opts), &cli.format)?;
         }
         Commands::Ci(ci_cmd) => {
             run_ci(ci_cmd, &opts.state_dir, &planned.workspace_root)?;
@@ -5127,23 +5159,20 @@ fn print_receipt(
 }
 
 fn run_inspect_events(
-    ws: &plan::PlannedWorkspace,
-    opts: &RuntimeOptions,
+    state_dir: &Path,
     format: &str,
     follow: bool,
+    require_log: bool,
 ) -> Result<()> {
-    let state_dir = if opts.state_dir.is_absolute() {
-        opts.state_dir.clone()
-    } else {
-        ws.workspace_root.join(&opts.state_dir)
-    };
-
     if follow {
-        return follow_authoritative_event_log(&state_dir, format);
+        return follow_authoritative_event_log(state_dir, format);
     }
 
-    let event_logs = discover_event_logs(&state_dir)?;
+    let event_logs = discover_event_logs(state_dir)?;
     if event_logs.is_empty() {
+        if require_log {
+            bail!("No event logs found under {}", state_dir.display());
+        }
         // In `--format json` this command emits JSON Lines — one event per
         // line — so "no events" must be zero lines on stdout, not an English
         // sentence a consumer would try to parse. The notice still reaches a
@@ -5157,7 +5186,7 @@ fn run_inspect_events(
     }
 
     for (idx, events_path) in event_logs.iter().enumerate() {
-        let event_log = shipper_core::state::events::EventLog::read_from_file(events_path)
+        let event_log = shipper_core::state::events::EventLog::read_existing_from_file(events_path)
             .with_context(|| format!("failed to read event log from {}", events_path.display()))?;
 
         if format != "json" {
@@ -5285,33 +5314,23 @@ fn discover_event_logs(state_dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-fn run_inspect_receipt(
-    ws: &plan::PlannedWorkspace,
-    opts: &RuntimeOptions,
-    format: &str,
-) -> Result<()> {
-    let state_dir = if opts.state_dir.is_absolute() {
-        opts.state_dir.clone()
-    } else {
-        ws.workspace_root.join(&opts.state_dir)
-    };
-
-    let receipt_path = shipper_core::state::execution_state::receipt_path(&state_dir);
-    if !receipt_path.exists() {
-        bail!(
-            "no receipt at {} — receipts are written at the end of a `shipper publish` \
-             or `shipper resume` run\n  \
-             * run `shipper publish` first, or point at another run with `--state-dir <path>`\n  \
-             * `shipper inspect-events` reads the authoritative event log, which exists \
-             from the first event onward",
+fn run_inspect_receipt(state_dir: &Path, format: &str) -> Result<()> {
+    let receipt_path = shipper_core::state::execution_state::receipt_path(state_dir);
+    let content = match std::fs::read_to_string(&receipt_path) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => bail!(
+            "no receipt at {} — receipts are written at the end of a `shipper publish` or `shipper resume` run. \
+             Select a retained run with `--state-dir <path>` or inspect its events with `shipper inspect-events`.",
             receipt_path.display()
-        );
-    }
-    let content = std::fs::read_to_string(&receipt_path)
-        .with_context(|| format!("failed to read receipt from {}", receipt_path.display()))?;
+        ),
+        result => result
+            .with_context(|| format!("failed to read receipt from {}", receipt_path.display()))?,
+    };
 
     let receipt: shipper_core::types::Receipt = serde_json::from_str(&content)
         .with_context(|| format!("failed to parse receipt from {}", receipt_path.display()))?;
+
+    shipper_core::state::execution_state::validate_receipt_version(&receipt.receipt_version)
+        .with_context(|| format!("invalid receipt version in {}", receipt_path.display()))?;
 
     if format == "json" {
         let json = serde_json::to_string_pretty(&receipt).expect("serialize receipt");

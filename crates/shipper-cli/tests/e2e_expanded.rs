@@ -3757,6 +3757,142 @@ fn inspect_events_preserves_append_order_and_original_timestamps() {
     );
 }
 
+// Exercise the executable with the same retained bytes that the normal
+// workspace-relative path reads. The fake Cargo records even an attempted
+// metadata lookup that a fallback might otherwise swallow.
+#[test]
+#[serial_test::serial]
+fn retained_inspection_works_without_cargo_or_workspace() {
+    let root = tempdir().expect("tempdir");
+    create_workspace(root.path());
+    let evidence = root.path().join(".shipper");
+    let events = evidence.join("events.jsonl");
+    let receipt = evidence.join("receipt.json");
+    let event = r#"{"timestamp":"2025-01-01T00:00:00Z","event_type":{"type":"plan_created","plan_id":"archive-419","package_count":1},"package":"all"}"#;
+    write_file(&events, event);
+    write_remediation_receipt(&receipt);
+    let receipt_bytes = fs::read(&receipt).unwrap();
+    let outside = tempdir().unwrap();
+    let fake_dir = tempdir().unwrap();
+    let proxy = write_fake_yank_cargo(fake_dir.path(), true);
+    let fake = fake_dir
+        .path()
+        .join(if cfg!(windows) { "cargo.cmd" } else { "cargo" });
+    fs::rename(proxy, &fake).unwrap();
+    let search_path = std::env::join_paths(std::iter::once(fake_dir.path().to_owned()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .unwrap();
+    let log = fake_dir.path().join("calls");
+
+    for command in ["inspect-events", "inspect-receipt"] {
+        for format in ["json", "text"] {
+            let baseline = shipper_cmd()
+                .current_dir(root.path().join("demo"))
+                .args([command, "--format", format])
+                .assert()
+                .success()
+                .get_output()
+                .stdout
+                .clone();
+            let inspected = shipper_cmd()
+                .current_dir(outside.path())
+                .env("CARGO", &fake)
+                .env("SHIPPER_CARGO_BIN", &fake)
+                .env("PATH", &search_path)
+                .env("SHIPPER_FAKE_CARGO_LOG", &log)
+                .arg("--state-dir")
+                .arg(&evidence)
+                .args([command, "--format", format])
+                .assert()
+                .success()
+                .stderr(contains("Workspace correlation unavailable"))
+                .get_output()
+                .stdout
+                .clone();
+            assert_eq!(inspected, baseline);
+            let expected_id = if command == "inspect-events" {
+                "archive-419"
+            } else {
+                "plan-remediate-json"
+            };
+            assert!(String::from_utf8(inspected).unwrap().contains(expected_id));
+        }
+    }
+    assert!(!log.exists());
+    // The same Cargo trap fires for durable status, which still needs the checkout.
+    shipper_cmd()
+        .current_dir(outside.path())
+        .env("CARGO", &fake)
+        .env("SHIPPER_CARGO_BIN", &fake)
+        .env("PATH", &search_path)
+        .env("SHIPPER_FAKE_CARGO_LOG", &log)
+        .arg("--state-dir")
+        .arg(&evidence)
+        .args(["status", "--durable"])
+        .assert()
+        .failure()
+        .stderr(contains("failed to load release plan"));
+    assert!(log.is_file());
+    assert_eq!(fs::read(events).unwrap(), event.as_bytes());
+    assert_eq!(fs::read(receipt).unwrap(), receipt_bytes);
+    assert_eq!(fs::read_dir(evidence).unwrap().count(), 2);
+    assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
+}
+
+#[test]
+#[serial_test::serial]
+fn retained_inspection_rejects_missing_and_corrupt_evidence() {
+    let root = tempdir().unwrap();
+    write_file(&root.path().join("Cargo.toml"), "broken manifest!");
+    let evidence = root.path().join("archive");
+    for (command, filename, missing, corrupt) in [
+        (
+            "inspect-events",
+            "events.jsonl",
+            "No event logs found",
+            "failed to read event log",
+        ),
+        (
+            "inspect-receipt",
+            "receipt.json",
+            "no receipt at",
+            "failed to parse receipt",
+        ),
+    ] {
+        let inspect = || {
+            let mut cmd = shipper_cmd();
+            cmd.current_dir(root.path())
+                .arg("--state-dir")
+                .arg(&evidence)
+                .arg(command);
+            cmd
+        };
+        for format in ["json", "text"] {
+            inspect()
+                .args(["--format", format])
+                .assert()
+                .failure()
+                .stdout("")
+                .stderr(contains(missing));
+        }
+        let artifact = evidence.join(filename);
+        write_file(&artifact, "{}");
+        for format in ["json", "text"] {
+            inspect()
+                .args(["--format", format])
+                .assert()
+                .failure()
+                .stdout("")
+                .stderr(contains(corrupt));
+        }
+        assert_eq!(fs::read(&artifact).unwrap(), b"{}");
+        fs::remove_file(artifact).unwrap();
+    }
+    assert!(!root.path().join("Cargo.lock").exists());
+    assert_eq!(fs::read_dir(evidence).unwrap().count(), 0);
+}
+
 /// Snapshot: inspect-events with a populated events file.
 #[test]
 fn inspect_events_with_data_snapshot() {

@@ -2972,7 +2972,7 @@ mod inspect_events_without_events_file {
             .arg("--manifest-path")
             .arg(td.path().join("Cargo.toml"))
             .arg("--state-dir")
-            .arg(&state_dir)
+            .arg(".shipper")
             .arg("inspect-events")
             .assert()
             .success()

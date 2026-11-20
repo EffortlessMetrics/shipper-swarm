@@ -8,6 +8,10 @@ Reads `<state-dir>/events.jsonl`, which is the truth source for publish and
 resume state transitions. Use `--follow` while another terminal is running
 publish or resume.
 
+With an absolute `--state-dir`, read retained evidence without loading Cargo
+or workspace configuration. Workspace correlation and rerun permission remain
+unverified.
+
 Events are printed in append order within each log, preserving their original
 wall-clock timestamps. Timestamps can move backward; they do not define replay
 order.
