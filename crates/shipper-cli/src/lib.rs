@@ -1765,7 +1765,7 @@ pub fn run() -> Result<std::process::ExitCode> {
 
     // Handle Config commands early (they don't need workspace plan)
     if let Some(Commands::Config(config_cmd)) = &cli.cmd {
-        run_config_with_loopback(config_cmd.clone(), cli.allow_loopback)?;
+        run_config_with_loopback(config_cmd.clone(), cli.allow_loopback, cli.quiet)?;
         return Ok(std::process::ExitCode::SUCCESS);
     }
 
@@ -6628,7 +6628,7 @@ fn clean_single_dir(
     PreparedCleanDirectory::acquire(dir.to_path_buf(), workspace_root, force)?.clean(keep_receipt)
 }
 
-fn run_config_with_loopback(cmd: ConfigCommands, allow_loopback: bool) -> Result<()> {
+fn run_config_with_loopback(cmd: ConfigCommands, allow_loopback: bool, quiet: bool) -> Result<()> {
     match cmd {
         ConfigCommands::Init { output } => {
             let template = ShipperConfig::default_toml_template();
@@ -6675,7 +6675,9 @@ fn run_config_with_loopback(cmd: ConfigCommands, allow_loopback: bool) -> Result
                 .with_context(|| {
                     format!("Configuration validation failed for {}", path.display())
                 })?;
-            println!("Configuration file is valid: {}", path.display());
+            if !quiet {
+                println!("Configuration file is valid: {}", path.display());
+            }
         }
     }
     Ok(())
@@ -8000,6 +8002,7 @@ mod tests {
                 output: config_path.clone(),
             },
             false,
+            false,
         )
         .expect("config init should succeed");
 
@@ -8057,6 +8060,7 @@ timeout = "1h"
                 path: config_path.clone(),
             },
             false,
+            false,
         )
         .expect("config validate should succeed for valid file");
     }
@@ -8078,6 +8082,7 @@ lines = 0
             ConfigCommands::Validate {
                 path: config_path.clone(),
             },
+            false,
             false,
         );
 
@@ -8103,6 +8108,7 @@ lines = 0
             ConfigCommands::Validate {
                 path: config_path.clone(),
             },
+            false,
             false,
         );
 

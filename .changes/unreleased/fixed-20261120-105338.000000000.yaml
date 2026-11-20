@@ -1,0 +1,6 @@
+kind: fixed
+body: Honor --quiet for successful config validation while keeping validation errors visible on stderr.
+time: 2026-11-20T10:53:38Z
+custom:
+  Audience: Operators
+  Importance: Detailed

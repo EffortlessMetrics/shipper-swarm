@@ -1392,6 +1392,43 @@ fn config_validate_valid_snapshot() {
     assert_snapshot!("config_validate_valid", normalized);
 }
 
+#[test]
+fn config_validate_quiet_suppresses_success_output() {
+    let td = tempdir().expect("tempdir");
+    let config_path = td.path().join(".shipper.toml");
+    shipper_cmd()
+        .args(["config", "init", "--output"])
+        .arg(&config_path)
+        .assert()
+        .success();
+
+    shipper_cmd()
+        .args(["config", "validate", "--quiet", "--path"])
+        .arg(&config_path)
+        .assert()
+        .success()
+        .stdout("")
+        .stderr("");
+}
+
+#[test]
+fn config_validate_quiet_reports_invalid_config() {
+    let td = tempdir().expect("tempdir");
+    let config_path = td.path().join(".shipper.toml");
+    write_file(&config_path, "[output]\nlines = 0\n");
+
+    shipper_cmd()
+        .args(["config", "validate", "--quiet", "--path"])
+        .arg(&config_path)
+        .assert()
+        .code(1)
+        .stdout("")
+        .stderr(
+            contains("Configuration validation failed for")
+                .and(contains("output.lines must be greater than 0")),
+        );
+}
+
 /// Snapshot: `config validate` on an invalid TOML file.
 #[test]
 fn config_validate_invalid_toml_snapshot() {
