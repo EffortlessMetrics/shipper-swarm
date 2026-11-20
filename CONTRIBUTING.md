@@ -69,6 +69,177 @@ The operating policy is documented in
 - **Changie**: v1.25.1 for local change-fragment authoring and pre-commit validation
 - **cargo-nextest** (optional): For better test output
 
+### Native Windows setup (x64 MSVC)
+
+Install the Visual Studio **Desktop development with C++** workload with the x64/x86
+MSVC tools and a Windows SDK. These provide the native linker and import libraries.
+See the [MSVC prerequisites](https://rust-lang.github.io/rustup/installation/windows-msvc.html).
+
+If `rustup --version` is unavailable, download the x64 `rustup-init.exe` from
+[Install Rust](https://rust-lang.org/tools/install/). In its download directory,
+run `.\rustup-init.exe -y --default-toolchain none`, then open a new PowerShell.
+Provision the moving stable channel for general work:
+
+```powershell
+rustup toolchain install stable --profile minimal --no-self-update
+```
+
+For general tooling, download the Windows x64 MSI for the latest final release
+from the [official Node.js distribution](https://nodejs.org/dist/latest/). For uv,
+use the latest Windows release from [Astral's installation guide](https://docs.astral.sh/uv/getting-started/installation/).
+For an existing uv installation, use `uv self update` with the standalone
+installer, or upgrade through the package manager that installed it.
+Use any versions required by the checkout or CI for project qualification.
+Open a new PowerShell after installation so it picks up PATH changes.
+
+From the checkout root, in a shell without a toolchain override, install the
+compiler and components selected by `rust-toolchain.toml`:
+
+```powershell
+rustup toolchain install --no-self-update
+```
+
+The workspace's `rust-version` in `Cargo.toml` declares the minimum supported
+Rust version (MSRV). Use the repository's MSRV build and test checks to verify
+compatibility. To inspect a rebuilt environment, open a fresh PowerShell at
+the checkout root and compare the active toolchain and compiler to the pin:
+
+```powershell
+$env:RUSTUP_AUTO_INSTALL = '0'
+rustup run stable rustc -V
+rustup run stable cargo -V
+node --version
+uv --version
+rustup show active-toolchain
+rustc -Vv
+cargo -V
+```
+
+### Codex Cloud (Linux)
+
+In **Settings > Codex Cloud > Environments**, create an environment for
+`EffortlessMetrics/shipper-swarm`, or select **Edit** for an existing one.
+Paste the Bash block below into **Install script**. Run it from the repository
+root on a GNU/Linux development image with Python 3.11+ and the build tools
+checked below.
+
+Rustup manages both the moving `stable` channel for general tools and the
+checkout's pinned toolchain for Shipper. For 0.5, `rust-toolchain.toml` pins
+1.95.0 and `workspace.package.rust-version` in `Cargo.toml` declares MSRV 1.95.
+The install also prepares the latest final Node.js release (including npm) and
+latest uv for general use, plus the repository versions of Changie and jactionlint.
+Node's upstream `latest` channel can point to a release that has entered LTS.
+
+The install phase needs HTTPS access to Rust (`sh.rustup.rs`, `static.rust-lang.org`),
+crates.io (`index.crates.io`, `static.crates.io`), Node (`nodejs.org`),
+Astral (`astral.sh` and its release redirects), and GitHub release assets
+(`github.com`, `release-assets.githubusercontent.com`). The locked fetch
+prepares the Cargo cache for an offline agent task.
+
+```bash
+set -euo pipefail
+tools_dir="$HOME/.local/share/shipper-codex"
+export PATH="$tools_dir/node/bin:$tools_dir/bin:${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
+case "$(uname -s)-$(uname -m)" in
+  Linux-x86_64)
+    node_arch=x64; arch=amd64
+    changie_sha=90b90b459b345335ef5715e4e03c354cde99070729939cbab004ac37e5966630
+    jactionlint_sha=5ac307b0499bb0eab45ae99c23e8e0790874fbc667c75224410954e0e3c6e0f5 ;;
+  Linux-aarch64)
+    node_arch=arm64; arch=arm64
+    changie_sha=115b255d2f5da1a1d50ffcd7853a2616d87a40487679d46f95a39c3956b9b618
+    jactionlint_sha=ad7e33b6264cea16b7e83ad2bb004824d5b1c15aedb35ba0dc84917f791c5525 ;;
+  *) echo 'Use an x86_64 or aarch64 GNU/Linux development image.' >&2; exit 1 ;;
+esac
+for tool in git python3 curl tar xz sha256sum cc c++ make cmake; do
+  command -v "$tool" >/dev/null || { echo "Missing image prerequisite: $tool" >&2; exit 1; }
+done
+pin=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml","rb"))["toolchain"]["channel"])')
+mkdir -p "$tools_dir/bin"
+scratch_dir=$(mktemp -d "$tools_dir/.setup.XXXXXXXX")
+trap 'rm -rf -- "$scratch_dir"' EXIT
+fetch() { curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL "$1" -o "$2"; }
+verify() { (cd "$scratch_dir" && printf '%s  %s\n' "$1" "$2" | sha256sum --check --status); }
+
+if ! command -v rustup >/dev/null; then
+  fetch https://sh.rustup.rs "$scratch_dir/rustup-init.sh"
+  sh "$scratch_dir/rustup-init.sh" -y --no-modify-path --default-toolchain none
+fi
+rustup toolchain install stable --profile minimal --no-self-update
+rustup toolchain install "$pin" --profile minimal --component rustfmt,clippy --no-self-update
+rustup run "$pin" cargo fetch --locked
+
+# Resolve the latest final Node.js release once, then verify its archive.
+dist=https://nodejs.org/dist
+fetch "$dist/latest/SHASUMS256.txt" "$scratch_dir/node-sums"
+read -r digest asset < <(awk -v arch="$node_arch" \
+  '$2 ~ ("^node-v[0-9]+\\.[0-9]+\\.[0-9]+-linux-" arch "\\.tar\\.xz$") {print $1, $2; exit}' "$scratch_dir/node-sums")
+folder=${asset%.tar.xz}
+version=${folder#node-}; version=${version%-linux-*}
+if [[ ! -x "$tools_dir/$folder/bin/node" || ! -x "$tools_dir/$folder/bin/npm" ]]; then
+  fetch "$dist/$version/$asset" "$scratch_dir/$asset"
+  verify "$digest" "$asset"
+  tar -xf "$scratch_dir/$asset" -C "$scratch_dir"
+  test -x "$scratch_dir/$folder/bin/node"
+  test -x "$scratch_dir/$folder/bin/npm"
+  if [[ -d "$tools_dir/$folder" ]]; then
+    mv -T "$tools_dir/$folder" "$scratch_dir/previous-node"
+  fi
+  mv -T "$scratch_dir/$folder" "$tools_dir/$folder"
+fi
+ln -sfnT "$folder" "$tools_dir/node"
+
+fetch https://astral.sh/uv/install.sh "$scratch_dir/uv-install.sh"
+UV_UNMANAGED_INSTALL="$tools_dir/bin" sh "$scratch_dir/uv-install.sh"
+install_release() {
+  local repo=$1 name=${1##*/} version=$2 sha=$3
+  local asset="${name}_${version}_linux_${arch}.tar.gz"
+  fetch "https://github.com/$repo/releases/download/v$version/$asset" "$scratch_dir/$asset"
+  verify "$sha" "$asset"
+  tar -xf "$scratch_dir/$asset" -C "$scratch_dir" "$name"
+  mv -f "$scratch_dir/$name" "$tools_dir/bin/$name"
+}
+install_release miniscruff/changie 1.25.1 "$changie_sha"
+install_release jdx/jactionlint 2.5.0 "$jactionlint_sha"
+```
+
+After rebuilding, start a new task at the repository root. Paste this block in
+its shell to activate the prepared tools and check the locked graph offline.
+If an installed-tool probe or metadata resolution fails, refresh the setup
+for that checkout. Keep agent internet access off.
+
+```bash
+export PATH="$HOME/.local/share/shipper-codex/node/bin:$HOME/.local/share/shipper-codex/bin:${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
+(
+  set -eu
+  export RUSTUP_AUTO_INSTALL=0
+  pin=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml","rb"))["toolchain"]["channel"])')
+  rustup which --toolchain stable rustc >/dev/null
+  export RUSTC
+  RUSTC=$(rustup which --toolchain "$pin" rustc)
+  rustup which --toolchain "$pin" cargo >/dev/null
+  rustup run stable rustc --version
+  "$RUSTC" --version
+  rustup run "$pin" cargo --version
+  for rel in node/bin/node node/bin/npm bin/uv bin/changie bin/jactionlint; do
+    expected="$HOME/.local/share/shipper-codex/$rel"
+    if [[ ! -x "$expected" || "$(command -v "${rel##*/}")" != "$expected" ]]; then
+      printf 'Expected executable on PATH: %s\n' "$expected" >&2
+      exit 1
+    fi
+  done
+  node --version
+  npm --version
+  uv --version
+  changie_version=$(changie --version)
+  jactionlint_version=$(jactionlint --version)
+  printf '%s\n' "$changie_version" "$jactionlint_version"
+  [[ "$changie_version" == 'changie version v1.25.1' ]]
+  [[ "${jactionlint_version%%$'\n'*}" == '2.5.0' ]]
+  rustup run "$pin" cargo metadata --format-version 1 --locked --offline >/dev/null
+)
+```
+
 ### Building
 
 ```bash
