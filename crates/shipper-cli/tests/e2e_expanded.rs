@@ -3889,8 +3889,27 @@ fn retained_inspection_rejects_missing_and_corrupt_evidence() {
         assert_eq!(fs::read(&artifact).unwrap(), b"{}");
         fs::remove_file(artifact).unwrap();
     }
+    assert_eq!(fs::read_dir(&evidence).unwrap().count(), 0);
+
+    let receipt = evidence.join("receipt.json");
+    write_remediation_receipt(&receipt);
+    let wrong_family = fs::read_to_string(&receipt)
+        .unwrap()
+        .replace("shipper.receipt.v2", "shipper.state.v2");
+    fs::write(&receipt, &wrong_family).unwrap();
+    for format in ["json", "text"] {
+        shipper_cmd()
+            .current_dir(root.path())
+            .arg("--state-dir")
+            .arg(&evidence)
+            .args(["inspect-receipt", "--format", format])
+            .assert()
+            .failure()
+            .stdout("")
+            .stderr(contains("invalid receipt version"));
+    }
+    assert_eq!(fs::read_to_string(receipt).unwrap(), wrong_family);
     assert!(!root.path().join("Cargo.lock").exists());
-    assert_eq!(fs::read_dir(evidence).unwrap().count(), 0);
 }
 
 /// Snapshot: inspect-events with a populated events file.

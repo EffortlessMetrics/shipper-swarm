@@ -5329,6 +5329,15 @@ fn run_inspect_receipt(state_dir: &Path, format: &str) -> Result<()> {
     let receipt: shipper_core::types::Receipt = serde_json::from_str(&content)
         .with_context(|| format!("failed to parse receipt from {}", receipt_path.display()))?;
 
+    // The shared version check enforces the numeric floor. Inspection also
+    // needs the document family before it can present these bytes as a receipt.
+    if !receipt.receipt_version.starts_with("shipper.receipt.") {
+        bail!(
+            "invalid receipt version {} in {}",
+            receipt.receipt_version,
+            receipt_path.display()
+        );
+    }
     shipper_core::state::execution_state::validate_receipt_version(&receipt.receipt_version)
         .with_context(|| format!("invalid receipt version in {}", receipt_path.display()))?;
 
