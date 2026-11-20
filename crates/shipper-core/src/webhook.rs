@@ -136,6 +136,14 @@ impl WebhookClient {
 
 /// Send a webhook event if webhooks are configured.
 pub fn maybe_send_event(config: &WebhookConfig, event: WebhookEvent) {
+    maybe_send_event_with(config, event, shipper_webhook::send_webhook);
+}
+
+fn maybe_send_event_with(
+    config: &WebhookConfig,
+    event: WebhookEvent,
+    notify: impl FnOnce(&WebhookConfig, &shipper_webhook::WebhookPayload) -> Result<()> + Send + 'static,
+) {
     if config.url.trim().is_empty() {
         return;
     }
@@ -158,7 +166,7 @@ pub fn maybe_send_event(config: &WebhookConfig, event: WebhookEvent) {
             event,
         };
 
-        if let Err(e) = shipper_webhook::send_webhook(&client.config, &to_micro_payload(&payload)) {
+        if let Err(e) = notify(&client.config, &to_micro_payload(&payload)) {
             eprintln!("[warn] webhook delivery failed (non-blocking): {:#}", e);
         }
     });
@@ -448,6 +456,56 @@ mod tests {
     fn maybe_send_event_returns_early_on_whitespace_url() {
         let cfg = sample_config(" \t ");
         maybe_send_event(&cfg, succeeded_event());
+    }
+
+    #[test]
+    fn detached_completion_dispatch_reaches_fake_success() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        // Hold the fake until dispatch returns, without involving a real transport.
+        let deadline = Duration::from_secs(5);
+        let (observed, observation) = mpsc::channel();
+        let (allow_success, success_gate) = mpsc::channel();
+        let (acknowledge, acknowledgment) = mpsc::channel();
+
+        maybe_send_event_with(
+            &sample_config("fake notifier"),
+            completed_event(0),
+            move |_, payload| {
+                observed
+                    .send((payload.success, payload.extra["legacy"].clone()))
+                    .expect("fixture receives the completion payload");
+                success_gate
+                    .recv_timeout(deadline)
+                    .expect("dispatch returns while the notifier is pending");
+                acknowledge
+                    .send(())
+                    .expect("fixture receives the acknowledgment");
+                Ok(())
+            },
+        );
+
+        let (success, event) = observation
+            .recv_timeout(deadline)
+            .expect("fake notifier received the terminal event");
+        assert!(success);
+        assert_eq!(
+            event,
+            serde_json::json!({
+                "event": "publish_completed",
+                "plan_id": "plan-1",
+                "total_packages": 4,
+                "success_count": 4,
+                "failure_count": 0,
+                "skipped_count": 0,
+                "result": "success",
+            })
+        );
+        allow_success.send(()).expect("permit the fake to succeed");
+        acknowledgment
+            .recv_timeout(deadline)
+            .expect("fake notifier acknowledged success");
     }
 
     #[test]
