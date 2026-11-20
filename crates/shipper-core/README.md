@@ -32,11 +32,10 @@ envelopes belong to `shipper-cli`.
 
 ## Embedding shape
 
-```rust,no_run
-use shipper_core::plan::build_plan;
-
-// Build a plan, then use the engine entry points that match your workflow.
-```
+Run the [CLI-free consumer fixture](https://github.com/EffortlessMetrics/shipper-swarm/tree/main/fixtures/embedding)
+from the source checkout with `sh fixtures/embedding/check.sh`. It uses the
+facade's core re-exports to build a plan, run local preflight with a custom
+reporter, and read typed evidence. Its normal dependency graph excludes the CLI.
 
 The main public modules cover planning, engine execution, types, configuration,
 state, and storage. The `shipper` facade re-exports a curated subset for

@@ -71,6 +71,11 @@ The sibling crates own the implementation seams:
 Most library consumers should use `shipper-core` or the curated `shipper`
 re-exports. Direct `shipper-cli` use is for specialized command embedding.
 
+For a library-only dependency, set `default-features = false` on `shipper`.
+Run `sh fixtures/embedding/check.sh` from a source checkout to verify the
+[CLI-free consumer fixture](https://github.com/EffortlessMetrics/shipper-swarm/tree/main/fixtures/embedding)
+against the facade with that setting.
+
 ## Evidence contract
 
 ```text

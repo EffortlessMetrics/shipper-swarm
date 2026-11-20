@@ -1,0 +1,15 @@
+[package]
+name = "shipper-embedding-fixture"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+
+[dependencies]
+anyhow = "1"
+serde_json = "1"
+shipper = { path = "../../crates/shipper", default-features = false }
+tempfile = "3"
+tiny_http = "0.12"
+
+[workspace]
