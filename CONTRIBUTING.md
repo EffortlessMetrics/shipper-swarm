@@ -121,7 +121,9 @@ In **Settings > Codex Cloud > Environments**, create an environment for
 `EffortlessMetrics/shipper-swarm`, or select **Edit** for an existing one.
 Paste the Bash block below into **Install script**. Run it from the repository
 root on a GNU/Linux development image with Python 3.11+ and the build tools
-checked below.
+checked below. The image also needs the `libatomic` runtime (`libatomic1` on
+Debian/Ubuntu) to execute official Linux Node.js binaries starting with v25.
+See [Node.js binary requirements](https://github.com/nodejs/node/blob/v26.x/BUILDING.md#official-binary-platforms-and-toolchains).
 
 Rustup manages both the moving `stable` channel for general tools and the
 checkout's pinned toolchain for Shipper. For 0.5, `rust-toolchain.toml` pins
@@ -187,6 +189,7 @@ if [[ ! -x "$tools_dir/$folder/bin/node" || ! -x "$tools_dir/$folder/bin/npm" ]]
   fi
   mv -T "$scratch_dir/$folder" "$tools_dir/$folder"
 fi
+"$tools_dir/$folder/bin/node" --version
 ln -sfnT "$folder" "$tools_dir/node"
 
 fetch https://astral.sh/uv/install.sh "$scratch_dir/uv-install.sh"
@@ -239,6 +242,11 @@ export PATH="$HOME/.local/share/shipper-codex/node/bin:$HOME/.local/share/shippe
   rustup run "$pin" cargo metadata --format-version 1 --locked --offline >/dev/null
 )
 ```
+
+For later project commands in a shell with a Rust toolchain override, use
+`cargo +1.95.0` on the 0.5 checkout (use the checkout pin on other branches).
+For workflow edits, run the prepared linter offline from the repository root
+with `jactionlint --profile correctness --no-online --shellcheck=""`.
 
 ### Building
 
