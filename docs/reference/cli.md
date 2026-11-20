@@ -129,6 +129,9 @@ execution does not define another JSON result envelope.
 | `shipper completion <shell>` | Generate shell completion scripts | No |
 | `shipper ci <platform>` | Print a CI workflow template | No |
 
+`shipper config validate --quiet` omits the success message. Validation
+failures still exit nonzero and print diagnostics to stderr.
+
 `shipper rehearse` requires the rehearsal catalog entry to have a different
 name and a distinct normalized API/index authority from the live target. It
 also rejects `crates.io` and every `.crates.io` host regardless of URL path or
